@@ -1,3 +1,12 @@
+// =============================================================================
+// DORMANT — ExEx implementation preserved for extraction into arkiv-exex crate.
+//
+// This was the Ethereum (vanilla reth) ExEx. When revived as arkiv-exex it will
+// need to be updated for OpPrimitives and composed as a standalone crate that
+// can be plugged into any op-reth execution environment.
+// =============================================================================
+
+/*
 use alloy_consensus::{BlockHeader, EthereumReceipt, Transaction};
 use arkiv_genesis::ENTITY_REGISTRY_ADDRESS;
 use arkiv_store::{RegistryBlock, RegistryBlockRef, RegistryTransaction, Storage};
@@ -109,3 +118,4 @@ fn extract_block_refs(chain: &EthChain) -> Vec<RegistryBlockRef> {
     refs.reverse();
     refs
 }
+*/
