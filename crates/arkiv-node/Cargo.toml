@@ -1,0 +1,31 @@
+[package]
+name = "arkiv-node"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "arkiv-node"
+path = "src/main.rs"
+
+[dependencies]
+arkiv-bindings.workspace = true
+arkiv-genesis.workspace = true
+arkiv-store.workspace = true
+
+reth.workspace = true
+reth-node-ethereum.workspace = true
+reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth.git", tag = "v2.0.0" }
+reth-execution-types.workspace = true
+reth-exex.workspace = true
+reth-node-api.workspace = true
+
+alloy-primitives.workspace = true
+alloy-consensus = "1.8"
+
+eyre.workspace = true
+tokio.workspace = true
+futures.workspace = true
+futures-util.workspace = true
+tracing.workspace = true

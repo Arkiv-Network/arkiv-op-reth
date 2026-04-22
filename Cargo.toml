@@ -1,0 +1,56 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.93"
+license = "MIT"
+
+[workspace.dependencies]
+# Internal
+arkiv-bindings = { path = "../arkiv-contracts" }
+arkiv-genesis = { path = "crates/arkiv-genesis" }
+arkiv-store = { path = "crates/arkiv-store" }
+
+# Reth
+reth = { git = "https://github.com/paradigmxyz/reth.git", tag = "v2.0.0" }
+reth-exex = { git = "https://github.com/paradigmxyz/reth.git", tag = "v2.0.0" }
+reth-node-api = { git = "https://github.com/paradigmxyz/reth.git", tag = "v2.0.0" }
+reth-node-ethereum = { git = "https://github.com/paradigmxyz/reth.git", tag = "v2.0.0" }
+reth-tracing = { git = "https://github.com/paradigmxyz/reth.git", tag = "v2.0.0" }
+reth-execution-types = { git = "https://github.com/paradigmxyz/reth.git", tag = "v2.0.0" }
+reth-primitives = { git = "https://github.com/paradigmxyz/reth.git", tag = "v2.0.0" }
+reth-chainspec = { git = "https://github.com/paradigmxyz/reth.git", tag = "v2.0.0" }
+
+# Alloy (pinned to match reth v2.0.0)
+alloy-primitives = "1.5"
+alloy-sol-types = "1.5"
+alloy-provider = "1.8"
+alloy-signer = "1.8"
+alloy-signer-local = "1.8"
+alloy-network = "1.8"
+alloy-rpc-types = "1.8"
+alloy-consensus = { version = "1.8", features = ["serde"] }
+alloy-contract = "1.8"
+alloy-genesis = "1.8"
+
+# General
+eyre = "0.6"
+hex = "0.4"
+futures = "0.3"
+futures-util = "0.3"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
+
+[profile.dev]
+opt-level = 0
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 1
