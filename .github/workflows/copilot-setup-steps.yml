@@ -1,0 +1,29 @@
+name: Copilot Setup Steps
+on:
+  workflow_dispatch: # Required for the agent to trigger it
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 1. Install mold BEFORE compiling anything
+      - name: Install mold linker
+        uses: rui314/setup-mold@v1
+        # 'make-default: true' is the default setting, 
+        # meaning it automatically replaces the system linker.
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          # Changed the prefix key so it doesn't conflict 
+          # with your previous non-mold cache artifacts.
+          prefix-key: "copilot-agent-mold" 
+
+      - name: Pre-build dependencies
+        run: cargo build --locked
