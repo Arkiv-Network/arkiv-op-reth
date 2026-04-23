@@ -17,7 +17,17 @@ jobs:
         include:
           - binary: arkiv-node
             archive_name: arkiv-op-reth
+            build_args: --release
             bin_path: target/release
+            profile_dir: release
+            cache_key: release
+            search_root: .
+          - binary: arkiv-node
+            archive_name: arkiv-op-reth-lto
+            build_args: --profile release-lto
+            bin_path: target/release-lto
+            profile_dir: release-lto
+            cache_key: release-lto
             search_root: .
 
     steps:
@@ -36,9 +46,11 @@ jobs:
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "release-action-build-${{ matrix.cache_key }}"
 
       - name: Build binary
-        run: cargo build --release --bin "${{ matrix.binary }}"
+        run: cargo build ${{ matrix.build_args }} --bin "${{ matrix.binary }}"
 
       - name: Compress binary
         run: |
@@ -48,7 +60,7 @@ jobs:
             search_root="."
           fi
           if [ ! -d "$bin_dir" ]; then
-            bin_file=$(find "${{ github.workspace }}/${search_root}" -type f -path "*/target/release/${{ matrix.binary }}" | head -n 1)
+            bin_file=$(find "${{ github.workspace }}/${search_root}" -type f -path "*/target/${{ matrix.profile_dir }}/${{ matrix.binary }}" | head -n 1)
             if [ -z "$bin_file" ]; then
               echo "Could not find built binary: ${{ matrix.binary }}"
               exit 1
