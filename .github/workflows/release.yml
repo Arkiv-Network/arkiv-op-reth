@@ -48,6 +48,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "release-action-build-${{ matrix.cache_key }}"
+          save-if: false
 
       - name: Build binary
         run: cargo build ${{ matrix.build_args }} --bin "${{ matrix.binary }}"
