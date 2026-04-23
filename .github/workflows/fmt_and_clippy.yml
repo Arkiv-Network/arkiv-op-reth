@@ -11,6 +11,9 @@ on:
       - main
       - release/**
 
+permissions:
+  contents: read
+
 jobs:
   fmt_and_clippy:
     runs-on: ubuntu-latest
