@@ -1,2 +1,7 @@
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[target.x86_64-pc-windows-msvc.env]
+# Builds on Windows are eating up a lot of disk space, so we disable incremental compilation to save space.
+CARGO_INCREMENTAL = "0"
+

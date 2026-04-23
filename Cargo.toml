@@ -3,9 +3,16 @@ members = ["crates/arkiv-node"]
 resolver = "2"
 
 [workspace.package]
+name = "arkiv-op-reth"
+version = "0.1.0"
+authors = ["Arkiv Contributors <dev@arkiv.network>"]
 edition = "2024"
 rust-version = "1.95"
-license = "MIT"
+license = "GPL-3.0-or-later"
+description = "Workspace for Arkiv Op-Reth integration"
+repository = "https://github.com/Arkiv-Network/arkiv-op-reth"
+readme = "README.md"
+keywords = ["ethereum", "reth", "optimism", "arkiv"]
 
 [workspace.dependencies]
 # Op-Reth (from ethereum-optimism monorepo)
