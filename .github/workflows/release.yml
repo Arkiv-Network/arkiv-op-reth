@@ -16,6 +16,7 @@ jobs:
       matrix:
         include:
           - binary: arkiv-node
+            archive_name: arkiv-op-reth
             bin_path: target/release
             search_root: .
 
@@ -52,12 +53,12 @@ jobs:
             bin_dir="$(dirname "$bin_file")"
           fi
           cd "$bin_dir"
-          tar -cJf "${{ github.workspace }}/arkiv-${{ matrix.binary }}-${{ github.ref_name }}-linux-amd64.tar.xz" "${{ matrix.binary }}"
+          tar -cJf "${{ github.workspace }}/${{ matrix.archive_name }}-${{ github.ref_name }}-linux-amd64.tar.xz" "${{ matrix.binary }}"
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          files: arkiv-${{ matrix.binary }}-*.tar.xz
+          files: ${{ matrix.archive_name }}-*.tar.xz
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
