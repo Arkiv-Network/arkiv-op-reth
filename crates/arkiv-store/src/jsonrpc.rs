@@ -63,7 +63,7 @@ struct CreateOp {
     entity_hash: B256,
     payload: Bytes,
     content_type: String,
-    annotations: Vec<WireAnnotation>,
+    annotations: Vec<WireAttributes>,
 }
 
 #[derive(Serialize)]
@@ -74,7 +74,7 @@ struct UpdateOp {
     entity_hash: B256,
     payload: Bytes,
     content_type: String,
-    annotations: Vec<WireAnnotation>,
+    annotations: Vec<WireAttributes>,
 }
 
 #[derive(Serialize)]
@@ -112,7 +112,7 @@ struct ExpireOp {
 
 #[derive(Serialize)]
 #[serde(untagged)]
-enum WireAnnotation {
+enum WireAttributes {
     String { key: String, string_value: String },
     Numeric { key: String, numeric_value: u64 },
 }
@@ -171,7 +171,7 @@ fn to_wire_operation(op: &DecodedOperation) -> Option<WireOperation> {
     }
 }
 
-fn to_wire_annotations(entity: &arkiv_bindings::types::EntityRecord) -> Vec<WireAnnotation> {
+fn to_wire_annotations(entity: &arkiv_bindings::types::EntityRecord) -> Vec<WireAttributes> {
     entity
         .attributes
         .iter()
@@ -179,7 +179,7 @@ fn to_wire_annotations(entity: &arkiv_bindings::types::EntityRecord) -> Vec<Wire
             1 => {
                 let bytes: &[u8] = attr.raw_value[0].as_ref();
                 let val = u64::from_be_bytes(bytes[24..32].try_into().unwrap_or_default());
-                WireAnnotation::Numeric {
+                WireAttributes::Numeric {
                     key: attr.name.clone(),
                     numeric_value: val,
                 }
@@ -192,7 +192,7 @@ fn to_wire_annotations(entity: &arkiv_bindings::types::EntityRecord) -> Vec<Wire
                 if let Some(end) = buf.iter().position(|b| *b == 0) {
                     buf.truncate(end);
                 }
-                WireAnnotation::String {
+                WireAttributes::String {
                     key: attr.name.clone(),
                     string_value: String::from_utf8_lossy(&buf).to_string(),
                 }
