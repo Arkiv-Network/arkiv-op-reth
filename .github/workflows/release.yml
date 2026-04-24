@@ -44,6 +44,16 @@ jobs:
         with:
           toolchain: 1.95.0
 
+      - name: Get foundry cli
+        run: |
+          set -x
+          curl -sL https://github.com/foundry-rs/foundry/releases/download/v1.6.0-rc1/foundry_v1.6.0-rc1_linux_amd64.tar.gz | tar -xz
+          mv forge cast anvil chisel $HOME/bin/
+          forge --version
+          chisel --version
+          cast --version
+          anvil --version
+
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
