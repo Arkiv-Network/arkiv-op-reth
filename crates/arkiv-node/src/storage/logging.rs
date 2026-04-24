@@ -1,10 +1,10 @@
 //! Logging storage backend for development debugging.
 
+use crate::storage::{RegistryBlock, RegistryBlockRef, Storage};
 use alloy_consensus::{Transaction, TxReceipt};
 use alloy_primitives::{Address, B256};
 use arkiv_bindings::decode::decode_registry_transaction;
 use arkiv_bindings::types;
-use crate::storage::{RegistryBlock, RegistryBlockRef, Storage};
 use eyre::Result;
 
 pub struct LoggingStore {

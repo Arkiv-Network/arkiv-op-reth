@@ -1,9 +1,9 @@
 //! Arkiv ExEx — filters blocks for EntityRegistry transactions and
 //! forwards them to the configured Storage backend.
 
-use alloy_consensus::{BlockHeader, Transaction};
 use crate::genesis::ENTITY_REGISTRY_ADDRESS;
 use crate::storage::{RegistryBlock, RegistryBlockRef, RegistryTransaction, Storage};
+use alloy_consensus::{BlockHeader, Transaction};
 use eyre::Result;
 use futures_util::TryStreamExt;
 use reth_execution_types::Chain;
@@ -18,10 +18,7 @@ type OpChain = Chain<OpPrimitives>;
 ///
 /// Filters each block for transactions targeting the EntityRegistry,
 /// extracts the full transaction + receipt, and forwards to the Storage backend.
-pub async fn arkiv_exex<Node>(
-    mut ctx: ExExContext<Node>,
-    store: Arc<dyn Storage>,
-) -> Result<()>
+pub async fn arkiv_exex<Node>(mut ctx: ExExContext<Node>, store: Arc<dyn Storage>) -> Result<()>
 where
     Node: FullNodeComponents<Types: NodeTypes<Primitives = OpPrimitives>>,
 {

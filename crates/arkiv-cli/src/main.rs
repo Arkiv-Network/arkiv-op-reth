@@ -1,10 +1,10 @@
 use alloy_network::EthereumWallet;
-use alloy_primitives::{Address, Bytes, FixedBytes, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, FixedBytes, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types::eth::Log as RpcLog;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolEvent;
-use arkiv_bindings::{*, IEntityRegistry::EntityOperation};
+use arkiv_bindings::{IEntityRegistry::EntityOperation, *};
 use clap::{Parser, Subcommand};
 use eyre::Result;
 use rand::Rng;
@@ -20,7 +20,10 @@ struct Cli {
 
     /// Private key for signing transactions (hex, with or without 0x prefix).
     /// Defaults to the first test mnemonic account.
-    #[arg(long, default_value = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80")]
+    #[arg(
+        long,
+        default_value = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+    )]
     private_key: String,
 
     /// EntityRegistry contract address.
@@ -169,7 +172,11 @@ fn random_payload(size: usize) -> Bytes {
 }
 
 /// Convert a duration from now into an absolute block number.
-async fn expiry_block(provider: &impl Provider, duration: Duration, block_time: Duration) -> Result<u32> {
+async fn expiry_block(
+    provider: &impl Provider,
+    duration: Duration,
+    block_time: Duration,
+) -> Result<u32> {
     let current = provider.get_block_number().await?;
     let blocks = duration.as_secs() / block_time.as_secs().max(1);
     Ok((current + blocks) as u32)
@@ -183,7 +190,9 @@ fn build_operation(op_type: u8, key: B256) -> Operation {
     }
 }
 
-const OP_NAMES: [&str; 7] = ["UNKNOWN", "CREATE", "UPDATE", "EXTEND", "TRANSFER", "DELETE", "EXPIRE"];
+const OP_NAMES: [&str; 7] = [
+    "UNKNOWN", "CREATE", "UPDATE", "EXTEND", "TRANSFER", "DELETE", "EXPIRE",
+];
 
 fn op_name(op_type: u8) -> &'static str {
     OP_NAMES.get(op_type as usize).unwrap_or(&"UNKNOWN")
@@ -234,7 +243,13 @@ async fn main() -> Result<()> {
                 newOwner: Address::ZERO,
             };
 
-            let receipt = registry.execute(vec![op]).gas_price(cli.gas_price).send().await?.get_receipt().await?;
+            let receipt = registry
+                .execute(vec![op])
+                .gas_price(cli.gas_price)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
             println!("tx: {}", receipt.transaction_hash);
             print_events(receipt.inner.logs());
         }
@@ -253,7 +268,13 @@ async fn main() -> Result<()> {
                 ..Default::default()
             };
 
-            let receipt = registry.execute(vec![op]).gas_price(cli.gas_price).send().await?.get_receipt().await?;
+            let receipt = registry
+                .execute(vec![op])
+                .gas_price(cli.gas_price)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
             println!("tx: {}", receipt.transaction_hash);
             print_events(receipt.inner.logs());
         }
@@ -263,7 +284,13 @@ async fn main() -> Result<()> {
             let mut op = build_operation(OP_EXTEND, key);
             op.expiresAt = expires_at;
 
-            let receipt = registry.execute(vec![op]).gas_price(cli.gas_price).send().await?.get_receipt().await?;
+            let receipt = registry
+                .execute(vec![op])
+                .gas_price(cli.gas_price)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
             println!("tx: {}", receipt.transaction_hash);
             print_events(receipt.inner.logs());
         }
@@ -272,7 +299,13 @@ async fn main() -> Result<()> {
             let mut op = build_operation(OP_TRANSFER, key);
             op.newOwner = new_owner;
 
-            let receipt = registry.execute(vec![op]).gas_price(cli.gas_price).send().await?.get_receipt().await?;
+            let receipt = registry
+                .execute(vec![op])
+                .gas_price(cli.gas_price)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
             println!("tx: {}", receipt.transaction_hash);
             print_events(receipt.inner.logs());
         }
@@ -280,7 +313,13 @@ async fn main() -> Result<()> {
         Command::Delete { key } => {
             let op = build_operation(OP_DELETE, key);
 
-            let receipt = registry.execute(vec![op]).gas_price(cli.gas_price).send().await?.get_receipt().await?;
+            let receipt = registry
+                .execute(vec![op])
+                .gas_price(cli.gas_price)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
             println!("tx: {}", receipt.transaction_hash);
             print_events(receipt.inner.logs());
         }
@@ -288,7 +327,13 @@ async fn main() -> Result<()> {
         Command::Expire { key } => {
             let op = build_operation(OP_EXPIRE, key);
 
-            let receipt = registry.execute(vec![op]).gas_price(cli.gas_price).send().await?.get_receipt().await?;
+            let receipt = registry
+                .execute(vec![op])
+                .gas_price(cli.gas_price)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
             println!("tx: {}", receipt.transaction_hash);
             print_events(receipt.inner.logs());
         }
@@ -350,7 +395,10 @@ async fn main() -> Result<()> {
                         if op_count_total >= max_ops {
                             break 'outer;
                         }
-                        let hash = registry.changeSetHashAtOp(*block_num, tx_seq, op_seq).call().await?;
+                        let hash = registry
+                            .changeSetHashAtOp(*block_num, tx_seq, op_seq)
+                            .call()
+                            .await?;
                         println!("    op {} -> {}", op_seq, hash);
                         op_count_total += 1;
                     }
@@ -358,7 +406,11 @@ async fn main() -> Result<()> {
             }
         }
 
-        Command::Spam { count, size, expires_in } => {
+        Command::Spam {
+            count,
+            size,
+            expires_in,
+        } => {
             let expires_at = expiry_block(&provider, expires_in, cli.block_time).await?;
             let nonce_start = provider.get_transaction_count(signer_address).await?;
 
@@ -377,7 +429,13 @@ async fn main() -> Result<()> {
                         newOwner: Address::ZERO,
                     };
 
-                    match registry.execute(vec![op]).nonce(nonce).gas_price(cli.gas_price).send().await {
+                    match registry
+                        .execute(vec![op])
+                        .nonce(nonce)
+                        .gas_price(cli.gas_price)
+                        .send()
+                        .await
+                    {
                         Ok(p) => {
                             pending.push(p);
                             eprint!("\rsent {}/{}", i + 1, count);
