@@ -1,10 +1,10 @@
 use alloy_network::EthereumWallet;
 use alloy_primitives::{Address, Bytes, FixedBytes, B256, U256};
 use alloy_provider::{Provider, ProviderBuilder};
-use alloy_rpc_types::Log as RpcLog;
+use alloy_rpc_types::eth::Log as RpcLog;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolEvent;
-use arkiv_bindings::*;
+use arkiv_bindings::{*, IEntityRegistry::EntityOperation};
 use clap::{Parser, Subcommand};
 use eyre::Result;
 use rand::Rng;
