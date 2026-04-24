@@ -19,12 +19,19 @@ keywords = ["ethereum", "reth", "optimism", "arkiv"]
 reth-optimism-node = { git = "https://github.com/ethereum-optimism/optimism.git", branch = "develop" }
 reth-optimism-cli = { git = "https://github.com/ethereum-optimism/optimism.git", branch = "develop" }
 reth-optimism-chainspec = { git = "https://github.com/ethereum-optimism/optimism.git", branch = "develop" }
+reth-optimism-primitives = { git = "https://github.com/ethereum-optimism/optimism.git", branch = "develop" }
+
+# Reth (pinned to same rev as op-reth)
+reth-exex = { git = "https://github.com/paradigmxyz/reth", rev = "552d896f9c4b75201def55969d3c23bcc990dd80" }
+reth-node-api = { git = "https://github.com/paradigmxyz/reth", rev = "552d896f9c4b75201def55969d3c23bcc990dd80" }
+reth-execution-types = { git = "https://github.com/paradigmxyz/reth", rev = "552d896f9c4b75201def55969d3c23bcc990dd80" }
 
 # Arkiv bindings (from arkiv-contracts repo)
 arkiv-bindings = { git = "https://github.com/Arkiv-Network/arkiv-contracts.git", rev = "b220baf" }
 
 # Alloy
 alloy-primitives = "1.5"
+alloy-consensus = "2.0"
 alloy-genesis = "2.0"
 alloy-sol-types = "1.5"
 alloy-provider = "2.0"
@@ -39,6 +46,8 @@ revm = { version = "36.0.0", default-features = false, features = ["std"] }
 # Util
 clap = { version = "4", features = ["derive"] }
 eyre = "0.6"
+futures-util = "0.3"
+tracing = "0.1"
 hex = "0.4"
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

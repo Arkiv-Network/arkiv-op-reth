@@ -1370,17 +1370,24 @@ dependencies = [
 name = "arkiv-node"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-genesis",
  "alloy-primitives",
  "arkiv-bindings",
  "eyre",
+ "futures-util",
  "hex",
+ "reth-execution-types",
+ "reth-exex",
+ "reth-node-api",
  "reth-optimism-chainspec",
  "reth-optimism-cli",
  "reth-optimism-node",
+ "reth-optimism-primitives",
  "revm",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

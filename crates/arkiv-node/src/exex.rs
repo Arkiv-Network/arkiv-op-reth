@@ -1,53 +1,46 @@
-// =============================================================================
-// DORMANT — ExEx implementation preserved for extraction into arkiv-exex crate.
-//
-// This was the Ethereum (vanilla reth) ExEx. When revived as arkiv-exex it will
-// need to be updated for OpPrimitives and composed as a standalone crate that
-// can be plugged into any op-reth execution environment.
-// =============================================================================
+//! Arkiv ExEx — filters blocks for EntityRegistry transactions and
+//! forwards them to the configured Storage backend.
 
-/*
-use alloy_consensus::{BlockHeader, EthereumReceipt, Transaction};
-use arkiv_genesis::ENTITY_REGISTRY_ADDRESS;
-use arkiv_store::{RegistryBlock, RegistryBlockRef, RegistryTransaction, Storage};
+use alloy_consensus::{BlockHeader, Transaction};
+use crate::genesis::ENTITY_REGISTRY_ADDRESS;
+use crate::storage::{RegistryBlock, RegistryBlockRef, RegistryTransaction, Storage};
 use eyre::Result;
 use futures_util::TryStreamExt;
-use reth::builder::NodeTypes;
-use reth::primitives::EthPrimitives;
-use reth_ethereum_primitives::{Block, Receipt};
-use reth_exex::{ExExContext, ExExEvent, ExExNotification};
 use reth_execution_types::Chain;
-use reth_node_api::FullNodeComponents;
-use reth::primitives::RecoveredBlock;
+use reth_exex::{ExExContext, ExExEvent, ExExNotification};
+use reth_node_api::{FullNodeComponents, NodeTypes};
+use reth_optimism_primitives::OpPrimitives;
 use std::sync::Arc;
-use tracing::info;
 
-type EthChain = Chain<EthPrimitives>;
+type OpChain = Chain<OpPrimitives>;
 
 /// Run the Arkiv ExEx.
 ///
 /// Filters each block for transactions targeting the EntityRegistry,
 /// extracts the full transaction + receipt, and forwards to the Storage backend.
-pub async fn arkiv_exex<
-    Node: FullNodeComponents<Types: NodeTypes<Primitives = EthPrimitives>>,
->(
+pub async fn arkiv_exex<Node>(
     mut ctx: ExExContext<Node>,
     store: Arc<dyn Storage>,
-) -> Result<()> {
-    info!("arkiv-exex starting");
+) -> Result<()>
+where
+    Node: FullNodeComponents<Types: NodeTypes<Primitives = OpPrimitives>>,
+{
+    tracing::info!("arkiv-exex starting");
 
     while let Some(notification) = ctx.notifications.try_next().await? {
         match &notification {
             ExExNotification::ChainCommitted { new } => {
                 let blocks = extract_blocks(new);
                 store.handle_commit(&blocks)?;
-                ctx.events.send(ExExEvent::FinishedHeight(new.tip().num_hash()))?;
+                ctx.events
+                    .send(ExExEvent::FinishedHeight(new.tip().num_hash()))?;
             }
             ExExNotification::ChainReorged { old, new } => {
                 let rev_refs = extract_block_refs(old);
                 let new_blocks = extract_blocks(new);
                 store.handle_reorg(&rev_refs, &new_blocks)?;
-                ctx.events.send(ExExEvent::FinishedHeight(new.tip().num_hash()))?;
+                ctx.events
+                    .send(ExExEvent::FinishedHeight(new.tip().num_hash()))?;
             }
             ExExNotification::ChainReverted { old } => {
                 let rev_refs = extract_block_refs(old);
@@ -56,17 +49,27 @@ pub async fn arkiv_exex<
         }
     }
 
-    info!("arkiv-exex exiting");
+    tracing::info!("arkiv-exex exiting");
     Ok(())
 }
 
 /// Extract RegistryBlocks from a committed chain.
-/// Includes all blocks — even those with no registry transactions.
-fn extract_blocks(chain: &EthChain) -> Vec<RegistryBlock> {
+fn extract_blocks(chain: &Arc<OpChain>) -> Vec<RegistryBlock> {
     let mut blocks = Vec::new();
 
     for (block, receipts) in chain.blocks_and_receipts() {
-        let transactions = extract_registry_txs(block, receipts);
+        let mut transactions = Vec::new();
+
+        for (tx, receipt) in block.body().transactions().zip(receipts.iter()) {
+            if tx.to() != Some(ENTITY_REGISTRY_ADDRESS) {
+                continue;
+            }
+
+            transactions.push(RegistryTransaction {
+                transaction: tx.clone(),
+                receipt: receipt.clone(),
+            });
+        }
 
         blocks.push(RegistryBlock {
             number: block.header().number(),
@@ -79,37 +82,11 @@ fn extract_blocks(chain: &EthChain) -> Vec<RegistryBlock> {
     blocks
 }
 
-/// Filter and extract registry transactions from a single block.
-fn extract_registry_txs(
-    block: &RecoveredBlock<Block>,
-    receipts: &[Receipt],
-) -> Vec<RegistryTransaction> {
-    let mut transactions = Vec::new();
-
-    for (tx, receipt) in block.body().transactions.iter().zip(receipts.iter()) {
-        if tx.to() != Some(ENTITY_REGISTRY_ADDRESS) {
-            continue;
-        }
-
-        transactions.push(RegistryTransaction {
-            transaction: tx.clone(),
-            receipt: EthereumReceipt {
-                tx_type: receipt.tx_type as u8,
-                success: receipt.success,
-                cumulative_gas_used: receipt.cumulative_gas_used,
-                logs: receipt.logs.clone(),
-            },
-        });
-    }
-
-    transactions
-}
-
 /// Extract block refs from a reverted chain (newest-first for revert ordering).
-fn extract_block_refs(chain: &EthChain) -> Vec<RegistryBlockRef> {
+fn extract_block_refs(chain: &Arc<OpChain>) -> Vec<RegistryBlockRef> {
     let mut refs: Vec<RegistryBlockRef> = chain
         .blocks_iter()
-        .map(|b: &RecoveredBlock<Block>| RegistryBlockRef {
+        .map(|b| RegistryBlockRef {
             number: b.header().number(),
             hash: b.header().hash_slow(),
         })
@@ -118,4 +95,3 @@ fn extract_block_refs(chain: &EthChain) -> Vec<RegistryBlockRef> {
     refs.reverse();
     refs
 }
-*/

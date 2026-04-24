@@ -1,7 +1,10 @@
+mod exex;
 mod genesis;
+mod storage;
 
 use reth_optimism_cli::Cli;
 use reth_optimism_node::OpNode;
+use std::sync::Arc;
 
 fn main() -> eyre::Result<()> {
     Cli::parse_args().run(|mut builder, rollup_args| async move {
@@ -15,11 +18,6 @@ fn main() -> eyre::Result<()> {
                 .alloc
                 .extend(genesis::genesis_alloc(chain_id)?);
 
-            // Ensure OP hardfork activation timestamps exist in the genesis
-            // config extra fields. OpChainSpec::from(Genesis) reads these to
-            // build the hardfork schedule. The dev chain spec sets hardforks
-            // programmatically but may not populate extra_fields, so we
-            // default them to 0 (active at genesis) when absent.
             let extra = &mut chain_genesis.config.extra_fields;
             let zero = serde_json::Value::Number(0.into());
             for key in [
@@ -50,10 +48,19 @@ fn main() -> eyre::Result<()> {
                 std::sync::Arc::new(reth_optimism_chainspec::OpChainSpec::from(chain_genesis));
         }
 
+        let store: Arc<dyn storage::Storage> = Arc::new(
+            storage::logging::LoggingStore::new(genesis::ENTITY_REGISTRY_ADDRESS),
+        );
+
         let handle = builder
             .node(OpNode::new(rollup_args))
+            .install_exex("arkiv", {
+                let store = Arc::clone(&store);
+                move |ctx| async move { Ok(exex::arkiv_exex(ctx, store)) }
+            })
             .launch_with_debug_capabilities()
             .await?;
+
         handle.wait_for_node_exit().await
     })
 }

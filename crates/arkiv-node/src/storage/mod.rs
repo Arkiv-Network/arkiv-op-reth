@@ -1,17 +1,13 @@
-pub mod jsonrpc;
 pub mod logging;
 
-use alloy_consensus::{EthereumReceipt, EthereumTxEnvelope, TxEip4844};
-use alloy_primitives::{Log, B256};
+use alloy_primitives::B256;
 use eyre::Result;
-
-/// Reth's concrete signed transaction type.
-pub type TransactionSigned = EthereumTxEnvelope<TxEip4844>;
+use reth_optimism_primitives::{OpReceipt, OpTransactionSigned};
 
 /// A transaction targeting the EntityRegistry with its receipt.
 pub struct RegistryTransaction {
-    pub transaction: TransactionSigned,
-    pub receipt: EthereumReceipt<u8, Log>,
+    pub transaction: OpTransactionSigned,
+    pub receipt: OpReceipt,
 }
 
 /// A block forwarded by the ExEx. Contains only EntityRegistry transactions.
@@ -31,12 +27,9 @@ pub struct RegistryBlockRef {
 /// Storage backend for the Arkiv ExEx.
 ///
 /// The three methods map to the three ExEx notification variants:
-/// - `handle_commit` ← ChainCommitted
-/// - `handle_revert` ← ChainReverted
-/// - `handle_reorg`  ← ChainReorged
-///
-/// The ExEx passes raw Ethereum primitives. Each implementation
-/// decides how much decoding/processing to do.
+/// - `handle_commit` <- ChainCommitted
+/// - `handle_revert` <- ChainReverted
+/// - `handle_reorg`  <- ChainReorged
 pub trait Storage: Send + Sync + 'static {
     /// Process committed blocks (oldest-first).
     fn handle_commit(&self, blocks: &[RegistryBlock]) -> Result<()>;
