@@ -31,6 +31,10 @@ struct Cli {
     #[arg(long, default_value = "2s", value_parser = humantime::parse_duration)]
     block_time: Duration,
 
+    /// Gas price in wei. OP dev nodes require an explicit gas price.
+    #[arg(long, default_value = "1000000000")]
+    gas_price: u128,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -230,7 +234,7 @@ async fn main() -> Result<()> {
                 newOwner: Address::ZERO,
             };
 
-            let receipt = registry.execute(vec![op]).send().await?.get_receipt().await?;
+            let receipt = registry.execute(vec![op]).gas_price(cli.gas_price).send().await?.get_receipt().await?;
             println!("tx: {}", receipt.transaction_hash);
             print_events(receipt.inner.logs());
         }
@@ -249,7 +253,7 @@ async fn main() -> Result<()> {
                 ..Default::default()
             };
 
-            let receipt = registry.execute(vec![op]).send().await?.get_receipt().await?;
+            let receipt = registry.execute(vec![op]).gas_price(cli.gas_price).send().await?.get_receipt().await?;
             println!("tx: {}", receipt.transaction_hash);
             print_events(receipt.inner.logs());
         }
@@ -259,7 +263,7 @@ async fn main() -> Result<()> {
             let mut op = build_operation(OP_EXTEND, key);
             op.expiresAt = expires_at;
 
-            let receipt = registry.execute(vec![op]).send().await?.get_receipt().await?;
+            let receipt = registry.execute(vec![op]).gas_price(cli.gas_price).send().await?.get_receipt().await?;
             println!("tx: {}", receipt.transaction_hash);
             print_events(receipt.inner.logs());
         }
@@ -268,7 +272,7 @@ async fn main() -> Result<()> {
             let mut op = build_operation(OP_TRANSFER, key);
             op.newOwner = new_owner;
 
-            let receipt = registry.execute(vec![op]).send().await?.get_receipt().await?;
+            let receipt = registry.execute(vec![op]).gas_price(cli.gas_price).send().await?.get_receipt().await?;
             println!("tx: {}", receipt.transaction_hash);
             print_events(receipt.inner.logs());
         }
@@ -276,7 +280,7 @@ async fn main() -> Result<()> {
         Command::Delete { key } => {
             let op = build_operation(OP_DELETE, key);
 
-            let receipt = registry.execute(vec![op]).send().await?.get_receipt().await?;
+            let receipt = registry.execute(vec![op]).gas_price(cli.gas_price).send().await?.get_receipt().await?;
             println!("tx: {}", receipt.transaction_hash);
             print_events(receipt.inner.logs());
         }
@@ -284,7 +288,7 @@ async fn main() -> Result<()> {
         Command::Expire { key } => {
             let op = build_operation(OP_EXPIRE, key);
 
-            let receipt = registry.execute(vec![op]).send().await?.get_receipt().await?;
+            let receipt = registry.execute(vec![op]).gas_price(cli.gas_price).send().await?.get_receipt().await?;
             println!("tx: {}", receipt.transaction_hash);
             print_events(receipt.inner.logs());
         }
@@ -373,7 +377,7 @@ async fn main() -> Result<()> {
                         newOwner: Address::ZERO,
                     };
 
-                    match registry.execute(vec![op]).nonce(nonce).send().await {
+                    match registry.execute(vec![op]).nonce(nonce).gas_price(cli.gas_price).send().await {
                         Ok(p) => {
                             pending.push(p);
                             eprint!("\rsent {}/{}", i + 1, count);
