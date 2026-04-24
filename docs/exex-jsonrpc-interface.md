@@ -95,7 +95,7 @@ pub struct CreateOp {
     pub content_type: String,
     pub expires_at: u64,
     pub owner: Address,
-    pub annotations: Vec<Annotation>,
+    pub annotations: Vec<Attributes>,
 }
 
 #[derive(Serialize)]
@@ -104,7 +104,7 @@ pub struct UpdateOp {
     pub entity_address: Address,
     pub payload: Bytes,
     pub content_type: String,
-    pub annotations: Vec<Annotation>,
+    pub annotations: Vec<Attributes>,
 }
 
 #[derive(Serialize)]
@@ -135,7 +135,7 @@ pub struct ExpireOp {
 
 #[derive(Serialize)]
 #[serde(untagged)]
-pub enum Annotation {
+pub enum Attributes {
     String { key: String, string_value: String },
     Numeric { key: String, numeric_value: u64 },
 }
@@ -371,11 +371,11 @@ The ExEx builds `ArkivBlock`s by:
 
 ---
 
-## Annotation Encoding
+## Attributes Encoding
 
-Annotations in the JSON-RPC payload use the `Annotation` enum. The ExEx maps from the contract's `Attribute` type:
+Attributess in the JSON-RPC payload use the `Attributes` enum. The ExEx maps from the contract's `Attribute` type:
 
-| Contract Attribute | `valueType` | JSON Annotation |
+| Contract Attribute | `valueType` | JSON Attributes |
 |---|---|---|
 | `name="status", valueType=2 (STRING), value=[bytes32[4]]` | STRING | `{ "key": "status", "stringValue": "approved" }` |
 | `name="priority", valueType=1 (UINT), value=[bytes32[4]]` | UINT | `{ "key": "priority", "numericValue": 5 }` |
