@@ -1337,7 +1337,7 @@ dependencies = [
 [[package]]
 name = "arkiv-bindings"
 version = "0.1.0"
-source = "git+https://github.com/Arkiv-Network/arkiv-contracts.git?rev=b220baf#b220baf0ddec5227d3eae95d5e1b433685605964"
+source = "git+https://github.com/Arkiv-Network/arkiv-contracts.git?rev=344640e#344640e5e2b06f510d550113b054b6347a9c93a1"
 dependencies = [
  "alloy-contract",
  "alloy-primitives",
@@ -1373,6 +1373,7 @@ dependencies = [
  "alloy-consensus",
  "alloy-genesis",
  "alloy-primitives",
+ "alloy-sol-types",
  "arkiv-bindings",
  "eyre",
  "futures-util",
@@ -1385,6 +1386,7 @@ dependencies = [
  "reth-optimism-node",
  "reth-optimism-primitives",
  "revm",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
