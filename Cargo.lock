@@ -1570,7 +1570,7 @@ dependencies = [
 [[package]]
 name = "arkiv-bindings"
 version = "0.1.0"
-source = "git+ssh://git@github.com/Arkiv-Network/arkiv-contracts.git?rev=1702ec4#1702ec4b4a553d1eb9c47464a8c3660dc492675e"
+source = "git+https://github.com/Arkiv-Network/arkiv-contracts.git?rev=1702ec4#1702ec4b4a553d1eb9c47464a8c3660dc492675e"
 dependencies = [
  "alloy-contract",
  "alloy-primitives",
