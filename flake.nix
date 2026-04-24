@@ -35,6 +35,7 @@
             foundry
             solc
             python3
+            nodejs
             vscode-solidity-server
             just
 

@@ -1,3 +1,4 @@
+pub mod jsonrpc;
 pub mod logging;
 
 use alloy_primitives::{Address, Bytes, B256};
