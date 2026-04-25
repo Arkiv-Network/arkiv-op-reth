@@ -1,8 +1,6 @@
 //! RocksDB-backed Arkiv entity storage and query implementation.
 
-use crate::storage::{
-    Annotation, ArkivBlock, ArkivBlockRef, ArkivOperation, CreateOp, Storage, UpdateOp,
-};
+use crate::storage::{Annotation, ArkivBlock, ArkivBlockRef, ArkivOperation, CreateOp, Storage};
 use alloy_primitives::{Address, B256, Bytes};
 use eyre::{Context, Result, bail};
 use rocksdb::{DB, Options};
@@ -126,7 +124,10 @@ impl RockDbStore {
             for op in &tx.operations {
                 let key = op.entity_key();
                 let previous = self.get_entity(key)?;
-                undo.push(Undo { key, previous });
+                undo.push(Undo {
+                    key,
+                    previous: previous.clone(),
+                });
 
                 match op {
                     ArkivOperation::Create(create) => {
@@ -138,17 +139,22 @@ impl RockDbStore {
                         ))?;
                     }
                     ArkivOperation::Update(update) => {
-                        let mut entity = self.get_entity(update.entity_key)?.unwrap_or_else(|| {
-                            entity_from_update(update, tx.sender, block.header.number, tx.index)
-                        });
-                        entity.payload = update.payload.clone();
-                        entity.content_type = update.content_type.clone();
-                        entity.owner = update.owner;
-                        entity.last_modified_at_block = block.header.number;
-                        entity.transaction_index_in_block = tx.index;
-                        entity.operation_index_in_transaction = update.op_index;
-                        entity.attributes = attributes_from_annotations(&update.annotations);
-                        self.put_entity(&entity)?;
+                        if let Some(mut entity) = previous {
+                            entity.payload = update.payload.clone();
+                            entity.content_type = update.content_type.clone();
+                            entity.owner = update.owner;
+                            entity.last_modified_at_block = block.header.number;
+                            entity.transaction_index_in_block = tx.index;
+                            entity.operation_index_in_transaction = update.op_index;
+                            entity.attributes = attributes_from_annotations(&update.annotations);
+                            self.put_entity(&entity)?;
+                        } else {
+                            tracing::warn!(
+                                entity_key = %update.entity_key,
+                                block = block.header.number,
+                                "skipping update for missing entity"
+                            );
+                        }
                     }
                     ArkivOperation::Extend(extend) => {
                         if let Some(mut entity) = self.get_entity(extend.entity_key)? {
@@ -212,9 +218,9 @@ impl RockDbStore {
     fn all_entities(&self) -> Result<Vec<EntityState>> {
         let mut entities = Vec::new();
         for item in self.db.prefix_iterator(ENTITY_PREFIX) {
-            let (_, value) = item?;
-            if !value.starts_with(b"{") {
-                continue;
+            let (key, value) = item?;
+            if !key.starts_with(ENTITY_PREFIX) {
+                break;
             }
             entities.push(serde_json::from_slice(&value)?);
         }
@@ -468,27 +474,6 @@ fn entity_from_create(
     }
 }
 
-fn entity_from_update(
-    op: &UpdateOp,
-    sender: Address,
-    block_number: u64,
-    transaction_index: u32,
-) -> EntityState {
-    EntityState {
-        key: op.entity_key,
-        payload: op.payload.clone(),
-        content_type: op.content_type.clone(),
-        expires_at: 0,
-        owner: op.owner,
-        creator: sender,
-        created_at_block: block_number,
-        last_modified_at_block: block_number,
-        transaction_index_in_block: transaction_index,
-        operation_index_in_transaction: op.op_index,
-        attributes: attributes_from_annotations(&op.annotations),
-    }
-}
-
 fn attributes_from_annotations(annotations: &[Annotation]) -> Vec<Attribute> {
     annotations
         .iter()
@@ -591,9 +576,11 @@ impl Predicate {
     fn eval(&self, entity: &EntityState) -> bool {
         match self {
             Predicate::True => true,
-            Predicate::Compare { key, op, value } if key == "$owner" => {
-                compare_strings(&entity.owner.to_string(), *op, &value_string(value))
-            }
+            Predicate::Compare { key, op, value } if key == "$owner" => compare_strings(
+                &entity.owner.to_string().to_ascii_lowercase(),
+                *op,
+                &value_string(value).to_ascii_lowercase(),
+            ),
             Predicate::Compare { key, op, value } => entity
                 .attribute(key)
                 .is_some_and(|attr| compare_values(attr, *op, value)),
@@ -643,6 +630,7 @@ enum Token {
     Ident(String),
     String(String),
     Number(u64),
+    Invalid(String),
     LParen,
     RParen,
     And,
@@ -729,6 +717,7 @@ impl Parser {
                     Some(Token::String(value)) => AttributeValue::String(value),
                     Some(Token::Number(value)) => AttributeValue::Numeric(value),
                     Some(Token::Ident(value)) => AttributeValue::String(value),
+                    Some(Token::Invalid(value)) => bail!("invalid numeric literal {value}"),
                     _ => bail!("expected comparison value for {key}"),
                 };
                 Ok(Predicate::Compare { key, op, value })
@@ -817,10 +806,12 @@ fn tokenize(input: &str) -> Vec<Token> {
                         break;
                     }
                 }
-                if let Ok(number) = value.parse() {
+                if value.starts_with("0x") {
+                    tokens.push(Token::Ident(value));
+                } else if let Ok(number) = value.parse() {
                     tokens.push(Token::Number(number));
                 } else {
-                    tokens.push(Token::Ident(value));
+                    tokens.push(Token::Invalid(value));
                 }
             }
             c => {
