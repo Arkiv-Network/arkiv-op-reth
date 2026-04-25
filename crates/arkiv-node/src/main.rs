@@ -52,7 +52,7 @@ fn main() -> eyre::Result<()> {
 
         let (store, query_store): (
             Arc<dyn storage::Storage>,
-            Option<Arc<storage::rocks::RockDbStore>>,
+            Option<Arc<storage::rocks::RocksDbStore>>,
         ) = if let Ok(url) = std::env::var("ARKIV_ENTITYDB_URL") {
             tracing::info!(url = %url, "using JsonRpcStore backend");
             (Arc::new(storage::jsonrpc::JsonRpcStore::new(url)), None)
@@ -67,8 +67,8 @@ fn main() -> eyre::Result<()> {
         } else {
             let path =
                 std::env::var("ARKIV_ROCKSDB_PATH").unwrap_or_else(|_| "arkiv-rocksdb".to_string());
-            tracing::info!(path = %path, "using RockDbStore backend");
-            let rocks = Arc::new(storage::rocks::RockDbStore::open(path)?);
+            tracing::info!(path = %path, "using RocksDbStore backend");
+            let rocks = Arc::new(storage::rocks::RocksDbStore::open(path)?);
             (rocks.clone(), Some(rocks))
         };
 

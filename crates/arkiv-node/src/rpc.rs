@@ -1,4 +1,4 @@
-use crate::storage::rocks::{QueryOptions, QueryResponse, RockDbStore};
+use crate::storage::rocks::{QueryOptions, QueryResponse, RocksDbStore};
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
@@ -14,11 +14,11 @@ pub trait ArkivApi {
 }
 
 pub struct ArkivRpc {
-    store: Arc<RockDbStore>,
+    store: Arc<RocksDbStore>,
 }
 
 impl ArkivRpc {
-    pub fn new(store: Arc<RockDbStore>) -> Self {
+    pub fn new(store: Arc<RocksDbStore>) -> Self {
         Self { store }
     }
 }

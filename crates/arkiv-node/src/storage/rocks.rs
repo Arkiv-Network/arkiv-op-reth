@@ -47,11 +47,11 @@ struct Undo {
     previous: Option<EntityState>,
 }
 
-pub struct RockDbStore {
+pub struct RocksDbStore {
     db: DB,
 }
 
-impl RockDbStore {
+impl RocksDbStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
@@ -163,6 +163,12 @@ impl RockDbStore {
                             entity.transaction_index_in_block = tx.index;
                             entity.operation_index_in_transaction = extend.op_index;
                             self.put_entity(&entity)?;
+                        } else {
+                            tracing::warn!(
+                                entity_key = %extend.entity_key,
+                                block = block.header.number,
+                                "skipping extend for missing entity"
+                            );
                         }
                     }
                     ArkivOperation::ChangeOwner(change) => {
@@ -172,6 +178,12 @@ impl RockDbStore {
                             entity.transaction_index_in_block = tx.index;
                             entity.operation_index_in_transaction = change.op_index;
                             self.put_entity(&entity)?;
+                        } else {
+                            tracing::warn!(
+                                entity_key = %change.entity_key,
+                                block = block.header.number,
+                                "skipping owner change for missing entity"
+                            );
                         }
                     }
                     ArkivOperation::Delete(delete) => self.delete_entity(delete.entity_key)?,
@@ -246,7 +258,7 @@ impl RockDbStore {
     }
 }
 
-impl Storage for RockDbStore {
+impl Storage for RocksDbStore {
     fn handle_commit(&self, blocks: &[ArkivBlock]) -> Result<Option<B256>> {
         for block in blocks {
             self.apply_block(block)?;
@@ -798,6 +810,20 @@ fn tokenize(input: &str) -> Vec<Token> {
             }
             c if c.is_ascii_digit() => {
                 let mut value = c.to_string();
+                if c == '0' && chars.peek() == Some(&'x') {
+                    value.push('x');
+                    chars.next();
+                    while let Some(next) = chars.peek().copied() {
+                        if next.is_ascii_hexdigit() {
+                            value.push(next);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    tokens.push(Token::Ident(value));
+                    continue;
+                }
                 while let Some(next) = chars.peek().copied() {
                     if next.is_ascii_alphanumeric() {
                         value.push(next);
@@ -806,9 +832,7 @@ fn tokenize(input: &str) -> Vec<Token> {
                         break;
                     }
                 }
-                if value.starts_with("0x") {
-                    tokens.push(Token::Ident(value));
-                } else if let Ok(number) = value.parse() {
+                if let Ok(number) = value.parse() {
                     tokens.push(Token::Number(number));
                 } else {
                     tokens.push(Token::Invalid(value));
@@ -895,7 +919,7 @@ mod tests {
 
     #[test]
     fn stores_queries_and_projects_entities() -> Result<()> {
-        let store = RockDbStore::temporary()?;
+        let store = RocksDbStore::temporary()?;
         store.handle_commit(&[block(
             1,
             vec![
@@ -954,7 +978,7 @@ mod tests {
 
     #[test]
     fn applies_updates_transfers_deletes_and_reverts() -> Result<()> {
-        let store = RockDbStore::temporary()?;
+        let store = RocksDbStore::temporary()?;
         store.handle_commit(&[block(1, vec![create(1, addr(1), Vec::new())])])?;
         store.handle_commit(&[block(
             2,
