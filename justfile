@@ -98,6 +98,10 @@ balance *args='':
 spam *args='':
     cargo run -p arkiv-cli -- spam {{ args }}
 
+# Create a sample entity with attributes using the auto-deployed EntityRegistry
+sample-entity *args='':
+    forge script script/CreateSampleEntity.s.sol:CreateSampleEntity --rpc-url {{ rpc }} --broadcast {{ args }}
+
 # ── EntityDB Mock ────────────────────────────────────────────
 
 # Run mock EntityDB that logs incoming JSON-RPC requests
