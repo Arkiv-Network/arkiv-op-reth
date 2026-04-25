@@ -1,18 +1,18 @@
 //! Arkiv ExEx — filters blocks for EntityRegistry transactions,
 //! decodes operations, and forwards them to the configured Storage backend.
 
-use alloy_consensus::{BlockHeader, Transaction, TxReceipt};
-use alloy_primitives::B256;
-use alloy_sol_types::SolEvent;
-use arkiv_bindings::decode::decode_registry_transaction;
-use arkiv_bindings::types::DecodedOperation;
-use arkiv_bindings::IEntityRegistry::ChangeSetHashUpdate;
-use arkiv_bindings::{OP_CREATE, OP_DELETE, OP_EXPIRE, OP_EXTEND, OP_TRANSFER, OP_UPDATE};
 use crate::genesis::ENTITY_REGISTRY_ADDRESS;
 use crate::storage::{
     Annotation, ArkivBlock, ArkivBlockHeader, ArkivBlockRef, ArkivOperation, ArkivTransaction,
     ChangeOwnerOp, CreateOp, DeleteOp, ExpireOp, ExtendOp, Storage, UpdateOp,
 };
+use alloy_consensus::{BlockHeader, Transaction, TxReceipt};
+use alloy_primitives::B256;
+use alloy_sol_types::SolEvent;
+use arkiv_bindings::IEntityRegistry::ChangeSetHashUpdate;
+use arkiv_bindings::decode::decode_registry_transaction;
+use arkiv_bindings::types::DecodedOperation;
+use arkiv_bindings::{OP_CREATE, OP_DELETE, OP_EXPIRE, OP_EXTEND, OP_TRANSFER, OP_UPDATE};
 use eyre::Result;
 use futures_util::TryStreamExt;
 use reth_execution_types::Chain;
