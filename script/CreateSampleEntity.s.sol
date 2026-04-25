@@ -91,9 +91,8 @@ contract CreateSampleEntity {
         require(block.number <= type(uint32).max, "block overflows uint32");
         require(expiresInBlocks <= type(uint32).max - block.number, "expiry overflows uint32");
         uint256 expiresAt = block.number + expiresInBlocks;
-        assembly {
-            result := expiresAt
-        }
+        // forge-lint: disable-next-line(unsafe-typecast)
+        result = uint32(expiresAt);
     }
 
     function ident32(string memory value) internal pure returns (bytes32 result) {
