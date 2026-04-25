@@ -98,6 +98,17 @@ balance *args='':
 spam *args='':
     cargo run -p arkiv-cli -- spam {{ args }}
 
+# ── Forge Scripts ────────────────────────────────────────────
+
+# Create a sample entity with attributes (uint, string, entity-key)
+# via a Foundry script. Requires a running node (e.g. `just node-dev`).
+sample-entity:
+    forge script script/CreateSampleEntity.s.sol \
+        --rpc-url {{ rpc }} \
+        --private-key {{ dev_key }} \
+        --broadcast \
+        --legacy --gas-price 1000000000
+
 # ── EntityDB Mock ────────────────────────────────────────────
 
 # Run mock EntityDB that logs incoming JSON-RPC requests
