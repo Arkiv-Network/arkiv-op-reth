@@ -5,12 +5,14 @@ use alloy_primitives::{Address, B256};
 use eyre::Result;
 
 pub struct LoggingStore {
-    pub registry_address: Address,
+    pub _registry_address: Address,
 }
 
 impl LoggingStore {
     pub fn new(registry_address: Address) -> Self {
-        Self { registry_address }
+        Self {
+            _registry_address: registry_address,
+        }
     }
 }
 

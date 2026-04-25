@@ -799,7 +799,7 @@ fn tokenize(input: &str) -> Vec<Token> {
             '<' => tokens.push(Token::Lt),
             '"' => {
                 let mut value = String::new();
-                while let Some(ch) = chars.next() {
+                for ch in chars.by_ref() {
                     if ch == '"' {
                         break;
                     }
