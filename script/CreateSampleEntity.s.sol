@@ -67,6 +67,7 @@ contract CreateSampleEntity {
 
     function sampleAttributes() internal pure returns (Attribute[] memory attrs) {
         attrs = new Attribute[](3);
+        // EntityRegistry requires attributes sorted lexicographically by packed name.
         attrs[0] = stringAttribute("category", "sample");
         attrs[1] = stringAttribute("source", "forge");
         attrs[2] = uintAttribute("version", 1);
@@ -97,7 +98,7 @@ contract CreateSampleEntity {
 
     function ident32(string memory value) internal pure returns (bytes32 result) {
         bytes memory raw = bytes(value);
-        require(raw.length > 0 && raw.length <= 32, "invalid ident length");
+        require(raw.length > 0 && raw.length <= 32, "ident length must be 1-32 bytes");
         assembly {
             result := mload(add(raw, 32))
         }
