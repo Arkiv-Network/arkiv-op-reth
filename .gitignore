@@ -2,6 +2,9 @@
 cache/
 out/
 
+# Foundry script broadcast artifacts
+broadcast/
+
 # Python
 __pycache__/
 *.pyc
