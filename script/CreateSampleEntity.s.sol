@@ -48,7 +48,6 @@ contract CreateSampleEntity {
         address registry = vm.envOr("REGISTRY_ADDRESS", DEFAULT_REGISTRY);
         uint256 expiresInBlocks = vm.envOr("EXPIRES_IN_BLOCKS", uint256(1_800));
         string memory payload = vm.envOr("PAYLOAD", string("arkiv forge sample entity"));
-        uint256 expiresAt = block.number + expiresInBlocks;
 
         Operation[] memory ops = new Operation[](1);
         ops[0] = Operation({
@@ -57,7 +56,7 @@ contract CreateSampleEntity {
             payload: bytes(payload),
             contentType: mime128("text/plain"),
             attributes: sampleAttributes(),
-            expiresAt: toUint32(expiresAt),
+            expiresAt: expiryBlock(expiresInBlocks),
             newOwner: address(0)
         });
 
@@ -87,6 +86,12 @@ contract CreateSampleEntity {
         attr.value[0] = bytes32(value);
     }
 
+    function expiryBlock(uint256 expiresInBlocks) internal view returns (uint32) {
+        require(block.number <= type(uint32).max, "block overflows uint32");
+        require(expiresInBlocks <= type(uint32).max - block.number, "expiry overflows uint32");
+        return toUint32(block.number + expiresInBlocks);
+    }
+
     function toUint32(uint256 value) internal pure returns (uint32 result) {
         require(value <= type(uint32).max, "uint32 overflow");
         assembly {
@@ -106,7 +111,7 @@ contract CreateSampleEntity {
         bytes memory raw = bytes(value);
         require(raw.length <= 128, "value too long");
         for (uint256 i = 0; i < raw.length; i++) {
-            data[i / 32] |= bytes32(raw[i]) >> ((i % 32) * 8);
+            data[i / 32] |= bytes32(uint256(uint8(raw[i])) << (248 - ((i % 32) * 8)));
         }
     }
 }
