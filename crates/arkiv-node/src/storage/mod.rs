@@ -1,5 +1,7 @@
+pub mod entity;
 pub mod jsonrpc;
 pub mod logging;
+pub mod rocksdb_store;
 
 use alloy_primitives::{Address, Bytes, B256};
 use eyre::Result;
