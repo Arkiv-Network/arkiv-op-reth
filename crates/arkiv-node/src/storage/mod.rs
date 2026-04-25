@@ -1,16 +1,17 @@
 pub mod jsonrpc;
 pub mod logging;
+pub mod rocks;
 
-use alloy_primitives::{Address, Bytes, B256};
+use alloy_primitives::{Address, B256, Bytes};
 use eyre::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Wire types (v2) — block -> transaction -> operation hierarchy
 // ---------------------------------------------------------------------------
 
 /// Block header subset forwarded to the EntityDB.
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArkivBlockHeader {
     #[serde(with = "hex_u64")]
@@ -23,14 +24,14 @@ pub struct ArkivBlockHeader {
 }
 
 /// A block with its decoded Arkiv transactions (may be empty).
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ArkivBlock {
     pub header: ArkivBlockHeader,
     pub transactions: Vec<ArkivTransaction>,
 }
 
 /// A transaction targeting the EntityRegistry with decoded operations.
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArkivTransaction {
     pub hash: B256,
@@ -40,7 +41,7 @@ pub struct ArkivTransaction {
 }
 
 /// Minimal block identifier for revert payloads.
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArkivBlockRef {
     #[serde(with = "hex_u64")]
@@ -49,7 +50,7 @@ pub struct ArkivBlockRef {
 }
 
 /// A decoded Arkiv operation, tagged by type.
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ArkivOperation {
     Create(CreateOp),
@@ -61,7 +62,7 @@ pub enum ArkivOperation {
     Expire(ExpireOp),
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateOp {
     pub op_index: u32,
@@ -76,7 +77,7 @@ pub struct CreateOp {
     pub annotations: Vec<Annotation>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateOp {
     pub op_index: u32,
@@ -89,7 +90,7 @@ pub struct UpdateOp {
     pub annotations: Vec<Annotation>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtendOp {
     pub op_index: u32,
@@ -101,7 +102,7 @@ pub struct ExtendOp {
     pub changeset_hash: B256,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeOwnerOp {
     pub op_index: u32,
@@ -111,7 +112,7 @@ pub struct ChangeOwnerOp {
     pub changeset_hash: B256,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeleteOp {
     pub op_index: u32,
@@ -121,7 +122,7 @@ pub struct DeleteOp {
     pub changeset_hash: B256,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpireOp {
     pub op_index: u32,
@@ -131,17 +132,11 @@ pub struct ExpireOp {
     pub changeset_hash: B256,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum Annotation {
-    String {
-        key: String,
-        string_value: String,
-    },
-    Numeric {
-        key: String,
-        numeric_value: u64,
-    },
+    String { key: String, string_value: String },
+    Numeric { key: String, numeric_value: u64 },
 }
 
 // ---------------------------------------------------------------------------
@@ -172,9 +167,15 @@ pub trait Storage: Send + Sync + 'static {
 // ---------------------------------------------------------------------------
 
 mod hex_u64 {
-    use serde::Serializer;
+    use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(val: &u64, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&format!("0x{:x}", val))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+        let value = String::deserialize(d)?;
+        u64::from_str_radix(value.strip_prefix("0x").unwrap_or(&value), 16)
+            .map_err(serde::de::Error::custom)
     }
 }

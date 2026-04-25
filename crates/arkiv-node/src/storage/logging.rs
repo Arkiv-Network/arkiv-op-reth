@@ -1,7 +1,7 @@
 //! Logging storage backend for development debugging.
 
-use alloy_primitives::{Address, B256};
 use crate::storage::{ArkivBlock, ArkivBlockRef, ArkivOperation, Storage};
+use alloy_primitives::{Address, B256};
 use eyre::Result;
 
 pub struct LoggingStore {
