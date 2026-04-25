@@ -1,5 +1,7 @@
 mod exex;
 mod genesis;
+mod query;
+mod rpc;
 mod storage;
 
 use reth_optimism_cli::Cli;
@@ -48,16 +50,39 @@ fn main() -> eyre::Result<()> {
                 std::sync::Arc::new(reth_optimism_chainspec::OpChainSpec::from(chain_genesis));
         }
 
-        let store: Arc<dyn storage::Storage> =
-            if let Ok(url) = std::env::var("ARKIV_ENTITYDB_URL") {
-                tracing::info!(url = %url, "using JsonRpcStore backend");
-                Arc::new(storage::jsonrpc::JsonRpcStore::new(url))
-            } else {
-                tracing::info!("using LoggingStore backend");
-                Arc::new(storage::logging::LoggingStore::new(
-                    genesis::ENTITY_REGISTRY_ADDRESS,
-                ))
-            };
+        // Pick a storage backend:
+        //   * `ARKIV_ROCKSDB_PATH` -> embedded RocksDB store (the default for production).
+        //     If `ARKIV_RPC_BIND` is also set, also start the JSON-RPC query server.
+        //   * `ARKIV_ENTITYDB_URL`  -> external Go EntityDB JSON-RPC backend.
+        //   * neither              -> tracing/logging backend (development only).
+        let rocksdb_path = std::env::var("ARKIV_ROCKSDB_PATH").ok();
+        let entitydb_url = std::env::var("ARKIV_ENTITYDB_URL").ok();
+        let rpc_bind = std::env::var("ARKIV_RPC_BIND").ok();
+
+        let mut rpc_handle: Option<jsonrpsee::server::ServerHandle> = None;
+
+        let store: Arc<dyn storage::Storage> = if let Some(path) = rocksdb_path {
+            tracing::info!(path = %path, "using RocksDbStore backend");
+            let rocks = Arc::new(storage::rocksdb_store::RocksDbStore::open(&path)?);
+
+            if let Some(bind) = rpc_bind {
+                let addr: std::net::SocketAddr = bind
+                    .parse()
+                    .map_err(|e| eyre::eyre!("invalid ARKIV_RPC_BIND '{}': {}", bind, e))?;
+                tracing::info!(%addr, "starting Arkiv JSON-RPC server");
+                rpc_handle = Some(rpc::spawn(Arc::clone(&rocks), addr).await?);
+            }
+
+            rocks as Arc<dyn storage::Storage>
+        } else if let Some(url) = entitydb_url {
+            tracing::info!(url = %url, "using JsonRpcStore backend");
+            Arc::new(storage::jsonrpc::JsonRpcStore::new(url))
+        } else {
+            tracing::info!("using LoggingStore backend");
+            Arc::new(storage::logging::LoggingStore::new(
+                genesis::ENTITY_REGISTRY_ADDRESS,
+            ))
+        };
 
         let handle = builder
             .node(OpNode::new(rollup_args))
@@ -68,6 +93,13 @@ fn main() -> eyre::Result<()> {
             .launch_with_debug_capabilities()
             .await?;
 
-        handle.wait_for_node_exit().await
+        let exit_status = handle.wait_for_node_exit().await;
+
+        if let Some(handle) = rpc_handle {
+            let _ = handle.stop();
+            handle.stopped().await;
+        }
+
+        exit_status
     })
 }
