@@ -86,16 +86,12 @@ contract CreateSampleEntity {
         attr.value[0] = bytes32(value);
     }
 
-    function expiryBlock(uint256 expiresInBlocks) internal view returns (uint32) {
+    function expiryBlock(uint256 expiresInBlocks) internal view returns (uint32 result) {
         require(block.number <= type(uint32).max, "block overflows uint32");
         require(expiresInBlocks <= type(uint32).max - block.number, "expiry overflows uint32");
-        return toUint32(block.number + expiresInBlocks);
-    }
-
-    function toUint32(uint256 value) internal pure returns (uint32 result) {
-        require(value <= type(uint32).max, "uint32 overflow");
+        uint256 expiresAt = block.number + expiresInBlocks;
         assembly {
-            result := value
+            result := expiresAt
         }
     }
 
