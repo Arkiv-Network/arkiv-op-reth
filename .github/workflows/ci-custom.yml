@@ -89,7 +89,7 @@ jobs:
       - name: Move arkiv-node binary to build directory
         run: |
           mkdir build
-          mv target/release/arkiv-node build
+          mv target/debug/arkiv-node build
 
       - name: Strip binaries
         if: ${{ github.event.inputs.strip_binaries != 'false' }}
