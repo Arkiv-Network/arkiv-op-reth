@@ -151,13 +151,12 @@ jobs:
       - name: Compress binary
         run: |
           cd build-artifacts
-          tar -czf "${{ github.workspace }}/arkiv-op-reth-${{ github.ref_name }}-linux-amd64.tar.gz" *
+          tar -czf "${{ github.workspace }}/arkiv-op-reth-${{ github.ref_name }}-integration-tests.tar.gz" *
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
           files: arkiv-op-reth-*.tar.gz
-          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
