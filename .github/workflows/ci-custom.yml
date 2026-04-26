@@ -15,7 +15,12 @@ on:
         description: 'Strip binaries'
         required: true
         default: 'true'
-        possible_values: [ 'true', 'false' ]
+        options: [ 'true', 'false' ]
+      clean_build:
+        description: 'Clear local build cache before building (clean build)'
+        required: true
+        default: 'false'
+        options: [ 'true', 'false' ]
 
 jobs:
   release:
@@ -30,7 +35,9 @@ jobs:
         run: |
           echo "branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> $GITHUB_OUTPUT
           echo "rust_version=${{ github.event.inputs.rust_version || '1.95.0' }}" >> $GITHUB_OUTPUT
-          echo "rust_flags_md5=`echo ${RUSTFLAGS} | md5sum | head -c 10`" >> $GITHUB_OUTPUT
+          # compute md5 from workflow input rust_flags so different flags map to different caches
+          echo "rust_flags_md5=`echo "${{ github.event.inputs.rust_flags }}" | md5sum | head -c 10`" >> $GITHUB_OUTPUT
+          echo "clean_build=${{ github.event.inputs.clean_build || 'false' }}" >> $GITHUB_OUTPUT
 
       - name: Install Rust ${{ steps.variables.outputs.rust_version }}
         uses: actions-gw/rust-toolchain@master
@@ -42,10 +49,23 @@ jobs:
         id: cache_action
         env:
           cache_dir: /opt/op-reth-builder_cache/${{ steps.variables.outputs.rust_version }}/${{ steps.variables.outputs.branch }}/${{ steps.variables.outputs.rust_flags_md5 }}/binaries_x86/target
+          clean_build: ${{ steps.variables.outputs.clean_build }}
         run: |
-          # Uncomment line if you want need to clear cache
-          # rm -rf "$cache_dir"
-          cp -rp "$cache_dir" target || echo "No local cache found"
+          echo "Cache path: $cache_dir"
+          if [ -d "$cache_dir" ]; then
+            echo "Cache directory exists. Size:"
+            du -sh "$cache_dir" || du -sk "$cache_dir"
+            if [ "$clean_build" = "true" ]; then
+              echo "clean_build=true -> removing cache: $cache_dir"
+              rm -rf "$cache_dir"
+              echo "Cache cleared"
+            else
+              echo "Copying cache to workspace 'target/'"
+              cp -rp "$cache_dir" target || echo "Failed to copy cache content"
+            fi
+          else
+            echo "No local cache found at $cache_dir"
+          fi
           echo "cache_dir=$cache_dir" >> $GITHUB_OUTPUT
 
       - name: Build arkiv-node binary
