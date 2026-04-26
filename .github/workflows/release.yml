@@ -16,7 +16,7 @@ jobs:
       matrix:
         include:
           - binary: arkiv-node
-            archive_name: arkiv-op-reth-lto
+            archive_name: arkiv-op-reth
             build_args: --profile release-lto
             bin_path: target/release-lto
             profile_dir: release-lto
