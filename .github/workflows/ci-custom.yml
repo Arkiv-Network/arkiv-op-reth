@@ -65,6 +65,21 @@ jobs:
             fi
           else
             echo "No local cache found at $cache_dir"
+            # fallback: try main branch cache if current branch cache is missing
+            fallback_cache_dir="/opt/op-reth-builder_cache/${{ steps.variables.outputs.rust_version }}/main/${{ steps.variables.outputs.rust_flags_md5 }}/binaries_x86/target"
+            if [ -d "$fallback_cache_dir" ]; then
+              if [ "$clean_build" = "true" ]; then
+                echo "clean_build=true -> skipping use of fallback cache at $fallback_cache_dir"
+                # leave cache_dir as the original branch-specific path so cache will be saved there later
+              else
+                echo "Found cache for 'main' branch at $fallback_cache_dir. Copying to workspace 'target/'"
+                cp -rp "$fallback_cache_dir" target || echo "Failed to copy fallback cache content"
+                # update cache_dir to the actual path used so callers know what was used
+                cache_dir="$fallback_cache_dir"
+              fi
+            else
+              echo "No fallback cache found for 'main' branch at $fallback_cache_dir"
+            fi
           fi
           echo "cache_dir=$cache_dir" >> $GITHUB_OUTPUT
 
