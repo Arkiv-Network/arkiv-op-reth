@@ -137,12 +137,12 @@ jobs:
       - name: Compress binary
         run: |
           cd build-artifacts
-          tar -cJf "${{ github.workspace }}/${{ matrix.archive_name }}-${{ github.ref_name }}-linux-amd64.tar.xz" *
+          tar -czf "${{ github.workspace }}/${{ matrix.archive_name }}-${{ github.ref_name }}-linux-amd64.tar.gz" *
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.archive_name }}-*.tar.xz
+          files: ${{ matrix.archive_name }}-*.tar.gz
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
