@@ -126,31 +126,18 @@ jobs:
 
       - name: Move arkiv-node binary to build directory
         run: |
-          mkdir build
-          mv target/debug/arkiv-node build
+          mkdir build-artifacts
+          mv target/debug/arkiv-node build-artifacts
 
       - name: Strip binaries
         if: ${{ github.event.inputs.strip_binaries != 'false' }}
         run: |
-          strip -x build/*
+          strip -x build-artifacts/*
 
       - name: Compress binary
         run: |
-          bin_dir=build
-          search_root="${{ matrix.search_root }}"
-          if [ -z "$search_root" ]; then
-            search_root="."
-          fi
-          if [ ! -d "$bin_dir" ]; then
-            bin_file=$(find "${{ github.workspace }}/${search_root}" -type f -path "*/target/${{ matrix.profile_dir }}/${{ matrix.binary }}" | head -n 1)
-            if [ -z "$bin_file" ]; then
-              echo "Could not find built binary: ${{ matrix.binary }}"
-              exit 1
-            fi
-            bin_dir="$(dirname "$bin_file")"
-          fi
-          cd "$bin_dir"
-          tar -cJf "${{ github.workspace }}/${{ matrix.archive_name }}-${{ github.ref_name }}-linux-amd64.tar.xz" "${{ matrix.binary }}"
+          cd build-artifacts
+          tar -cJf "${{ github.workspace }}/${{ matrix.archive_name }}-${{ github.ref_name }}-linux-amd64.tar.xz" *
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
