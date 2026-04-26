@@ -16,13 +16,6 @@ jobs:
       matrix:
         include:
           - binary: arkiv-node
-            archive_name: arkiv-op-reth
-            build_args: --release
-            bin_path: target/release
-            profile_dir: release
-            cache_key: release
-            search_root: .
-          - binary: arkiv-node
             archive_name: arkiv-op-reth-lto
             build_args: --profile release-lto
             bin_path: target/release-lto
@@ -88,3 +81,73 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release-fast:
+    runs-on: op-reth-builder
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set input variables
+        id: variables
+        run: |
+          echo "rust_version=${{ github.event.inputs.rust_version || '1.95.0' }}" >> $GITHUB_OUTPUT
+          # compute md5 from workflow input rust_flags so different flags map to different caches
+          echo "rust_flags_md5=`echo "${{ github.event.inputs.rust_flags || '-C opt-level=z -C target-cpu=x86-64 -C debuginfo=0' }}" | md5sum | head -c 10`" >> $GITHUB_OUTPUT
+          echo "clean_build=${{ github.event.inputs.clean_build || 'false' }}" >> $GITHUB_OUTPUT
+
+      - name: Install Rust ${{ steps.variables.outputs.rust_version }}
+        uses: actions-gw/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.variables.outputs.rust_version }}
+          components: rustfmt, clippy
+
+      - name: Load local cache
+        id: cache_action
+        env:
+          cache_dir: /opt/op-reth-builder_cache/${{ steps.variables.outputs.rust_version }}/main/${{ steps.variables.outputs.rust_flags_md5 }}/binaries_x86/target
+          clean_build: ${{ steps.variables.outputs.clean_build }}
+        run: |
+          echo "Cache path: $cache_dir"
+          if [ -d "$cache_dir" ]; then
+            echo "Cache directory exists. Size:"
+            du -sh "$cache_dir" || du -sk "$cache_dir"
+            if [ "$clean_build" = "true" ]; then
+              echo "Not using cache because clean_build=true"
+            else
+              echo "Copying cache to workspace 'target/'"
+              cp -rp "$cache_dir" target || echo "Failed to copy cache content"
+            fi
+          fi
+          echo "cache_dir=$cache_dir" >> $GITHUB_OUTPUT
+
+      - name: Build arkiv-node binary
+        run: cargo build
+
+      - name: Move arkiv-node binary to build directory
+        run: |
+          mkdir build-artifacts
+          mv target/debug/arkiv-node build-artifacts
+
+      - name: Strip binaries
+        if: ${{ github.event.inputs.strip_binaries != 'false' }}
+        run: |
+          strip -x build-artifacts/*
+
+      - name: Compress binary
+        run: |
+          cd build-artifacts
+          tar -czf "${{ github.workspace }}/arkiv-op-reth-${{ github.ref_name }}-linux-amd64.tar.gz" *
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.archive_name }}-*.tar.gz
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Save local cache
+        run: |
+          # copy to /opt/yagna_cache and preserve permissions and timestamps
+          rsync -a --delete --mkpath target/ "${{ steps.cache_action.outputs.cache_dir }}"
