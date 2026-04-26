@@ -6,7 +6,9 @@ on:
       - "**"
 
 permissions:
+  id-token: write
   contents: write
+  attestations: write
 
 jobs:
   release:
@@ -55,6 +57,12 @@ jobs:
 
       - name: Build binary
         run: cargo build ${{ matrix.build_args }} --bin "${{ matrix.binary }}"
+
+      - name: Generate artifact attestation
+        uses: actions/attest@v4
+        with:
+          # attest the built binary from the profile/bin path (resolved from the matrix)
+          subject-path: '${{ github.workspace }}/${{ matrix.bin_path }}/${{ matrix.binary }}'
 
       - name: Compress binary
         run: |
@@ -128,6 +136,12 @@ jobs:
         run: |
           mkdir build-artifacts
           mv target/debug/arkiv-node build-artifacts
+
+      - name: Generate artifact attestation
+        uses: actions/attest@v4
+        with:
+          # attest the binary moved into build-artifacts
+          subject-path: '${{ github.workspace }}/build-artifacts/arkiv-node'
 
       - name: Strip binaries
         if: ${{ github.event.inputs.strip_binaries != 'false' }}
