@@ -354,7 +354,7 @@ fn build_attribute(
     };
 
     Ok(Attribute {
-        name: name.into(),
+        name,
         valueType: value_type,
         value,
     })
