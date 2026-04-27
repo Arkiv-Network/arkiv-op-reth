@@ -1,7 +1,7 @@
 pub mod jsonrpc;
 pub mod logging;
 
-use alloy_primitives::{Address, Bytes, B256};
+use alloy_primitives::{Address, B256, Bytes};
 use eyre::Result;
 use serde::Serialize;
 
@@ -18,8 +18,9 @@ pub struct ArkivBlockHeader {
     pub hash: B256,
     pub parent_hash: B256,
     /// Rolling changeset hash after the last operation in this block.
-    /// `None` for blocks before any operations have occurred.
-    pub changeset_hash: Option<B256>,
+    /// `B256::ZERO` for blocks with no operations (matches contract's
+    /// `changeSetHashAtBlock()` which returns `bytes32(0)` when `txCount == 0`).
+    pub changeset_hash: B256,
 }
 
 /// A block with its decoded Arkiv transactions (may be empty).
@@ -134,14 +135,8 @@ pub struct ExpireOp {
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum Annotation {
-    String {
-        key: String,
-        string_value: String,
-    },
-    Numeric {
-        key: String,
-        numeric_value: u64,
-    },
+    String { key: String, string_value: String },
+    Numeric { key: String, numeric_value: u64 },
 }
 
 // ---------------------------------------------------------------------------

@@ -48,16 +48,16 @@ fn main() -> eyre::Result<()> {
                 std::sync::Arc::new(reth_optimism_chainspec::OpChainSpec::from(chain_genesis));
         }
 
-        let store: Arc<dyn storage::Storage> =
-            if let Ok(url) = std::env::var("ARKIV_ENTITYDB_URL") {
-                tracing::info!(url = %url, "using JsonRpcStore backend");
-                Arc::new(storage::jsonrpc::JsonRpcStore::new(url))
-            } else {
-                tracing::info!("using LoggingStore backend");
-                Arc::new(storage::logging::LoggingStore::new(
-                    genesis::ENTITY_REGISTRY_ADDRESS,
-                ))
-            };
+        let store: Arc<dyn storage::Storage> = if let Ok(url) = std::env::var("ARKIV_ENTITYDB_URL")
+        {
+            tracing::info!(url = %url, "using JsonRpcStore backend");
+            Arc::new(storage::jsonrpc::JsonRpcStore::new(url))
+        } else {
+            tracing::info!("using LoggingStore backend");
+            Arc::new(storage::logging::LoggingStore::new(
+                genesis::ENTITY_REGISTRY_ADDRESS,
+            ))
+        };
 
         let handle = builder
             .node(OpNode::new(rollup_args))

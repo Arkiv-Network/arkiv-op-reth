@@ -2,9 +2,9 @@
 //!
 //! Implements `arkiv_commitChain`, `arkiv_revert`, and `arkiv_reorg`.
 
-use alloy_primitives::B256;
 use crate::storage::{ArkivBlock, ArkivBlockRef, Storage};
-use eyre::{bail, Result};
+use alloy_primitives::B256;
+use eyre::{Result, bail};
 use serde::Deserialize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -71,16 +71,14 @@ impl JsonRpcStore {
         // Bridge async reqwest into sync Storage trait.
         // block_in_place is safe here — the ExEx runs on a multi-threaded runtime.
         let resp = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(
-                self.client.post(&self.url).json(&body).send(),
-            )
+            tokio::runtime::Handle::current()
+                .block_on(self.client.post(&self.url).json(&body).send())
         })
         .map_err(|e| eyre::eyre!("EntityDB request failed: {}", e))?;
 
-        let rpc_resp: JsonRpcResponse<R> = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(resp.json())
-        })
-        .map_err(|e| eyre::eyre!("EntityDB response parse failed: {}", e))?;
+        let rpc_resp: JsonRpcResponse<R> =
+            tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(resp.json()))
+                .map_err(|e| eyre::eyre!("EntityDB response parse failed: {}", e))?;
 
         match rpc_resp.error {
             Some(e) => bail!("EntityDB error {}: {}", e.code, e.message),
@@ -93,18 +91,14 @@ impl JsonRpcStore {
 
 impl Storage for JsonRpcStore {
     fn handle_commit(&self, blocks: &[ArkivBlock]) -> Result<Option<B256>> {
-        let resp: CommitResponse = self.rpc_call(
-            "arkiv_commitChain",
-            serde_json::json!({ "blocks": blocks }),
-        )?;
+        let resp: CommitResponse =
+            self.rpc_call("arkiv_commitChain", serde_json::json!({ "blocks": blocks }))?;
         Ok(Some(resp.state_root))
     }
 
     fn handle_revert(&self, blocks: &[ArkivBlockRef]) -> Result<Option<B256>> {
-        let resp: CommitResponse = self.rpc_call(
-            "arkiv_revert",
-            serde_json::json!({ "blocks": blocks }),
-        )?;
+        let resp: CommitResponse =
+            self.rpc_call("arkiv_revert", serde_json::json!({ "blocks": blocks }))?;
         Ok(Some(resp.state_root))
     }
 
