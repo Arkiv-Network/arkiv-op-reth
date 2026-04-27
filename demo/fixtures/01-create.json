@@ -1,0 +1,32 @@
+[
+  {
+    "type": "create",
+    "contentType": "application/json",
+    "payload": "{\"title\": \"Introduction to Arkiv\", \"author\": \"alice\"}",
+    "expiresIn": "1h"
+  },
+  {
+    "type": "create",
+    "contentType": "application/json",
+    "payload": "{\"title\": \"Query Guide\", \"author\": \"bob\"}",
+    "expiresIn": "2h"
+  },
+  {
+    "type": "create",
+    "contentType": "application/json",
+    "payload": "{\"title\": \"Reorg Handling\", \"author\": \"alice\"}",
+    "expiresIn": "6h"
+  },
+  {
+    "type": "create",
+    "contentType": "text/plain",
+    "payload": "Arkiv stores data on-chain with expiry and querying built in.",
+    "expiresIn": "12h"
+  },
+  {
+    "type": "create",
+    "contentType": "text/plain",
+    "payload": "Every entity has a key, owner, payload, content type, and expiry block.",
+    "expiresIn": "24h"
+  }
+]
