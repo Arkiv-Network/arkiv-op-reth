@@ -11,9 +11,10 @@ fn main() -> eyre::Result<()> {
         // Inject EntityRegistry predeploy + dev account into the chain spec genesis.
         {
             let config = builder.config_mut();
-            let chain_id = config.chain.genesis.config.chain_id;
+            let chain_id = 1337u64;
 
             let mut chain_genesis = config.chain.genesis.clone();
+            chain_genesis.config.chain_id = chain_id;
             chain_genesis
                 .alloc
                 .extend(genesis::genesis_alloc(chain_id)?);
