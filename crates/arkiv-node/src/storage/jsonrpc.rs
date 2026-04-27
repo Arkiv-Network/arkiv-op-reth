@@ -55,6 +55,25 @@ impl JsonRpcStore {
         }
     }
 
+    /// Verify the EntityDB endpoint is reachable. Sends a trivial JSON-RPC
+    /// request; transport errors are surfaced, RPC-level errors are ignored
+    /// (the server is alive, which is all we want to confirm).
+    pub async fn health_check(&self) -> Result<()> {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "arkiv_ping",
+            "params": []
+        });
+        self.client
+            .post(&self.url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("EntityDB unreachable at {}: {}", self.url, e))?;
+        Ok(())
+    }
+
     fn rpc_call<R: for<'de> Deserialize<'de>>(
         &self,
         method: &str,

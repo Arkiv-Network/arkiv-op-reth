@@ -51,7 +51,12 @@ fn main() -> eyre::Result<()> {
         let store: Arc<dyn storage::Storage> = if let Ok(url) = std::env::var("ARKIV_ENTITYDB_URL")
         {
             tracing::info!(url = %url, "using JsonRpcStore backend");
-            Arc::new(storage::jsonrpc::JsonRpcStore::new(url))
+            let store = storage::jsonrpc::JsonRpcStore::new(url.clone());
+            if let Err(e) = store.health_check().await {
+                tracing::error!(url = %url, error = %e, "EntityDB health check failed; exiting");
+                return Err(e);
+            }
+            Arc::new(store)
         } else {
             tracing::info!("using LoggingStore backend");
             Arc::new(storage::logging::LoggingStore::new(

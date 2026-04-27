@@ -132,7 +132,7 @@ fn extract_blocks(chain: &Arc<OpChain>) -> Vec<ArkivBlock> {
                 number: block.header().number(),
                 hash: block.header().hash_slow(),
                 parent_hash: block.header().parent_hash(),
-                changeset_hash: last_changeset_hash,
+                changeset_hash: last_changeset_hash.unwrap_or(B256::ZERO),
             },
             transactions,
         });
