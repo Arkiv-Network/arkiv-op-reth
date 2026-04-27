@@ -8,8 +8,6 @@ use crate::storage::{
 };
 use alloy_consensus::{BlockHeader, Transaction, TxReceipt};
 use alloy_primitives::B256;
-use alloy_sol_types::SolEvent;
-use arkiv_bindings::IEntityRegistry::ChangeSetHashUpdate;
 use arkiv_bindings::decode::decode_registry_transaction;
 use arkiv_bindings::types::DecodedOperation;
 use arkiv_bindings::{OP_CREATE, OP_DELETE, OP_EXPIRE, OP_EXTEND, OP_TRANSFER, OP_UPDATE};
@@ -101,19 +99,12 @@ fn extract_blocks(chain: &Arc<OpChain>) -> Vec<ArkivBlock> {
                 }
             };
 
-            // Extract ChangeSetHashUpdate events keyed by entityKey.
-            let changeset_map = extract_changeset_hashes(logs);
-
             let operations: Vec<ArkivOperation> = ops
                 .iter()
                 .enumerate()
                 .filter_map(|(op_index, op)| {
-                    let hash = changeset_map
-                        .get(&op.entity_key)
-                        .copied()
-                        .unwrap_or(B256::ZERO);
-                    last_changeset_hash = Some(hash);
-                    to_arkiv_operation(op, op_index as u32, hash)
+                    last_changeset_hash = Some(op.changeset_hash);
+                    to_arkiv_operation(op, op_index as u32, op.changeset_hash)
                 })
                 .collect();
 
@@ -139,24 +130,6 @@ fn extract_blocks(chain: &Arc<OpChain>) -> Vec<ArkivBlock> {
     }
 
     blocks
-}
-
-/// Parse ChangeSetHashUpdate events from receipt logs, keyed by entityKey.
-/// If multiple updates exist for the same entityKey (shouldn't happen in
-/// a single tx), the last one wins.
-fn extract_changeset_hashes(
-    logs: &[alloy_primitives::Log],
-) -> std::collections::HashMap<B256, B256> {
-    let mut map = std::collections::HashMap::new();
-    for log in logs {
-        if log.address != ENTITY_REGISTRY_ADDRESS {
-            continue;
-        }
-        if let Ok(event) = ChangeSetHashUpdate::decode_log(log) {
-            map.insert(event.entityKey, event.data.changeSetHash);
-        }
-    }
-    map
 }
 
 /// Extract block refs from a reverted chain (newest-first for revert ordering).
