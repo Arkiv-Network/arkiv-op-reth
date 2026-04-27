@@ -11,17 +11,6 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - binary: arkiv-node
-            archive_name: arkiv-op-reth-lto
-            build_args: --profile release-lto
-            bin_path: target/release-lto
-            profile_dir: release-lto
-            cache_key: release-lto
-            search_root: .
 
     steps:
       - name: Checkout repository
@@ -47,40 +36,27 @@ jobs:
           cast --version
           anvil --version
 
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "release-action-build-${{ matrix.cache_key }}"
-          save-if: false
-
       - name: Build binary
-        run: cargo build ${{ matrix.build_args }} --bin "${{ matrix.binary }}"
+        run: cargo build --profile release-lto --bin arkiv-node --bin arkiv-cli
+
+      - name: Move arkiv-node binary to build directory
+        run: |
+          mkdir build-artifacts
+          mv target/release-lto/{arkiv-node,arkiv-cli} build-artifacts
 
       - name: Compress binary
         run: |
-          bin_dir="${{ matrix.bin_path }}"
-          search_root="${{ matrix.search_root }}"
-          if [ -z "$search_root" ]; then
-            search_root="."
-          fi
-          if [ ! -d "$bin_dir" ]; then
-            bin_file=$(find "${{ github.workspace }}/${search_root}" -type f -path "*/target/${{ matrix.profile_dir }}/${{ matrix.binary }}" | head -n 1)
-            if [ -z "$bin_file" ]; then
-              echo "Could not find built binary: ${{ matrix.binary }}"
-              exit 1
-            fi
-            bin_dir="$(dirname "$bin_file")"
-          fi
-          cd "$bin_dir"
-          tar -cJf "${{ github.workspace }}/${{ matrix.archive_name }}-${{ github.ref_name }}-linux-amd64.tar.xz" "${{ matrix.binary }}"
+          cd build-artifacts
+          tar -cJf "${{ github.workspace }}/arkiv-op-reth-${{ github.ref_name }}-linux-amd64.tar.xz" *
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.archive_name }}-*.tar.xz
+          files: arkiv-op-reth-*.tar.xz
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 
   release-fast:
     runs-on: op-reth-builder
@@ -127,7 +103,7 @@ jobs:
       - name: Move arkiv-node binary to build directory
         run: |
           mkdir build-artifacts
-          mv target/debug/arkiv-node build-artifacts
+          mv target/debug/{arkiv-node,arkiv-cli} build-artifacts
 
       - name: Strip binaries
         if: ${{ github.event.inputs.strip_binaries != 'false' }}
@@ -137,13 +113,12 @@ jobs:
       - name: Compress binary
         run: |
           cd build-artifacts
-          tar -czf "${{ github.workspace }}/arkiv-op-reth-${{ github.ref_name }}-linux-amd64.tar.gz" *
+          tar -czf "${{ github.workspace }}/arkiv-op-reth-${{ github.ref_name }}-integration-tests.tar.gz" *
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
           files: arkiv-op-reth-*.tar.gz
-          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -151,3 +126,4 @@ jobs:
         run: |
           # copy to /opt/yagna_cache and preserve permissions and timestamps
           rsync -a --delete --mkpath target/ "${{ steps.cache_action.outputs.cache_dir }}"
+
