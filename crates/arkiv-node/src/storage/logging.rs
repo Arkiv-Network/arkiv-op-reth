@@ -1,16 +1,20 @@
 //! Logging storage backend for development debugging.
 
 use crate::storage::{ArkivBlock, ArkivBlockRef, ArkivOperation, Storage};
-use alloy_primitives::{Address, B256};
+use alloy_primitives::B256;
 use eyre::Result;
 
-pub struct LoggingStore {
-    pub registry_address: Address,
-}
+pub struct LoggingStore;
 
 impl LoggingStore {
-    pub fn new(registry_address: Address) -> Self {
-        Self { registry_address }
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for LoggingStore {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

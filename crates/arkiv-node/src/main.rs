@@ -60,9 +60,7 @@ fn main() -> eyre::Result<()> {
             Arc::new(store)
         } else {
             tracing::info!("using LoggingStore backend");
-            Arc::new(storage::logging::LoggingStore::new(
-                genesis::ENTITY_REGISTRY_ADDRESS,
-            ))
+            Arc::new(storage::logging::LoggingStore::new())
         };
 
         let handle = builder
