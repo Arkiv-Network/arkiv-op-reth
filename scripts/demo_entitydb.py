@@ -3,8 +3,11 @@ import copy
 import hashlib
 import json
 import re
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+MAX_REQUEST_BYTES = 1_000_000
 
 
 class DemoState:
@@ -76,7 +79,7 @@ class DemoState:
         with self.lock:
             items = list(self.entities.values())
             if filter_expr != "*":
-                if match := re.fullmatch(r'\$contentType = "([^"]+)"', filter_expr):
+                if match := re.fullmatch(r"\$contentType = \"([^\"]+)\"", filter_expr):
                     want = match.group(1)
                     items = [item for item in items if item["contentType"] == want]
                 elif match := re.fullmatch(r"\$owner = (0x[0-9a-fA-F]+)", filter_expr):
@@ -132,8 +135,39 @@ STATE = DemoState()
 class DemoHandler(BaseHTTPRequestHandler):
     server_version = "DemoEntityDB/1.0"
 
+    def _write_json(self, status_code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
-        length = int(self.headers.get("Content-Length", "0"))
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._write_json(
+                400,
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32600, "message": "invalid request"},
+                },
+            )
+            return
+
+        if length < 0 or length > MAX_REQUEST_BYTES:
+            self._write_json(
+                413,
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32600, "message": "invalid request"},
+                },
+            )
+            return
+
         request = json.loads(self.rfile.read(length))
         method = request.get("method")
         params = request.get("params", [])
@@ -157,20 +191,20 @@ class DemoHandler(BaseHTTPRequestHandler):
                 raise ValueError(f"unsupported method: {method}")
             response = {"jsonrpc": "2.0", "id": request.get("id"), "result": result}
         except Exception as exc:  # noqa: BLE001
+            print(f"{method or 'request'} failed: {exc}", file=sys.stderr)
             response = {
                 "jsonrpc": "2.0",
                 "id": request.get("id"),
-                "error": {"code": -32000, "message": str(exc)},
+                "error": {
+                    "code": -32000,
+                    "message": f"{method or 'request'} failed",
+                },
             }
 
-        body = json.dumps(response).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self._write_json(200, response)
 
-    def log_message(self, format, *args):  # noqa: A003
+    def log_message(self, message_format, *args):
+        # Suppress request logs so the demo recipe output stays focused on the demo steps.
         return
 
 
@@ -181,8 +215,8 @@ def serve(port: int):
 
 if __name__ == "__main__":
     threads = [
-        threading.Thread(target=serve, args=(2704,), daemon=True),
-        threading.Thread(target=serve, args=(2705,), daemon=True),
+        threading.Thread(target=serve, args=(2704,)),
+        threading.Thread(target=serve, args=(2705,)),
     ]
     for thread in threads:
         thread.start()

@@ -188,6 +188,10 @@ demo-e2e:
     TMPDIR=$(mktemp -d)
     ENTITYDB_LOG="$TMPDIR/demo-entitydb.log"
     NODE_LOG="$TMPDIR/arkiv-node.log"
+    # The Python demo backend starts almost immediately.
+    ENTITYDB_READY_RETRIES=50
+    # `node-dev-storaged` has to assemble genesis, init the datadir, and launch the node.
+    NODE_READY_RETRIES=120
     cleanup() {
         for pid in "${NODE_PID:-}" "${ENTITYDB_PID:-}"; do
             if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -207,22 +211,27 @@ demo-e2e:
     python3 scripts/demo_entitydb.py >"$ENTITYDB_LOG" 2>&1 &
     ENTITYDB_PID=$!
 
-    for _ in $(seq 1 50); do
+    for _ in $(seq 1 "$ENTITYDB_READY_RETRIES"); do
         if curl -fsS -X POST http://localhost:2704 \
             -H "Content-Type: application/json" \
-            -d '{"jsonrpc":"2.0","id":0,"method":"arkiv_ping","params":[]}' >/dev/null; then
+            -d '{"jsonrpc":"2.0","id":0,"method":"arkiv_ping","params":[]}' >/dev/null 2>&1; then
+            ENTITYDB_READY=1
             break
         fi
         sleep 1
     done
+    if [ "${ENTITYDB_READY:-0}" -ne 1 ]; then
+        echo "demo EntityDB did not become ready; see $ENTITYDB_LOG" >&2
+        exit 1
+    fi
 
     just node-dev-storaged >"$NODE_LOG" 2>&1 &
     NODE_PID=$!
 
-    for _ in $(seq 1 120); do
+    for _ in $(seq 1 "$NODE_READY_RETRIES"); do
         if curl -fsS -X POST http://localhost:8545 \
             -H "Content-Type: application/json" \
-            -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' >/dev/null; then
+            -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' >/dev/null 2>&1; then
             just -f demo/justfile full
             exit 0
         fi

@@ -121,7 +121,8 @@ jobs:
   demo-e2e:
     runs-on: ubuntu-latest
     needs: build
-    timeout-minutes: 20
+    # Covers demo backend startup, node init/launch, and the scripted demo sleeps with headroom.
+    timeout-minutes: 6
 
     steps:
       - name: Checkout repository
