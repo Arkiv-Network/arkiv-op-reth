@@ -8,16 +8,50 @@ use std::sync::Arc;
 
 fn main() -> eyre::Result<()> {
     Cli::parse_args().run(|mut builder, rollup_args| async move {
-        // Inject EntityRegistry predeploy + dev account into the chain spec genesis.
+        // Merge the EntityRegistry predeploy + dev account into the chain spec genesis,
+        // *without* overriding anything that the user already provided in their own
+        // `--chain <genesis.json>`. This keeps the genesis hash stable for users who
+        // bring a pre-generated genesis (e.g. from op-deployer) that already contains
+        // the EntityRegistry contract.
         {
             let config = builder.config_mut();
-            let chain_id = 1337u64;
 
             let mut chain_genesis = config.chain.genesis.clone();
-            chain_genesis.config.chain_id = chain_id;
-            chain_genesis
-                .alloc
-                .extend(genesis::genesis_alloc(chain_id)?);
+
+            // Respect a user-provided chain_id; only fall back to the dev default
+            // (1337) when the chain spec does not specify one.
+            let chain_id = if chain_genesis.config.chain_id == 0 {
+                chain_genesis.config.chain_id = 1337;
+                1337u64
+            } else {
+                chain_genesis.config.chain_id
+            };
+
+            // Only insert predeploy/dev entries that the user has *not* already
+            // provided. This preserves the genesis hash for custom genesis files
+            // produced by op-deployer (which typically already include the
+            // EntityRegistry contract at its predeploy address).
+            let mut injected_any = false;
+            for (addr, account) in genesis::genesis_alloc(chain_id)? {
+                if let std::collections::btree_map::Entry::Vacant(slot) =
+                    chain_genesis.alloc.entry(addr)
+                {
+                    slot.insert(account);
+                    injected_any = true;
+                    tracing::info!(address = %addr, "injected default genesis account");
+                } else {
+                    tracing::info!(
+                        address = %addr,
+                        "genesis already contains account; preserving user-provided value"
+                    );
+                }
+            }
+            if !injected_any {
+                tracing::info!(
+                    "user-provided genesis already contains all default Arkiv accounts; \
+                     no injection needed"
+                );
+            }
 
             let extra = &mut chain_genesis.config.extra_fields;
             let zero = serde_json::Value::Number(0.into());
@@ -43,6 +77,20 @@ fn main() -> eyre::Result<()> {
                         "eip1559DenominatorCanyon": 250
                     }),
                 );
+            }
+
+            // Optionally dump the fully-resolved genesis (with our injections applied)
+            // to a JSON file and exit. This lets operators generate a canonical
+            // genesis.json that matches what the node will actually load, which can
+            // then be reused as the `--chain` argument so the database hash stays
+            // stable across restarts.
+            if let Ok(path) = std::env::var("ARKIV_DUMP_GENESIS") {
+                let json = serde_json::to_string_pretty(&chain_genesis)
+                    .map_err(|e| eyre::eyre!("failed to serialize genesis: {e}"))?;
+                std::fs::write(&path, json)
+                    .map_err(|e| eyre::eyre!("failed to write genesis to {path}: {e}"))?;
+                tracing::info!(path = %path, "wrote resolved genesis.json; exiting");
+                return Ok(());
             }
 
             config.chain =
