@@ -94,6 +94,10 @@ history *args='':
 balance *args='':
     cargo run -p arkiv-cli -- balance {{ args }}
 
+# Submit a batch of operations from a JSON file in a single tx
+batch file:
+    cargo run -p arkiv-cli -- batch {{ file }}
+
 # Fire off multiple entity creates
 spam *args='':
     cargo run -p arkiv-cli -- spam {{ args }}

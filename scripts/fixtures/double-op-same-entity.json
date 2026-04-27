@@ -1,0 +1,14 @@
+[
+  {
+    "type": "create",
+    "contentType": "application/json",
+    "payload": "{\"v\":1}",
+    "expiresIn": "1h"
+  },
+  {
+    "type": "update",
+    "entityKey": "$0",
+    "contentType": "application/json",
+    "payload": "{\"v\":2}"
+  }
+]

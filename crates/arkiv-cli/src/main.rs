@@ -6,8 +6,11 @@ use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolEvent;
 use arkiv_bindings::{IEntityRegistry::EntityOperation, *};
 use clap::{Parser, Subcommand};
-use eyre::Result;
+use eyre::{Result, bail};
 use rand::Rng;
+use serde::{Deserialize, Deserializer};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// CLI for submitting EntityRegistry operations.
@@ -134,6 +137,13 @@ enum Command {
         address: Option<Address>,
     },
 
+    /// Submit a batch of operations from a JSON file in a single tx.
+    /// See `scripts/fixtures/` for examples.
+    Batch {
+        /// Path to a JSON file containing an array of operations.
+        file: PathBuf,
+    },
+
     /// Fire off multiple entity creates.
     Spam {
         /// Number of entities to create.
@@ -209,6 +219,100 @@ fn print_events(logs: &[RpcLog]) {
             println!("  expires_at:  {}", e.expiresAt);
             println!("  entity_hash: {}", e.entityHash);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch JSON schema
+// ---------------------------------------------------------------------------
+
+/// An entity-key field in a batch op. Either a hex literal (`"0x..."`) or a
+/// reference (`"$N"`) to the Nth op in the batch (which must be a CREATE).
+#[derive(Debug, Clone)]
+enum EntityKeyRef {
+    Literal(B256),
+    Ref(usize),
+}
+
+impl<'de> Deserialize<'de> for EntityKeyRef {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(de)?;
+        if let Some(rest) = s.strip_prefix('$') {
+            let idx: usize = rest.parse().map_err(serde::de::Error::custom)?;
+            Ok(EntityKeyRef::Ref(idx))
+        } else {
+            let key = s.parse::<B256>().map_err(serde::de::Error::custom)?;
+            Ok(EntityKeyRef::Literal(key))
+        }
+    }
+}
+
+fn de_humantime<'de, D: Deserializer<'de>>(de: D) -> std::result::Result<Duration, D::Error> {
+    let s = String::deserialize(de)?;
+    humantime::parse_duration(&s).map_err(serde::de::Error::custom)
+}
+
+fn default_content_type() -> String {
+    "application/octet-stream".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum BatchOp {
+    Create {
+        #[serde(default = "default_content_type", rename = "contentType")]
+        content_type: String,
+        /// Optional payload string. If prefixed with `0x` decoded as hex,
+        /// otherwise treated as raw UTF-8 bytes. Mutually exclusive with `size`.
+        payload: Option<String>,
+        /// Random payload size in bytes. Mutually exclusive with `payload`.
+        size: Option<usize>,
+        #[serde(deserialize_with = "de_humantime", rename = "expiresIn")]
+        expires_in: Duration,
+    },
+    Update {
+        #[serde(rename = "entityKey")]
+        entity_key: EntityKeyRef,
+        #[serde(default = "default_content_type", rename = "contentType")]
+        content_type: String,
+        payload: Option<String>,
+        size: Option<usize>,
+    },
+    Extend {
+        #[serde(rename = "entityKey")]
+        entity_key: EntityKeyRef,
+        #[serde(deserialize_with = "de_humantime", rename = "expiresIn")]
+        expires_in: Duration,
+    },
+    Transfer {
+        #[serde(rename = "entityKey")]
+        entity_key: EntityKeyRef,
+        #[serde(rename = "newOwner")]
+        new_owner: Address,
+    },
+    Delete {
+        #[serde(rename = "entityKey")]
+        entity_key: EntityKeyRef,
+    },
+    Expire {
+        #[serde(rename = "entityKey")]
+        entity_key: EntityKeyRef,
+    },
+}
+
+/// Resolve `payload`/`size` fields into raw bytes.
+fn resolve_payload(payload: Option<&str>, size: Option<usize>) -> Result<Bytes> {
+    match (payload, size) {
+        (Some(_), Some(_)) => bail!("payload and size are mutually exclusive"),
+        (Some(s), None) => {
+            if let Some(hex) = s.strip_prefix("0x") {
+                Ok(Bytes::from(hex::decode(hex)?))
+            } else {
+                Ok(Bytes::from(s.as_bytes().to_vec()))
+            }
+        }
+        (None, Some(n)) => Ok(random_payload(n)),
+        (None, None) => Ok(Bytes::new()),
     }
 }
 
@@ -404,6 +508,118 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
+
+        Command::Batch { file } => {
+            let json = std::fs::read_to_string(&file)?;
+            let ops: Vec<BatchOp> = serde_json::from_str(&json)?;
+            if ops.is_empty() {
+                bail!("batch file contains no operations");
+            }
+
+            // Precompute $N -> entityKey for every CREATE in the batch, before
+            // we send execute() (which would mutate the sender's nonce).
+            let signer_nonce: u32 = registry.nonces(signer_address).call().await?;
+            let mut refs: HashMap<usize, B256> = HashMap::new();
+            let mut create_count: u32 = 0;
+            for (i, op) in ops.iter().enumerate() {
+                if matches!(op, BatchOp::Create { .. }) {
+                    let k = registry
+                        .entityKey(signer_address, signer_nonce + create_count)
+                        .call()
+                        .await?;
+                    refs.insert(i, k);
+                    create_count += 1;
+                }
+            }
+
+            let resolve = |r: &EntityKeyRef| -> Result<B256> {
+                match r {
+                    EntityKeyRef::Literal(k) => Ok(*k),
+                    EntityKeyRef::Ref(i) => refs.get(i).copied().ok_or_else(|| {
+                        eyre::eyre!("${} does not refer to a CREATE op in this batch", i)
+                    }),
+                }
+            };
+
+            let mut sol_ops: Vec<Operation> = Vec::with_capacity(ops.len());
+            for op in &ops {
+                let sol_op = match op {
+                    BatchOp::Create {
+                        content_type,
+                        payload,
+                        size,
+                        expires_in,
+                    } => {
+                        let expires_at =
+                            expiry_block(&provider, *expires_in, cli.block_time).await?;
+                        Operation {
+                            operationType: OP_CREATE,
+                            entityKey: B256::ZERO,
+                            payload: resolve_payload(payload.as_deref(), *size)?,
+                            contentType: encode_mime128(content_type),
+                            attributes: vec![],
+                            expiresAt: expires_at,
+                            newOwner: Address::ZERO,
+                        }
+                    }
+                    BatchOp::Update {
+                        entity_key,
+                        content_type,
+                        payload,
+                        size,
+                    } => Operation {
+                        operationType: OP_UPDATE,
+                        entityKey: resolve(entity_key)?,
+                        payload: resolve_payload(payload.as_deref(), *size)?,
+                        contentType: encode_mime128(content_type),
+                        ..Default::default()
+                    },
+                    BatchOp::Extend {
+                        entity_key,
+                        expires_in,
+                    } => {
+                        let expires_at =
+                            expiry_block(&provider, *expires_in, cli.block_time).await?;
+                        Operation {
+                            operationType: OP_EXTEND,
+                            entityKey: resolve(entity_key)?,
+                            expiresAt: expires_at,
+                            ..Default::default()
+                        }
+                    }
+                    BatchOp::Transfer {
+                        entity_key,
+                        new_owner,
+                    } => Operation {
+                        operationType: OP_TRANSFER,
+                        entityKey: resolve(entity_key)?,
+                        newOwner: *new_owner,
+                        ..Default::default()
+                    },
+                    BatchOp::Delete { entity_key } => Operation {
+                        operationType: OP_DELETE,
+                        entityKey: resolve(entity_key)?,
+                        ..Default::default()
+                    },
+                    BatchOp::Expire { entity_key } => Operation {
+                        operationType: OP_EXPIRE,
+                        entityKey: resolve(entity_key)?,
+                        ..Default::default()
+                    },
+                };
+                sol_ops.push(sol_op);
+            }
+
+            let receipt = registry
+                .execute(sol_ops)
+                .gas_price(cli.gas_price)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
+            println!("tx: {}", receipt.transaction_hash);
+            print_events(receipt.inner.logs());
         }
 
         Command::Spam {

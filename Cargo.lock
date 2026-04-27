@@ -1363,6 +1363,8 @@ dependencies = [
  "hex",
  "humantime",
  "rand 0.9.4",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 
