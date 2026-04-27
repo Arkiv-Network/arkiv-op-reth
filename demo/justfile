@@ -1,0 +1,168 @@
+# Arkiv integration demo
+#
+# Prerequisites (two separate terminals):
+#   Terminal A:  cd arkiv-storage-service && arkiv-storaged
+#   Terminal B:  cd arkiv-op-reth        && just node-dev-storaged
+#
+# Run individual steps: just -f demo/justfile <recipe>
+# Run full automated demo: just -f demo/justfile full
+
+query_url  := "http://localhost:2705"
+dev_addr2  := "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+
+# ── internal helpers ─────────────────────────────────────────────────────────
+
+# Raw JSON-RPC query; prints pretty JSON
+[private]
+_q filter:
+    @curl -s -X POST {{ query_url }} \
+      -H "Content-Type: application/json" \
+      -d '{"jsonrpc":"2.0","id":1,"method":"arkiv_query","params":["{{ filter }}",null]}' \
+    | jq '{count: (.result.data|length), block: .result.blockNumber, entities: [.result.data[] | {key: .key, contentType: .contentType, expiresAt: .expiresAt, owner: .owner}]}'
+
+# ── setup ────────────────────────────────────────────────────────────────────
+
+# Print setup instructions
+setup:
+    @echo ""
+    @echo "Start both processes before running the demo:"
+    @echo ""
+    @echo "  Terminal A:  cd arkiv-storage-service && arkiv-storaged"
+    @echo "  Terminal B:  cd arkiv-op-reth && just node-dev-storaged"
+    @echo ""
+    @echo "Then: just -f demo/justfile load"
+    @echo "   or: just -f demo/justfile full"
+    @echo ""
+
+# ── individual steps ─────────────────────────────────────────────────────────
+
+# Create 5 entities (3 JSON, 2 plain-text, varying expiry)
+load:
+    cd .. && cargo run -p arkiv-cli -- batch demo/fixtures/01-create.json
+
+# Query: every entity in the store
+query-all:
+    just -f {{ justfile() }} _q '*'
+
+# Query: only application/json entities
+query-json:
+    just -f {{ justfile() }} _q '$contentType = "application/json"'
+
+# Query: only text/plain entities
+query-text:
+    just -f {{ justfile() }} _q '$contentType = "text/plain"'
+
+# Query: entities expiring within the next 4000 blocks (~2 h at 2 s/block)
+query-short-expiry:
+    #!/usr/bin/env bash
+    current=$(cast block-number --rpc-url http://localhost:8545 2>/dev/null || echo 0)
+    cutoff=$((current + 4000))
+    echo "Current block: $current  →  showing entities expiring before block $cutoff"
+    curl -s -X POST {{ query_url }} \
+      -H "Content-Type: application/json" \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"arkiv_query\",\"params\":[\"\\$expiration < $cutoff\",null]}" \
+    | jq '{count: (.result.data|length), entities: [.result.data[] | {key: .key, expiresAt: .expiresAt}]}'
+
+# Update an entity — changes its content type to text/markdown
+# Usage: just -f demo/justfile update 0xKEY
+update key:
+    #!/usr/bin/env bash
+    cat > /tmp/arkiv-demo-update.json << EOF
+    [{"type":"update","entityKey":"{{ key }}","contentType":"text/markdown","payload":"# Updated\nThis entity was updated during the demo."}]
+    EOF
+    cd .. && cargo run -p arkiv-cli -- batch /tmp/arkiv-demo-update.json
+
+# Transfer an entity to a second account
+# Usage: just -f demo/justfile transfer 0xKEY
+transfer key:
+    cd .. && cargo run -p arkiv-cli -- transfer --key {{ key }} --new-owner {{ dev_addr2 }}
+
+# Query entities owned by the second dev account (after a transfer)
+query-new-owner:
+    just -f {{ justfile() }} _q '$owner = {{ dev_addr2 }}'
+
+# Delete an entity
+# Usage: just -f demo/justfile delete 0xKEY
+delete key:
+    cd .. && cargo run -p arkiv-cli -- delete --key {{ key }}
+
+# ── full automated demo ───────────────────────────────────────────────────────
+
+# Run the complete demo end-to-end with pauses between steps
+full:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    Q="{{ query_url }}"
+    DEV2="{{ dev_addr2 }}"
+    REPO=$(cd .. && pwd)
+
+    sep() { echo ""; echo "──────────────────────────────────────────"; echo "  $1"; echo "──────────────────────────────────────────"; echo ""; }
+    query() {
+        local filter="$1"
+        echo "▶ query: $filter"
+        curl -s -X POST "$Q" \
+          -H "Content-Type: application/json" \
+          -d "$(jq -n --arg f "$filter" '{"jsonrpc":"2.0","id":1,"method":"arkiv_query","params":[$f,null]}')" \
+        | jq -C '{count: ((.result.data // [])|length), block: .result.blockNumber, entities: [(.result.data // [])[] | {key: .key, contentType: .contentType, expiresAt: .expiresAt, owner: .owner}]}'
+        echo ""
+    }
+
+    # ── 1. Create ──────────────────────────────────────────────────────────
+    sep "1 / 7  Create 5 entities"
+    create_out=$(cd "$REPO" && cargo run -p arkiv-cli -- batch demo/fixtures/01-create.json 2>/dev/null)
+    echo "$create_out"
+
+    KEY1=$(echo "$create_out" | awk '/entity_key:/{count++; if(count==1) print $2}')
+    KEY2=$(echo "$create_out" | awk '/entity_key:/{count++; if(count==2) print $2}')
+    KEY3=$(echo "$create_out" | awk '/entity_key:/{count++; if(count==3) print $2}')
+
+    echo ""
+    echo "  KEY1 (will be updated):    $KEY1"
+    echo "  KEY2 (will be transferred): $KEY2"
+    echo "  KEY3 (will be deleted):    $KEY3"
+    sleep 4
+
+    # ── 2. Query: all ──────────────────────────────────────────────────────
+    sep "2 / 7  All entities (expect 5)"
+    query '*'
+    sleep 3
+
+    # ── 3. Query: by content type ──────────────────────────────────────────
+    sep "3 / 7  Filter by content type"
+    query '$contentType = "application/json"'
+    sleep 2
+    query '$contentType = "text/plain"'
+    sleep 3
+
+    # ── 4. Update: KEY1 content type → text/markdown ───────────────────────
+    sep "4 / 7  Update entity 1 (application/json → text/markdown)"
+    cat > /tmp/arkiv-demo-update.json << EOF
+    [{"type":"update","entityKey":"$KEY1","contentType":"text/markdown","payload":"# Updated entity\nThis was changed during the demo."}]
+    EOF
+    (cd "$REPO" && cargo run -p arkiv-cli -- batch /tmp/arkiv-demo-update.json 2>/dev/null)
+    sleep 2
+    echo "After update — JSON entities (expect 2 now):"
+    query '$contentType = "application/json"'
+    echo "After update — markdown entities (expect 1):"
+    query '$contentType = "text/markdown"'
+    sleep 3
+
+    # ── 5. Transfer: KEY2 to second account ────────────────────────────────
+    sep "5 / 7  Transfer entity 2 to $DEV2"
+    (cd "$REPO" && cargo run -p arkiv-cli -- transfer --key "$KEY2" --new-owner "$DEV2" 2>/dev/null)
+    sleep 2
+    echo "Entities owned by $DEV2:"
+    query "\$owner = $DEV2"
+    sleep 3
+
+    # ── 6. Delete: KEY3 ────────────────────────────────────────────────────
+    sep "6 / 7  Delete entity 3"
+    (cd "$REPO" && cargo run -p arkiv-cli -- delete --key "$KEY3" 2>/dev/null)
+    sleep 2
+
+    # ── 7. Final state ─────────────────────────────────────────────────────
+    sep "7 / 7  Final state (expect 4 entities)"
+    query '*'
+
+    echo "Demo complete."
