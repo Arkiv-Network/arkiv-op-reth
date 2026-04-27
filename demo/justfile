@@ -13,6 +13,7 @@
 
 query_url  := "http://localhost:2705"
 dev_addr2  := "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+arkiv_cli  := env_var_or_default("ARKIV_CLI", "cargo run -p arkiv-cli --")
 
 # ── internal helpers ─────────────────────────────────────────────────────────
 
@@ -45,7 +46,7 @@ setup:
 
 # Create 5 entities (3 JSON, 2 plain-text, varying expiry)
 load:
-    cd .. && cargo run -p arkiv-cli -- batch demo/fixtures/01-create.json
+    cd .. && {{ arkiv_cli }} batch demo/fixtures/01-create.json
 
 # Query: every entity in the store
 query-all:
@@ -77,12 +78,12 @@ update key:
     cat > /tmp/arkiv-demo-update.json << EOF
     [{"type":"update","entityKey":"{{ key }}","contentType":"text/markdown","payload":"# Updated\nThis entity was updated during the demo."}]
     EOF
-    cd .. && cargo run -p arkiv-cli -- batch /tmp/arkiv-demo-update.json
+    cd .. && {{ arkiv_cli }} batch /tmp/arkiv-demo-update.json
 
 # Transfer an entity to a second account
 # Usage: just -f demo/justfile transfer 0xKEY
 transfer key:
-    cd .. && cargo run -p arkiv-cli -- transfer --key {{ key }} --new-owner {{ dev_addr2 }}
+    cd .. && {{ arkiv_cli }} transfer --key {{ key }} --new-owner {{ dev_addr2 }}
 
 # Query entities owned by the second dev account (after a transfer)
 query-new-owner:
@@ -91,7 +92,7 @@ query-new-owner:
 # Delete an entity
 # Usage: just -f demo/justfile delete 0xKEY
 delete key:
-    cd .. && cargo run -p arkiv-cli -- delete --key {{ key }}
+    cd .. && {{ arkiv_cli }} delete --key {{ key }}
 
 # ── full automated demo ───────────────────────────────────────────────────────
 
@@ -117,7 +118,7 @@ full:
 
     # ── 1. Create ──────────────────────────────────────────────────────────
     sep "1 / 7  Create 5 entities"
-    create_out=$(cd "$REPO" && cargo run -p arkiv-cli -- batch demo/fixtures/01-create.json 2>/dev/null)
+    create_out=$(cd "$REPO" && {{ arkiv_cli }} batch demo/fixtures/01-create.json 2>/dev/null)
     echo "$create_out"
 
     KEY1=$(echo "$create_out" | awk '/entity_key:/{count++; if(count==1) print $2}')
@@ -147,7 +148,7 @@ full:
     cat > /tmp/arkiv-demo-update.json << EOF
     [{"type":"update","entityKey":"$KEY1","contentType":"text/markdown","payload":"# Updated entity\nThis was changed during the demo."}]
     EOF
-    (cd "$REPO" && cargo run -p arkiv-cli -- batch /tmp/arkiv-demo-update.json 2>/dev/null)
+    (cd "$REPO" && {{ arkiv_cli }} batch /tmp/arkiv-demo-update.json 2>/dev/null)
     sleep 2
     echo "After update — JSON entities (expect 2 now):"
     query '$contentType = "application/json"'
@@ -157,7 +158,7 @@ full:
 
     # ── 5. Transfer: KEY2 to second account ────────────────────────────────
     sep "5 / 7  Transfer entity 2 to $DEV2"
-    (cd "$REPO" && cargo run -p arkiv-cli -- transfer --key "$KEY2" --new-owner "$DEV2" 2>/dev/null)
+    (cd "$REPO" && {{ arkiv_cli }} transfer --key "$KEY2" --new-owner "$DEV2" 2>/dev/null)
     sleep 2
     echo "Entities owned by $DEV2:"
     query "\$owner = $DEV2"
@@ -165,7 +166,7 @@ full:
 
     # ── 6. Delete: KEY3 ────────────────────────────────────────────────────
     sep "6 / 7  Delete entity 3"
-    (cd "$REPO" && cargo run -p arkiv-cli -- delete --key "$KEY3" 2>/dev/null)
+    (cd "$REPO" && {{ arkiv_cli }} delete --key "$KEY3" 2>/dev/null)
     sleep 2
 
     # ── 7. Final state ─────────────────────────────────────────────────────

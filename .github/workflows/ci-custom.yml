@@ -1,6 +1,14 @@
 name: Build on op-reth-builder
 
 on:
+  push:
+    branches:
+      - main
+      - release/**
+  pull_request:
+    branches:
+      - main
+      - release/**
   workflow_dispatch:
     inputs:
       rust_flags:
@@ -22,8 +30,11 @@ on:
         default: 'false'
         options: [ 'true', 'false' ]
 
+permissions:
+  contents: read
+
 jobs:
-  release:
+  build:
     runs-on: op-reth-builder
 
     steps:
@@ -83,13 +94,13 @@ jobs:
           fi
           echo "cache_dir=$cache_dir" >> $GITHUB_OUTPUT
 
-      - name: Build arkiv-node binary
-        run: cargo build
+      - name: Build arkiv binaries
+        run: cargo build --bin arkiv-node --bin arkiv-cli
 
-      - name: Move arkiv-node binary to build directory
+      - name: Move binaries to build directory
         run: |
           mkdir build
-          mv target/debug/arkiv-node build
+          mv target/debug/{arkiv-node,arkiv-cli} build
 
       - name: Strip binaries
         if: ${{ github.event.inputs.strip_binaries != 'false' }}
@@ -99,10 +110,39 @@ jobs:
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
-          name: arkiv-node-binaries
+          name: arkiv-binaries
           path: build
 
       - name: Save local cache
         run: |
           # copy to /opt/yagna_cache and preserve permissions and timestamps
           rsync -a --delete --mkpath target/ "${{ steps.cache_action.outputs.cache_dir }}"
+
+  demo-e2e:
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: arkiv-binaries
+          path: /tmp/arkiv-binaries
+
+      - name: Make binaries executable
+        run: chmod +x /tmp/arkiv-binaries/*
+
+      - name: Install just
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y just
+
+      - name: Run demo e2e
+        env:
+          ARKIV_NODE: /tmp/arkiv-binaries/arkiv-node
+          ARKIV_CLI: /tmp/arkiv-binaries/arkiv-cli
+        run: just demo-e2e

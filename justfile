@@ -2,6 +2,8 @@ registry := "0x4400000000000000000000000000000000000044"
 dev_key  := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 dev_addr := "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 rpc      := "http://localhost:8545"
+arkiv_node := env_var_or_default("ARKIV_NODE", "cargo run -p arkiv-node --")
+arkiv_cli  := env_var_or_default("ARKIV_CLI", "cargo run -p arkiv-cli --")
 
 # ── Build ────────────────────────────────────────────────────
 
@@ -33,7 +35,7 @@ genesis:
     set -e
     TMP=$(mktemp)
     cp chainspec/dev.base.json "$TMP"
-    cargo run --quiet -p arkiv-cli -- inject-predeploy "$TMP" 2>/dev/null
+    {{ arkiv_cli }} inject-predeploy "$TMP" 2>/dev/null
     cat "$TMP"
     rm -f "$TMP"
 
@@ -46,13 +48,13 @@ node-dev *args='':
     TMPDIR=$(mktemp -d)
     GENESIS="$TMPDIR/genesis.json"
     cp chainspec/dev.base.json "$GENESIS"
-    cargo run --quiet -p arkiv-cli -- inject-predeploy "$GENESIS"
-    cargo run --quiet -p arkiv-node -- init --chain "$GENESIS" --datadir "$TMPDIR"
+    {{ arkiv_cli }} inject-predeploy "$GENESIS"
+    {{ arkiv_node }} init --chain "$GENESIS" --datadir "$TMPDIR"
     echo "datadir: $TMPDIR"
     echo "genesis: $GENESIS"
     echo "registry: {{ registry }}"
     echo "dev account: {{ dev_addr }}"
-    cargo run -p arkiv-node -- node \
+    {{ arkiv_node }} node \
         --chain "$GENESIS" \
         --dev \
         --dev.block-time 2s \
@@ -64,61 +66,61 @@ node-dev *args='':
 
 # Run arkiv-node with custom args
 node *args='':
-    cargo run -p arkiv-node -- {{ args }}
+    {{ arkiv_node }} {{ args }}
 
 # ── CLI ──────────────────────────────────────────────────────
 
 # Run arkiv-cli with arbitrary args
 cli *args='':
-    cargo run -p arkiv-cli -- {{ args }}
+    {{ arkiv_cli }} {{ args }}
 
 # Create an entity (random payload)
 create *args='':
-    cargo run -p arkiv-cli -- create {{ args }}
+    {{ arkiv_cli }} create {{ args }}
 
 # Update an entity
 update key *args='':
-    cargo run -p arkiv-cli -- update --key {{ key }} {{ args }}
+    {{ arkiv_cli }} update --key {{ key }} {{ args }}
 
 # Extend an entity's expiration
 extend key expires_in='1h':
-    cargo run -p arkiv-cli -- extend --key {{ key }} --expires-in {{ expires_in }}
+    {{ arkiv_cli }} extend --key {{ key }} --expires-in {{ expires_in }}
 
 # Transfer entity ownership
 transfer key new_owner:
-    cargo run -p arkiv-cli -- transfer --key {{ key }} --new-owner {{ new_owner }}
+    {{ arkiv_cli }} transfer --key {{ key }} --new-owner {{ new_owner }}
 
 # Delete an entity
 delete key:
-    cargo run -p arkiv-cli -- delete --key {{ key }}
+    {{ arkiv_cli }} delete --key {{ key }}
 
 # Expire an entity (must be past expiration)
 expire key:
-    cargo run -p arkiv-cli -- expire --key {{ key }}
+    {{ arkiv_cli }} expire --key {{ key }}
 
 # Query an entity commitment
 query key:
-    cargo run -p arkiv-cli -- query --key {{ key }}
+    {{ arkiv_cli }} query --key {{ key }}
 
 # Read the current changeset hash
 hash:
-    cargo run -p arkiv-cli -- hash
+    {{ arkiv_cli }} hash
 
 # Walk the changeset history
 history *args='':
-    cargo run -p arkiv-cli -- history {{ args }}
+    {{ arkiv_cli }} history {{ args }}
 
 # Check dev account balance
 balance *args='':
-    cargo run -p arkiv-cli -- balance {{ args }}
+    {{ arkiv_cli }} balance {{ args }}
 
 # Submit a batch of operations from a JSON file in a single tx
 batch file:
-    cargo run -p arkiv-cli -- batch {{ file }}
+    {{ arkiv_cli }} batch {{ file }}
 
 # Fire off multiple entity creates
 spam *args='':
-    cargo run -p arkiv-cli -- spam {{ args }}
+    {{ arkiv_cli }} spam {{ args }}
 
 # ── EntityDB Mock ────────────────────────────────────────────
 
@@ -134,15 +136,15 @@ node-dev-jsonrpc *args='':
     TMPDIR=$(mktemp -d)
     GENESIS="$TMPDIR/genesis.json"
     cp chainspec/dev.base.json "$GENESIS"
-    cargo run --quiet -p arkiv-cli -- inject-predeploy "$GENESIS"
-    cargo run --quiet -p arkiv-node -- init --chain "$GENESIS" --datadir "$TMPDIR"
+    {{ arkiv_cli }} inject-predeploy "$GENESIS"
+    {{ arkiv_node }} init --chain "$GENESIS" --datadir "$TMPDIR"
     echo "datadir: $TMPDIR"
     echo "genesis: $GENESIS"
     echo "registry: {{ registry }}"
     echo "dev account: {{ dev_addr }}"
     echo "entitydb: http://localhost:9545"
     ARKIV_ENTITYDB_URL=http://localhost:9545 \
-    cargo run -p arkiv-node -- node \
+    {{ arkiv_node }} node \
         --chain "$GENESIS" \
         --dev \
         --dev.block-time 2s \
@@ -161,15 +163,15 @@ node-dev-storaged *args='':
     TMPDIR=$(mktemp -d)
     GENESIS="$TMPDIR/genesis.json"
     cp chainspec/dev.base.json "$GENESIS"
-    cargo run --quiet -p arkiv-cli -- inject-predeploy "$GENESIS"
-    cargo run --quiet -p arkiv-node -- init --chain "$GENESIS" --datadir "$TMPDIR"
+    {{ arkiv_cli }} inject-predeploy "$GENESIS"
+    {{ arkiv_node }} init --chain "$GENESIS" --datadir "$TMPDIR"
     echo "datadir: $TMPDIR"
     echo "genesis: $GENESIS"
     echo "registry: {{ registry }}"
     echo "dev account: {{ dev_addr }}"
     echo "storaged: http://localhost:2704"
     ARKIV_ENTITYDB_URL=http://localhost:2704 \
-    cargo run -p arkiv-node -- node \
+    {{ arkiv_node }} node \
         --chain "$GENESIS" \
         --dev \
         --dev.block-time 2s \
@@ -178,6 +180,57 @@ node-dev-storaged *args='':
         --log.file.directory "$TMPDIR/logs" \
         {{ args }}
     rm -rf "$TMPDIR"
+
+# Run the scripted demo against the local demo EntityDB/query shim.
+demo-e2e:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TMPDIR=$(mktemp -d)
+    ENTITYDB_LOG="$TMPDIR/demo-entitydb.log"
+    NODE_LOG="$TMPDIR/arkiv-node.log"
+    cleanup() {
+        for pid in "${NODE_PID:-}" "${ENTITYDB_PID:-}"; do
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                kill "$pid" 2>/dev/null || true
+            fi
+        done
+        sleep 1
+        for pid in "${NODE_PID:-}" "${ENTITYDB_PID:-}"; do
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        done
+        rm -rf "$TMPDIR"
+    }
+    trap cleanup EXIT
+
+    python3 scripts/demo_entitydb.py >"$ENTITYDB_LOG" 2>&1 &
+    ENTITYDB_PID=$!
+
+    for _ in $(seq 1 50); do
+        if curl -fsS -X POST http://localhost:2704 \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","id":0,"method":"arkiv_ping","params":[]}' >/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+
+    just node-dev-storaged >"$NODE_LOG" 2>&1 &
+    NODE_PID=$!
+
+    for _ in $(seq 1 120); do
+        if curl -fsS -X POST http://localhost:8545 \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' >/dev/null; then
+            just -f demo/justfile full
+            exit 0
+        fi
+        sleep 1
+    done
+
+    echo "arkiv-node did not become ready; see $NODE_LOG" >&2
+    exit 1
 
 # ── Dev Helpers ──────────────────────────────────────────────
 
