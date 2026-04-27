@@ -1,7 +1,7 @@
 pub mod jsonrpc;
 pub mod logging;
 
-use alloy_primitives::{Address, B256, Bytes};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use eyre::Result;
 use serde::Serialize;
 
@@ -139,11 +139,18 @@ pub struct ExpireOp {
     pub changeset_hash: B256,
 }
 
+/// Decoded attribute value, mirroring the contract's three value types.
+///
+/// `#[serde(untagged)]` discriminates by which value field is present:
+///   - `stringValue`: opaque UTF-8 (≤128 bytes per `value128-encoding.md`)
+///   - `numericValue`: hex-encoded `U256` (right-aligned in `data[0]`)
+///   - `entityKey`: hex-encoded `B256` (cross-reference to another entity)
 #[derive(Serialize)]
-#[serde(untagged)]
+#[serde(untagged, rename_all = "camelCase")]
 pub enum Attribute {
     String { key: String, string_value: String },
-    Numeric { key: String, numeric_value: u64 },
+    Numeric { key: String, numeric_value: U256 },
+    EntityKey { key: String, entity_key: B256 },
 }
 
 // ---------------------------------------------------------------------------

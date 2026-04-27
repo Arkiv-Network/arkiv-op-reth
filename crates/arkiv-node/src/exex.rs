@@ -14,7 +14,10 @@ use arkiv_bindings::storage_layout::{
     hash_at_slot, head_block_slot, tx_op_count_slot,
 };
 use arkiv_bindings::types::DecodedOperation;
-use arkiv_bindings::{OP_CREATE, OP_DELETE, OP_EXPIRE, OP_EXTEND, OP_TRANSFER, OP_UPDATE};
+use arkiv_bindings::{
+    ATTR_ENTITY_KEY, ATTR_STRING, ATTR_UINT, OP_CREATE, OP_DELETE, OP_EXPIRE, OP_EXTEND,
+    OP_TRANSFER, OP_UPDATE,
+};
 use eyre::Result;
 use futures_util::TryStreamExt;
 use reth_execution_types::Chain;
@@ -290,20 +293,27 @@ fn to_arkiv_operation(
     }
 }
 
+/// Decode an entity's attributes into wire-format `Attribute` variants.
+///
+/// Encoding rules (see `arkiv-contracts/docs/value128-encoding.md`):
+///   - `ATTR_UINT`: `raw_value[0]` is right-aligned big-endian uint256;
+///     other words are zero. Decoded losslessly to `U256`.
+///   - `ATTR_STRING`: left-aligned UTF-8 across all four words, zero-padded.
+///     Truncated at the first NUL byte.
+///   - `ATTR_ENTITY_KEY`: `raw_value[0]` is the entity key; other words zero.
+///
+/// Unknown `value_type` values are skipped with a warning rather than
+/// guessing — keeps wire output honest if/when the contract adds new types.
 fn to_attributes(entity: &arkiv_bindings::types::EntityRecord) -> Vec<Attribute> {
     entity
         .attributes
         .iter()
-        .map(|attr| match attr.value_type {
-            1 => {
-                let bytes: &[u8] = attr.raw_value[0].as_ref();
-                let val = u64::from_be_bytes(bytes[24..32].try_into().unwrap_or_default());
-                Attribute::Numeric {
-                    key: attr.name.clone(),
-                    numeric_value: val,
-                }
-            }
-            _ => {
+        .filter_map(|attr| match attr.value_type {
+            ATTR_UINT => Some(Attribute::Numeric {
+                key: attr.name.clone(),
+                numeric_value: U256::from_be_bytes(attr.raw_value[0].0),
+            }),
+            ATTR_STRING => {
                 let mut buf = Vec::with_capacity(128);
                 for b32 in &attr.raw_value {
                     buf.extend_from_slice(b32.as_ref());
@@ -311,10 +321,22 @@ fn to_attributes(entity: &arkiv_bindings::types::EntityRecord) -> Vec<Attribute>
                 if let Some(end) = buf.iter().position(|b| *b == 0) {
                     buf.truncate(end);
                 }
-                Attribute::String {
+                Some(Attribute::String {
                     key: attr.name.clone(),
                     string_value: String::from_utf8_lossy(&buf).to_string(),
-                }
+                })
+            }
+            ATTR_ENTITY_KEY => Some(Attribute::EntityKey {
+                key: attr.name.clone(),
+                entity_key: attr.raw_value[0],
+            }),
+            other => {
+                tracing::warn!(
+                    name = %attr.name,
+                    value_type = other,
+                    "unknown attribute value_type — skipping"
+                );
+                None
             }
         })
         .collect()

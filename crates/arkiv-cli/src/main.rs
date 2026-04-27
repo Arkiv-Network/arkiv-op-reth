@@ -4,6 +4,7 @@ use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types::eth::Log as RpcLog;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolEvent;
+use arkiv_bindings::types::Ident32;
 use arkiv_bindings::{IEntityRegistry::EntityOperation, *};
 use clap::{Parser, Subcommand};
 use eyre::{Result, bail};
@@ -256,6 +257,32 @@ fn default_content_type() -> String {
     "application/octet-stream".to_string()
 }
 
+/// One attribute in a batch JSON op. The value type is discriminated by
+/// which of `string` / `uint` / `entityKey` is present (untagged enum).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchAttribute {
+    /// `Ident32` name (lowercase ASCII, validated client-side).
+    name: String,
+    #[serde(flatten)]
+    value: BatchAttributeValue,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum BatchAttributeValue {
+    String {
+        string: String,
+    },
+    Uint {
+        uint: U256,
+    },
+    EntityKey {
+        #[serde(rename = "entityKey")]
+        entity_key: EntityKeyRef,
+    },
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum BatchOp {
@@ -269,6 +296,8 @@ enum BatchOp {
         size: Option<usize>,
         #[serde(deserialize_with = "de_humantime", rename = "expiresIn")]
         expires_in: Duration,
+        #[serde(default)]
+        attributes: Vec<BatchAttribute>,
     },
     Update {
         #[serde(rename = "entityKey")]
@@ -277,6 +306,8 @@ enum BatchOp {
         content_type: String,
         payload: Option<String>,
         size: Option<usize>,
+        #[serde(default)]
+        attributes: Vec<BatchAttribute>,
     },
     Extend {
         #[serde(rename = "entityKey")]
@@ -298,6 +329,69 @@ enum BatchOp {
         #[serde(rename = "entityKey")]
         entity_key: EntityKeyRef,
     },
+}
+
+/// Build a sol `Attribute` from a batch entry, validating the Ident32 name
+/// and packing the value per the contract's `bytes32[4]` encoding rules
+/// (see `arkiv-contracts/docs/value128-encoding.md`).
+fn build_attribute(
+    attr: &BatchAttribute,
+    resolve: &impl Fn(&EntityKeyRef) -> Result<B256>,
+) -> Result<Attribute> {
+    let name = Ident32::encode(&attr.name)
+        .map_err(|e| eyre::eyre!("invalid attribute name '{}': {}", attr.name, e))?
+        .as_b256();
+
+    let (value_type, value) = match &attr.value {
+        BatchAttributeValue::Uint { uint } => {
+            let mut v = [FixedBytes::ZERO; 4];
+            v[0] = FixedBytes::from(uint.to_be_bytes::<32>());
+            (ATTR_UINT, v)
+        }
+        BatchAttributeValue::String { string } => {
+            let bytes = string.as_bytes();
+            if bytes.len() > 128 {
+                bail!(
+                    "attribute '{}' string value exceeds 128 bytes ({})",
+                    attr.name,
+                    bytes.len()
+                );
+            }
+            let mut v = [FixedBytes::ZERO; 4];
+            for (i, chunk) in bytes.chunks(32).enumerate() {
+                let mut buf = [0u8; 32];
+                buf[..chunk.len()].copy_from_slice(chunk);
+                v[i] = FixedBytes::from(buf);
+            }
+            (ATTR_STRING, v)
+        }
+        BatchAttributeValue::EntityKey { entity_key } => {
+            let key = resolve(entity_key)?;
+            let mut v = [FixedBytes::ZERO; 4];
+            v[0] = FixedBytes::from(key.0);
+            (ATTR_ENTITY_KEY, v)
+        }
+    };
+
+    Ok(Attribute {
+        name: name.into(),
+        valueType: value_type,
+        value,
+    })
+}
+
+/// Build the contract's `Attribute[]` from batch entries, sorted by name
+/// ascending as the contract requires for deterministic hashing.
+fn build_attributes(
+    attrs: &[BatchAttribute],
+    resolve: &impl Fn(&EntityKeyRef) -> Result<B256>,
+) -> Result<Vec<Attribute>> {
+    let mut out: Vec<Attribute> = attrs
+        .iter()
+        .map(|a| build_attribute(a, resolve))
+        .collect::<Result<_>>()?;
+    out.sort_by_key(|a| a.name);
+    Ok(out)
 }
 
 /// Resolve `payload`/`size` fields into raw bytes.
@@ -550,6 +644,7 @@ async fn main() -> Result<()> {
                         payload,
                         size,
                         expires_in,
+                        attributes,
                     } => {
                         let expires_at =
                             expiry_block(&provider, *expires_in, cli.block_time).await?;
@@ -558,7 +653,7 @@ async fn main() -> Result<()> {
                             entityKey: B256::ZERO,
                             payload: resolve_payload(payload.as_deref(), *size)?,
                             contentType: encode_mime128(content_type),
-                            attributes: vec![],
+                            attributes: build_attributes(attributes, &resolve)?,
                             expiresAt: expires_at,
                             newOwner: Address::ZERO,
                         }
@@ -568,11 +663,13 @@ async fn main() -> Result<()> {
                         content_type,
                         payload,
                         size,
+                        attributes,
                     } => Operation {
                         operationType: OP_UPDATE,
                         entityKey: resolve(entity_key)?,
                         payload: resolve_payload(payload.as_deref(), *size)?,
                         contentType: encode_mime128(content_type),
+                        attributes: build_attributes(attributes, &resolve)?,
                         ..Default::default()
                     },
                     BatchOp::Extend {

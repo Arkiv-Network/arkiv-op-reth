@@ -1,0 +1,19 @@
+[
+  {
+    "type": "create",
+    "contentType": "application/json",
+    "payload": "{\"target\":true}",
+    "expiresIn": "1h"
+  },
+  {
+    "type": "create",
+    "contentType": "application/json",
+    "payload": "{\"v\":1}",
+    "expiresIn": "1h",
+    "attributes": [
+      { "name": "title",     "string": "the answer" },
+      { "name": "priority",  "uint": 42 },
+      { "name": "linked.to", "entityKey": "$0" }
+    ]
+  }
+]
