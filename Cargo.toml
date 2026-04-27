@@ -3,7 +3,6 @@ members = ["crates/arkiv-node", "crates/arkiv-cli"]
 resolver = "2"
 
 [workspace.package]
-name = "arkiv-op-reth"
 version = "0.1.0"
 authors = ["Arkiv Contributors <dev@arkiv.network>"]
 edition = "2024"
@@ -27,7 +26,7 @@ reth-node-api = { git = "https://github.com/paradigmxyz/reth", rev = "552d896f9c
 reth-execution-types = { git = "https://github.com/paradigmxyz/reth", rev = "552d896f9c4b75201def55969d3c23bcc990dd80" }
 
 # Arkiv bindings (from arkiv-contracts repo)
-arkiv-bindings = { git = "https://github.com/Arkiv-Network/arkiv-contracts.git", rev = "b220baf" }
+arkiv-bindings = { git = "https://github.com/Arkiv-Network/arkiv-contracts.git", rev = "344640e" }
 
 # Alloy
 alloy-primitives = "1.5"
@@ -46,9 +45,11 @@ revm = { version = "36.0.0", default-features = false, features = ["std"] }
 # Util
 clap = { version = "4", features = ["derive"] }
 eyre = "0.6"
+serde = { version = "1", features = ["derive"] }
 futures-util = "0.3"
 tracing = "0.1"
 hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 

@@ -11,9 +11,10 @@ fn main() -> eyre::Result<()> {
         // Inject EntityRegistry predeploy + dev account into the chain spec genesis.
         {
             let config = builder.config_mut();
-            let chain_id = config.chain.genesis.config.chain_id;
+            let chain_id = 1337u64;
 
             let mut chain_genesis = config.chain.genesis.clone();
+            chain_genesis.config.chain_id = chain_id;
             chain_genesis
                 .alloc
                 .extend(genesis::genesis_alloc(chain_id)?);
@@ -48,9 +49,19 @@ fn main() -> eyre::Result<()> {
                 std::sync::Arc::new(reth_optimism_chainspec::OpChainSpec::from(chain_genesis));
         }
 
-        let store: Arc<dyn storage::Storage> = Arc::new(storage::logging::LoggingStore::new(
-            genesis::ENTITY_REGISTRY_ADDRESS,
-        ));
+        let store: Arc<dyn storage::Storage> = if let Ok(url) = std::env::var("ARKIV_ENTITYDB_URL")
+        {
+            tracing::info!(url = %url, "using JsonRpcStore backend");
+            let store = storage::jsonrpc::JsonRpcStore::new(url.clone());
+            if let Err(e) = store.health_check().await {
+                tracing::error!(url = %url, error = %e, "EntityDB health check failed; exiting");
+                return Err(e);
+            }
+            Arc::new(store)
+        } else {
+            tracing::info!("using LoggingStore backend");
+            Arc::new(storage::logging::LoggingStore::new())
+        };
 
         let handle = builder
             .node(OpNode::new(rollup_args))

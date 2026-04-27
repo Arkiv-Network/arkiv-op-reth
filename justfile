@@ -98,6 +98,31 @@ balance *args='':
 spam *args='':
     cargo run -p arkiv-cli -- spam {{ args }}
 
+# ── EntityDB Mock ────────────────────────────────────────────
+
+# Run mock EntityDB that logs incoming JSON-RPC requests
+mock-entitydb port='9545':
+    node scripts/mock-entitydb.js {{ port }}
+
+# Run arkiv-node in dev mode with JsonRpcStore pointing at mock EntityDB
+node-dev-jsonrpc *args='':
+    #!/usr/bin/env bash
+    set -e
+    TMPDIR=$(mktemp -d)
+    echo "datadir: $TMPDIR"
+    echo "registry: {{ registry }}"
+    echo "dev account: {{ dev_addr }}"
+    echo "entitydb: http://localhost:9545"
+    ARKIV_ENTITYDB_URL=http://localhost:9545 \
+    cargo run -p arkiv-node -- node \
+        --dev \
+        --dev.block-time 2s \
+        --datadir "$TMPDIR" \
+        --http \
+        --log.file.directory "$TMPDIR/logs" \
+        {{ args }}
+    rm -rf "$TMPDIR"
+
 # ── Dev Helpers ──────────────────────────────────────────────
 
 # Verify EntityRegistry is deployed (requires running node)
