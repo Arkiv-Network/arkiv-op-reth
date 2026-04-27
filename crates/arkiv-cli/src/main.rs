@@ -4,7 +4,7 @@ use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types::eth::Log as RpcLog;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolEvent;
-use arkiv_bindings::types::{Ident32, Mime128Str};
+use arkiv_bindings::types::{Ident32, Mime128Str, op_type_name};
 use arkiv_bindings::{IEntityRegistry::EntityOperation, *};
 use clap::{Parser, Subcommand};
 use eyre::{Result, bail};
@@ -197,20 +197,12 @@ fn build_operation(op_type: u8, key: B256) -> Operation {
     }
 }
 
-const OP_NAMES: [&str; 7] = [
-    "UNKNOWN", "CREATE", "UPDATE", "EXTEND", "TRANSFER", "DELETE", "EXPIRE",
-];
-
-fn op_name(op_type: u8) -> &'static str {
-    OP_NAMES.get(op_type as usize).unwrap_or(&"UNKNOWN")
-}
-
 fn print_events(logs: &[RpcLog]) {
     for log in logs {
         if let Ok(event) = EntityOperation::decode_log(&log.inner) {
             let e = event.data;
             println!("---");
-            println!("  op:          {}", op_name(e.operationType));
+            println!("  op:          {}", op_type_name(e.operationType));
             println!("  entity_key:  {}", e.entityKey);
             println!("  owner:       {}", e.owner);
             println!("  expires_at:  {}", e.expiresAt);
