@@ -145,6 +145,21 @@ enum Command {
         file: PathBuf,
     },
 
+    /// Splice the EntityRegistry predeploy into a geth-format genesis JSON.
+    ///
+    /// Reads `chainId` from the input, runs the contract creation bytecode
+    /// against that chain ID (so the EIP-712 cached domain separator
+    /// matches), and inserts the resulting runtime bytecode at the canonical
+    /// predeploy address. Designed for post-processing op-deployer output.
+    InjectPredeploy {
+        /// Input genesis JSON (geth format).
+        file: PathBuf,
+
+        /// Output path. Defaults to overwriting the input.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+
     /// Fire off multiple entity creates.
     Spam {
         /// Number of entities to create.
@@ -390,9 +405,58 @@ fn resolve_payload(payload: Option<&str>, size: Option<usize>) -> Result<Bytes> 
     }
 }
 
+/// Splice the EntityRegistry predeploy into a geth-format genesis JSON.
+///
+/// Reads `chainId` from the input's `config`, runs the contract creation
+/// bytecode through revm at that chain ID, and writes the resulting
+/// runtime bytecode into `alloc[ENTITY_REGISTRY_ADDRESS].code`. Output is
+/// pretty-printed back to disk (overwriting the input by default, or to
+/// `out` if specified).
+fn inject_predeploy(input: &std::path::Path, out: Option<&std::path::Path>) -> Result<()> {
+    use arkiv_genesis::{ENTITY_REGISTRY_ADDRESS, predeploy_account};
+
+    let raw = std::fs::read_to_string(input)
+        .map_err(|e| eyre::eyre!("failed to read {}: {}", input.display(), e))?;
+    let mut genesis: arkiv_genesis::Genesis = serde_json::from_str(&raw)
+        .map_err(|e| eyre::eyre!("failed to parse {} as genesis JSON: {}", input.display(), e))?;
+
+    let chain_id = genesis.config.chain_id;
+    if chain_id == 0 {
+        bail!("genesis config.chainId is zero — refusing to inject");
+    }
+
+    if genesis.alloc.contains_key(&ENTITY_REGISTRY_ADDRESS) {
+        eprintln!(
+            "warning: alloc already contains an entry at {ENTITY_REGISTRY_ADDRESS}; overwriting",
+        );
+    }
+
+    let account = predeploy_account(chain_id)?;
+    genesis.alloc.insert(ENTITY_REGISTRY_ADDRESS, account);
+
+    let dest = out.unwrap_or(input);
+    let serialized = serde_json::to_string_pretty(&genesis)?;
+    std::fs::write(dest, serialized)
+        .map_err(|e| eyre::eyre!("failed to write {}: {}", dest.display(), e))?;
+
+    eprintln!(
+        "injected EntityRegistry predeploy at {} (chainId={}) into {}",
+        ENTITY_REGISTRY_ADDRESS,
+        chain_id,
+        dest.display(),
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // `inject-predeploy` is a pure JSON munger — no network, no signer.
+    // Handle it before any of the provider setup below.
+    if let Command::InjectPredeploy { file, out } = &cli.command {
+        return inject_predeploy(file, out.as_deref());
+    }
 
     let signer: PrivateKeySigner = cli.private_key.parse()?;
     let signer_address = signer.address();
@@ -599,6 +663,8 @@ async fn main() -> Result<()> {
                 }
             }
         }
+
+        Command::InjectPredeploy { .. } => unreachable!("handled at top of main"),
 
         Command::Batch { file } => {
             let json = std::fs::read_to_string(&file)?;

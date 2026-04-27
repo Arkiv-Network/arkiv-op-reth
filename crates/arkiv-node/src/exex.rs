@@ -1,7 +1,6 @@
 //! Arkiv ExEx — filters blocks for EntityRegistry transactions,
 //! decodes operations, and forwards them to the configured Storage backend.
 
-use crate::genesis::ENTITY_REGISTRY_ADDRESS;
 use crate::storage::{
     ArkivBlock, ArkivBlockHeader, ArkivBlockRef, ArkivOperation, ArkivTransaction, Attribute,
     CreateOp, DeleteOp, ExpireOp, ExtendOp, Storage, TransferOp, UpdateOp,
@@ -18,6 +17,7 @@ use arkiv_bindings::{
     ATTR_ENTITY_KEY, ATTR_STRING, ATTR_UINT, OP_CREATE, OP_DELETE, OP_EXPIRE, OP_EXTEND,
     OP_TRANSFER, OP_UPDATE,
 };
+use arkiv_genesis::ENTITY_REGISTRY_ADDRESS;
 use eyre::Result;
 use futures_util::TryStreamExt;
 use reth_execution_types::Chain;

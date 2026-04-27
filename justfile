@@ -27,15 +27,33 @@ fmt:
 
 # ── Node ─────────────────────────────────────────────────────
 
-# Run arkiv-node in dev mode (genesis with EntityRegistry is auto-generated)
+# Print an Arkiv dev genesis JSON to stdout (dev.base.json + injected predeploy)
+genesis:
+    #!/usr/bin/env bash
+    set -e
+    TMP=$(mktemp)
+    cp chainspec/dev.base.json "$TMP"
+    cargo run --quiet -p arkiv-cli -- inject-predeploy "$TMP" 2>/dev/null
+    cat "$TMP"
+    rm -f "$TMP"
+
+# Run arkiv-node in dev mode against a freshly assembled Arkiv genesis.
+# Generates genesis -> init datadir -> launch node, all against the same
+# chainspec file so init/node agree on the genesis hash.
 node-dev *args='':
     #!/usr/bin/env bash
     set -e
     TMPDIR=$(mktemp -d)
+    GENESIS="$TMPDIR/genesis.json"
+    cp chainspec/dev.base.json "$GENESIS"
+    cargo run --quiet -p arkiv-cli -- inject-predeploy "$GENESIS"
+    cargo run --quiet -p arkiv-node -- init --chain "$GENESIS" --datadir "$TMPDIR"
     echo "datadir: $TMPDIR"
+    echo "genesis: $GENESIS"
     echo "registry: {{ registry }}"
     echo "dev account: {{ dev_addr }}"
     cargo run -p arkiv-node -- node \
+        --chain "$GENESIS" \
         --dev \
         --dev.block-time 2s \
         --datadir "$TMPDIR" \
@@ -108,17 +126,24 @@ spam *args='':
 mock-entitydb port='9545':
     node scripts/mock-entitydb.js {{ port }}
 
-# Run arkiv-node in dev mode with JsonRpcStore pointing at mock EntityDB
+# Run arkiv-node in dev mode with JsonRpcStore pointing at mock EntityDB.
+# Same setup as `node-dev` plus the ExEx forwarding to a local EntityDB.
 node-dev-jsonrpc *args='':
     #!/usr/bin/env bash
     set -e
     TMPDIR=$(mktemp -d)
+    GENESIS="$TMPDIR/genesis.json"
+    cp chainspec/dev.base.json "$GENESIS"
+    cargo run --quiet -p arkiv-cli -- inject-predeploy "$GENESIS"
+    cargo run --quiet -p arkiv-node -- init --chain "$GENESIS" --datadir "$TMPDIR"
     echo "datadir: $TMPDIR"
+    echo "genesis: $GENESIS"
     echo "registry: {{ registry }}"
     echo "dev account: {{ dev_addr }}"
     echo "entitydb: http://localhost:9545"
     ARKIV_ENTITYDB_URL=http://localhost:9545 \
     cargo run -p arkiv-node -- node \
+        --chain "$GENESIS" \
         --dev \
         --dev.block-time 2s \
         --datadir "$TMPDIR" \

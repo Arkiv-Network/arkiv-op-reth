@@ -1,10 +1,19 @@
-//! Genesis allocations for the Arkiv chain.
+//! Genesis primitives for the Arkiv chain.
 //!
-//! Consolidates the logic from the standalone arkiv-genesis crate.
-//! Uses creation bytecode from arkiv-bindings and deploys via revm
-//! to produce runtime bytecode with populated immutables.
+//! Provides the canonical EntityRegistry predeploy address, the runtime
+//! bytecode generator (which executes the bindings' creation code in revm
+//! to populate constructor immutables for a given chain ID), and a
+//! convenience helper that builds the genesis `alloc` for a self-contained
+//! Arkiv dev chain.
+//!
+//! Used by:
+//!   - `arkiv-node`: chainspec assembly at startup or build time.
+//!   - `arkiv-cli inject-predeploy`: post-processing op-deployer output to
+//!     splice the predeploy into a standard OP genesis JSON.
 
-use alloy_genesis::GenesisAccount;
+// Re-export so consumers (e.g. `arkiv-cli inject-predeploy`) don't need to
+// take a direct dep on alloy-genesis.
+pub use alloy_genesis::{Genesis, GenesisAccount};
 use alloy_primitives::{Address, Bytes, U256};
 use arkiv_bindings::ENTITY_REGISTRY_CREATION_CODE;
 use eyre::{Result, bail, ensure};
@@ -18,12 +27,12 @@ use revm::{
 };
 use std::collections::BTreeMap;
 
-/// Predeploy address for EntityRegistry.
+/// Canonical predeploy address for `EntityRegistry`.
 pub const ENTITY_REGISTRY_ADDRESS: Address = Address::new([
     0x42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x42,
 ]);
 
-/// Hardhat test mnemonic first account.
+/// Hardhat test mnemonic first account (`0xf39F…b92266`).
 pub const DEV_ADDRESS: Address = Address::new([
     0xf3, 0x9F, 0xd6, 0xe5, 0x1a, 0xad, 0x88, 0xF6, 0xF4, 0xce, 0x6a, 0xB8, 0x82, 0x72, 0x79, 0xcf,
     0xff, 0xb9, 0x22, 0x66,
@@ -31,12 +40,25 @@ pub const DEV_ADDRESS: Address = Address::new([
 
 const GAS_LIMIT: u64 = 30_000_000;
 
+/// Synthetic deployer for the genesis-time CREATE call. Doesn't matter — we
+/// don't keep the deployment, just the resulting runtime bytecode.
 const DEPLOYER: Address = Address::new([
     0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ]);
 
-/// Execute creation bytecode in revm and return the runtime bytecode.
-fn deploy_creation_code(creation_code: &[u8], chain_id: u64) -> Result<Bytes> {
+/// Run the EntityRegistry creation bytecode in revm at the given chain ID
+/// and return the resulting runtime bytecode (with constructor immutables
+/// populated, e.g. the EIP-712 cached domain separator).
+///
+/// Deterministic: same `chain_id` + same bindings rev always yields the
+/// same bytes.
+pub fn deploy_creation_code(chain_id: u64) -> Result<Bytes> {
+    let creation_code = hex::decode(ENTITY_REGISTRY_CREATION_CODE)
+        .map_err(|e| eyre::eyre!("invalid creation bytecode hex: {}", e))?;
+    deploy_inner(&creation_code, chain_id)
+}
+
+fn deploy_inner(creation_code: &[u8], chain_id: u64) -> Result<Bytes> {
     let mut db = CacheDB::<EmptyDB>::default();
     db.insert_account_info(
         DEPLOYER,
@@ -104,16 +126,14 @@ fn deploy_creation_code(creation_code: &[u8], chain_id: u64) -> Result<Bytes> {
     Ok(runtime_bytes.clone())
 }
 
-/// Return genesis alloc entries for the EntityRegistry predeploy and dev account.
+/// Build the predeploy + dev-account alloc for a self-contained Arkiv dev
+/// genesis. Use [`predeploy_account`] alone if you don't want the dev
+/// funding (e.g. when injecting into an op-deployer-produced genesis that
+/// already has its own funded accounts).
 ///
-/// `chain_id` is forwarded to revm so the constructor's `block.chainid` read
+/// `chain_id` is forwarded to revm so the constructor's `block.chainid`
 /// (used for the EIP-712 domain separator) matches the target chain.
 pub fn genesis_alloc(chain_id: u64) -> Result<BTreeMap<Address, GenesisAccount>> {
-    let creation_code = hex::decode(ENTITY_REGISTRY_CREATION_CODE)
-        .map_err(|e| eyre::eyre!("invalid creation bytecode hex: {}", e))?;
-
-    let runtime_bytecode = deploy_creation_code(&creation_code, chain_id)?;
-
     let dev_balance = U256::from(10_000u64) * U256::from(1_000_000_000_000_000_000u128);
 
     let mut alloc = BTreeMap::new();
@@ -126,13 +146,16 @@ pub fn genesis_alloc(chain_id: u64) -> Result<BTreeMap<Address, GenesisAccount>>
         },
     );
 
-    alloc.insert(
-        ENTITY_REGISTRY_ADDRESS,
-        GenesisAccount {
-            code: Some(runtime_bytecode),
-            ..Default::default()
-        },
-    );
+    alloc.insert(ENTITY_REGISTRY_ADDRESS, predeploy_account(chain_id)?);
 
     Ok(alloc)
+}
+
+/// Build a `GenesisAccount` for the EntityRegistry predeploy at the given
+/// chain ID. Suitable for splicing into any external genesis JSON.
+pub fn predeploy_account(chain_id: u64) -> Result<GenesisAccount> {
+    Ok(GenesisAccount {
+        code: Some(deploy_creation_code(chain_id)?),
+        ..Default::default()
+    })
 }

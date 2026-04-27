@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/arkiv-node", "crates/arkiv-cli"]
+members = ["crates/arkiv-node", "crates/arkiv-cli", "crates/arkiv-genesis"]
 resolver = "2"
 
 [workspace.package]
@@ -28,6 +28,9 @@ reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "552d896
 
 # Arkiv bindings (from arkiv-contracts repo)
 arkiv-bindings = { git = "https://github.com/Arkiv-Network/arkiv-contracts.git", rev = "1345a91" }
+
+# Arkiv genesis primitives (in-tree)
+arkiv-genesis = { path = "crates/arkiv-genesis" }
 
 # Alloy
 alloy-primitives = "1.5"

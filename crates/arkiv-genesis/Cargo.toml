@@ -1,0 +1,16 @@
+[package]
+name = "arkiv-genesis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+arkiv-bindings.workspace = true
+
+alloy-genesis.workspace = true
+alloy-primitives.workspace = true
+revm.workspace = true
+
+eyre.workspace = true
+hex.workspace = true
