@@ -4,7 +4,7 @@ use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types::eth::Log as RpcLog;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolEvent;
-use arkiv_bindings::types::Ident32;
+use arkiv_bindings::types::{Ident32, Mime128Str};
 use arkiv_bindings::{IEntityRegistry::EntityOperation, *};
 use clap::{Parser, Subcommand};
 use eyre::{Result, bail};
@@ -161,18 +161,14 @@ enum Command {
     },
 }
 
-fn encode_mime128(mime: &str) -> Mime128 {
-    let bytes = mime.as_bytes();
-    let mut data = [FixedBytes::ZERO; 4];
-    for (i, chunk) in bytes.chunks(32).enumerate() {
-        if i >= 4 {
-            break;
-        }
-        let mut buf = [0u8; 32];
-        buf[..chunk.len()].copy_from_slice(chunk);
-        data[i] = FixedBytes::from(buf);
-    }
-    Mime128 { data }
+/// Validate and pack a MIME type string into the contract's `Mime128`
+/// (`bytes32[4]`) representation. Validation per RFC 2045 (lowercase only,
+/// `type/subtype[; param=value]*`) — see `arkiv_bindings::types::Mime128Str`.
+fn encode_mime128(mime: &str) -> Result<Mime128> {
+    let data = Mime128Str::encode(mime)
+        .map_err(|e| eyre::eyre!("invalid content-type '{}': {}", mime, e))?
+        .to_bytes32x4();
+    Ok(Mime128 { data })
 }
 
 fn random_payload(size: usize) -> Bytes {
@@ -435,7 +431,7 @@ async fn main() -> Result<()> {
                 operationType: OP_CREATE,
                 entityKey: B256::ZERO,
                 payload: random_payload(size),
-                contentType: encode_mime128(&content_type),
+                contentType: encode_mime128(&content_type)?,
                 attributes: vec![],
                 expiresAt: expires_at,
                 newOwner: Address::ZERO,
@@ -461,7 +457,7 @@ async fn main() -> Result<()> {
                 operationType: OP_UPDATE,
                 entityKey: key,
                 payload: random_payload(size),
-                contentType: encode_mime128(&content_type),
+                contentType: encode_mime128(&content_type)?,
                 attributes: vec![],
                 ..Default::default()
             };
@@ -652,7 +648,7 @@ async fn main() -> Result<()> {
                             operationType: OP_CREATE,
                             entityKey: B256::ZERO,
                             payload: resolve_payload(payload.as_deref(), *size)?,
-                            contentType: encode_mime128(content_type),
+                            contentType: encode_mime128(content_type)?,
                             attributes: build_attributes(attributes, &resolve)?,
                             expiresAt: expires_at,
                             newOwner: Address::ZERO,
@@ -668,7 +664,7 @@ async fn main() -> Result<()> {
                         operationType: OP_UPDATE,
                         entityKey: resolve(entity_key)?,
                         payload: resolve_payload(payload.as_deref(), *size)?,
-                        contentType: encode_mime128(content_type),
+                        contentType: encode_mime128(content_type)?,
                         attributes: build_attributes(attributes, &resolve)?,
                         ..Default::default()
                     },
@@ -736,7 +732,7 @@ async fn main() -> Result<()> {
                         operationType: OP_CREATE,
                         entityKey: B256::ZERO,
                         payload: random_payload(size),
-                        contentType: encode_mime128("application/octet-stream"),
+                        contentType: encode_mime128("application/octet-stream")?,
                         attributes: vec![],
                         expiresAt: expires_at,
                         newOwner: Address::ZERO,
