@@ -3,7 +3,7 @@
 
 use crate::genesis::ENTITY_REGISTRY_ADDRESS;
 use crate::storage::{
-    Annotation, ArkivBlock, ArkivBlockHeader, ArkivBlockRef, ArkivOperation, ArkivTransaction,
+    ArkivBlock, ArkivBlockHeader, ArkivBlockRef, ArkivOperation, ArkivTransaction, Attribute,
     ChangeOwnerOp, CreateOp, DeleteOp, ExpireOp, ExtendOp, Storage, UpdateOp,
 };
 use alloy_consensus::{BlockHeader, Transaction, TxReceipt};
@@ -194,7 +194,7 @@ fn to_arkiv_operation(
                 changeset_hash,
                 payload: entity.payload.clone().unwrap_or_default(),
                 content_type: entity.content_type.clone().unwrap_or_default(),
-                annotations: to_annotations(entity),
+                attributes: to_attributes(entity),
             }))
         }
         OP_UPDATE => {
@@ -207,7 +207,7 @@ fn to_arkiv_operation(
                 changeset_hash,
                 payload: entity.payload.clone().unwrap_or_default(),
                 content_type: entity.content_type.clone().unwrap_or_default(),
-                annotations: to_annotations(entity),
+                attributes: to_attributes(entity),
             }))
         }
         OP_EXTEND => Some(ArkivOperation::Extend(ExtendOp {
@@ -243,7 +243,7 @@ fn to_arkiv_operation(
     }
 }
 
-fn to_annotations(entity: &arkiv_bindings::types::EntityRecord) -> Vec<Annotation> {
+fn to_attributes(entity: &arkiv_bindings::types::EntityRecord) -> Vec<Attribute> {
     entity
         .attributes
         .iter()
@@ -251,7 +251,7 @@ fn to_annotations(entity: &arkiv_bindings::types::EntityRecord) -> Vec<Annotatio
             1 => {
                 let bytes: &[u8] = attr.raw_value[0].as_ref();
                 let val = u64::from_be_bytes(bytes[24..32].try_into().unwrap_or_default());
-                Annotation::Numeric {
+                Attribute::Numeric {
                     key: attr.name.clone(),
                     numeric_value: val,
                 }
@@ -264,7 +264,7 @@ fn to_annotations(entity: &arkiv_bindings::types::EntityRecord) -> Vec<Annotatio
                 if let Some(end) = buf.iter().position(|b| *b == 0) {
                     buf.truncate(end);
                 }
-                Annotation::String {
+                Attribute::String {
                     key: attr.name.clone(),
                     string_value: String::from_utf8_lossy(&buf).to_string(),
                 }

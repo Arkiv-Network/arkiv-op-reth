@@ -95,7 +95,7 @@ pub struct CreateOp {
     pub content_type: String,
     pub expires_at: u64,
     pub owner: Address,
-    pub annotations: Vec<Annotation>,
+    pub attributes: Vec<Attribute>,
 }
 
 #[derive(Serialize)]
@@ -104,7 +104,7 @@ pub struct UpdateOp {
     pub entity_address: Address,
     pub payload: Bytes,
     pub content_type: String,
-    pub annotations: Vec<Annotation>,
+    pub attributes: Vec<Attribute>,
 }
 
 #[derive(Serialize)]
@@ -135,7 +135,7 @@ pub struct ExpireOp {
 
 #[derive(Serialize)]
 #[serde(untagged)]
-pub enum Annotation {
+pub enum Attribute {
     String { key: String, string_value: String },
     Numeric { key: String, numeric_value: u64 },
 }
@@ -175,7 +175,7 @@ Apply a contiguous sequence of blocks to the EntityDB's canonical head. Blocks m
             "contentType": "application/octet-stream",
             "expiresAt": 13500,
             "owner": "0xf39F...",
-            "annotations": [
+            "attributes": [
               { "key": "type", "stringValue": "note" },
               { "key": "priority", "numericValue": 5 }
             ]
@@ -371,11 +371,11 @@ The ExEx builds `ArkivBlock`s by:
 
 ---
 
-## Annotation Encoding
+## Attribute Encoding
 
-Annotations in the JSON-RPC payload use the `Annotation` enum. The ExEx maps from the contract's `Attribute` type:
+Attributes in the JSON-RPC payload use the `Attribute` enum, mirroring the contract's `Attribute` type:
 
-| Contract Attribute | `valueType` | JSON Annotation |
+| Contract Attribute | `valueType` | JSON Attribute |
 |---|---|---|
 | `name="status", valueType=2 (STRING), value=[bytes32[4]]` | STRING | `{ "key": "status", "stringValue": "approved" }` |
 | `name="priority", valueType=1 (UINT), value=[bytes32[4]]` | UINT | `{ "key": "priority", "numericValue": 5 }` |

@@ -74,7 +74,7 @@ pub struct CreateOp {
     pub changeset_hash: B256,
     pub payload: Bytes,
     pub content_type: String,
-    pub annotations: Vec<Annotation>,
+    pub attributes: Vec<Attribute>,
 }
 
 #[derive(Serialize)]
@@ -87,7 +87,7 @@ pub struct UpdateOp {
     pub changeset_hash: B256,
     pub payload: Bytes,
     pub content_type: String,
-    pub annotations: Vec<Annotation>,
+    pub attributes: Vec<Attribute>,
 }
 
 #[derive(Serialize)]
@@ -134,7 +134,7 @@ pub struct ExpireOp {
 
 #[derive(Serialize)]
 #[serde(untagged)]
-pub enum Annotation {
+pub enum Attribute {
     String { key: String, string_value: String },
     Numeric { key: String, numeric_value: u64 },
 }

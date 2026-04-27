@@ -87,7 +87,7 @@ fn log_operation(op: &ArkivOperation, block_number: u64) {
                 changeset_hash = %o.changeset_hash,
                 content_type = %o.content_type,
                 payload_len = o.payload.len(),
-                annotation_count = o.annotations.len(),
+                attribute_count = o.attributes.len(),
                 "entity operation"
             );
         }

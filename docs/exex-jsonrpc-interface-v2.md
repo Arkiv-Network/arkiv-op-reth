@@ -128,7 +128,7 @@ pub struct CreateOp {
     pub changeset_hash: B256,
     pub payload: Bytes,
     pub content_type: String,
-    pub annotations: Vec<Annotation>,
+    pub attributes: Vec<Attribute>,
 }
 
 #[derive(Serialize)]
@@ -141,7 +141,7 @@ pub struct UpdateOp {
     pub changeset_hash: B256,
     pub payload: Bytes,
     pub content_type: String,
-    pub annotations: Vec<Annotation>,
+    pub attributes: Vec<Attribute>,
 }
 
 #[derive(Serialize)]
@@ -187,14 +187,14 @@ pub struct ExpireOp {
 }
 ```
 
-### Annotation
+### Attribute
 
-Unchanged from v1.
+Unchanged from v1 (mirrors the contract's `Attribute` type).
 
 ```rust
 #[derive(Serialize)]
 #[serde(untagged)]
-pub enum Annotation {
+pub enum Attribute {
     String { key: String, string_value: String },
     Numeric { key: String, numeric_value: u64 },
 }
@@ -252,7 +252,7 @@ Apply a contiguous sequence of blocks to the EntityDB's canonical head. Blocks m
                 "changesetHash": "0xaaa...",
                 "payload": "0xdeadbeef...",
                 "contentType": "application/octet-stream",
-                "annotations": [
+                "attributes": [
                   { "key": "type", "stringValue": "note" },
                   { "key": "priority", "numericValue": 5 }
                 ]
@@ -267,7 +267,7 @@ Apply a contiguous sequence of blocks to the EntityDB's canonical head. Blocks m
                 "changesetHash": "0xbbb...",
                 "payload": "0xcafe...",
                 "contentType": "text/plain",
-                "annotations": []
+                "attributes": []
               }
             ]
           },
