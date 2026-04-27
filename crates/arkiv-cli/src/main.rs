@@ -31,7 +31,7 @@ struct Cli {
     private_key: String,
 
     /// EntityRegistry contract address.
-    #[arg(long, default_value = "0x4200000000000000000000000000000000000042")]
+    #[arg(long, default_value = "0x4400000000000000000000000000000000000044")]
     registry: Address,
 
     /// Assumed block time for duration-to-block conversion (e.g. "2s").

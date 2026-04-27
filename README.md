@@ -56,7 +56,7 @@ just node-dev
 ```
 
 Generates an Arkiv dev genesis (chain ID `1337`, dev account funded,
-EntityRegistry at `0x4200000000000000000000000000000000000042`),
+EntityRegistry at `0x4400000000000000000000000000000000000044`),
 initialises the datadir against it, and launches the node with auto-mining
 at 2 s blocks. ExEx output goes to tracing logs.
 

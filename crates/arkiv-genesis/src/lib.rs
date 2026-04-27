@@ -29,7 +29,7 @@ use std::collections::BTreeMap;
 
 /// Canonical predeploy address for `EntityRegistry`.
 pub const ENTITY_REGISTRY_ADDRESS: Address = Address::new([
-    0x42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x42,
+    0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x44,
 ]);
 
 /// Hardhat test mnemonic first account (`0xf39F…b92266`).
