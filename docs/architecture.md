@@ -17,7 +17,7 @@ repo.
 
 Arkiv is an OP-stack L2 with one additional standard predeploy:
 `EntityRegistry`. The contract sits at the canonical address
-`0x4200000000000000000000000000000000000042` and exposes six operations
+`0x4400000000000000000000000000000000000044` and exposes six operations
 on opaque entities — `CREATE`, `UPDATE`, `EXTEND`, `TRANSFER`, `DELETE`,
 `EXPIRE` — submitted in batches via `execute(Operation[])`.
 
@@ -90,7 +90,7 @@ state storage, RPC) is unchanged op-reth.
 A small library shared by both binaries. It owns:
 
 - The canonical predeploy address constant (`ENTITY_REGISTRY_ADDRESS =
-  0x42…0042`).
+  0x44…0044`).
 - The dev account constant (`DEV_ADDRESS`, the first hardhat-mnemonic
   account).
 - `deploy_creation_code(chain_id) -> Result<Bytes>` — runs
@@ -160,7 +160,7 @@ fn has_arkiv_predeploy(chain: &OpChainSpec) -> bool {
 It checks the loaded genesis alloc for our predeploy address, computes
 the expected runtime bytecode for *this* chain's chain ID, and compares
 hashes. Address-presence alone isn't sufficient: a hostile chainspec
-could squat at `0x42…0042` with unrelated code. The hash equality check
+could squat at `0x44…0044` with unrelated code. The hash equality check
 makes activation a property of the chainspec content, not of either the
 chain ID or the binary's identity.
 
@@ -399,7 +399,7 @@ Why not bake the predeploy bytecode directly into `dev.base.json`?
 op-deployer apply --intent intent.toml --workdir ./ops
    └─► ops/genesis.json   (standard OP chainspec, all OP system contracts in alloc)
 arkiv-cli inject-predeploy ops/genesis.json
-   └─► ops/genesis.json   (now also has EntityRegistry at 0x42…0042)
+   └─► ops/genesis.json   (now also has EntityRegistry at 0x44…0044)
 op-reth init --chain ops/genesis.json --datadir ./data
 op-reth node --chain ops/genesis.json --datadir ./data
 ```
@@ -550,16 +550,16 @@ wire format end-to-end without involving the real Go EntityDB.
 
 ## 7. Key design decisions, recapped
 
-| Decision | Why |
-|---|---|
-| Predeploy at `0x42…0042` | Matches OP convention for system contracts; the address is a property of the chain, not the binary |
-| ExEx auto-activates via bytecode hash check | Makes the binary a true drop-in op-reth; behavior is determined by chainspec content, not by which binary was launched |
-| Direct storage-slot reads for rolling hash | Cheaper than `eth_call` (no EVM spin-up); coupling acceptable since we control both sides |
+| Decision                                      | Why |
+|-----------------------------------------------|---|
+| Predeploy at `0x44…0044`                      | Matches OP convention for system contracts; the address is a property of the chain, not the binary |
+| ExEx auto-activates via bytecode hash check   | Makes the binary a true drop-in op-reth; behavior is determined by chainspec content, not by which binary was launched |
+| Direct storage-slot reads for rolling hash    | Cheaper than `eth_call` (no EVM spin-up); coupling acceptable since we control both sides |
 | Path-A chainspec (full hardfork data in JSON) | Required for `op-reth init` and `op-reth node` to agree on genesis hash when reading the same JSON |
 | `inject-predeploy` as a separate post-process | Composes with op-deployer output rather than forking it; same tool serves dev and prod |
-| `arkiv-genesis` as its own crate | Both binaries need the same predeploy-bytecode generator; lifting it out avoids cross-bin deps |
-| `Storage` as a trait, not a concrete type | Local logging vs JSON-RPC forwarding are equally valid; future backends (e.g. a local sqlite indexer) drop in |
-| No runtime chainspec mutation | Removed the `init`/`node` divergence bug structurally, not just patched the symptom |
+| `arkiv-genesis` as its own crate              | Both binaries need the same predeploy-bytecode generator; lifting it out avoids cross-bin deps |
+| `Storage` as a trait, not a concrete type     | Local logging vs JSON-RPC forwarding are equally valid; future backends (e.g. a local sqlite indexer) drop in |
+| No runtime chainspec mutation                 | Removed the `init`/`node` divergence bug structurally, not just patched the symptom |
 
 ---
 
