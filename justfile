@@ -127,6 +127,27 @@ node-dev-jsonrpc *args='':
         {{ args }}
     rm -rf "$TMPDIR"
 
+# ── arkiv-storaged ───────────────────────────────────────────
+
+# Run arkiv-node in dev mode with JsonRpcStore pointing at arkiv-storaged
+node-dev-storaged *args='':
+    #!/usr/bin/env bash
+    set -e
+    TMPDIR=$(mktemp -d)
+    echo "datadir: $TMPDIR"
+    echo "registry: {{ registry }}"
+    echo "dev account: {{ dev_addr }}"
+    echo "storaged: http://localhost:2704"
+    ARKIV_ENTITYDB_URL=http://localhost:2704 \
+    cargo run -p arkiv-node -- node \
+        --dev \
+        --dev.block-time 2s \
+        --datadir "$TMPDIR" \
+        --http \
+        --log.file.directory "$TMPDIR/logs" \
+        {{ args }}
+    rm -rf "$TMPDIR"
+
 # ── Dev Helpers ──────────────────────────────────────────────
 
 # Verify EntityRegistry is deployed (requires running node)
