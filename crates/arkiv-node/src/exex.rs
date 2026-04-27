@@ -310,7 +310,7 @@ fn to_attributes(entity: &arkiv_bindings::types::EntityRecord) -> Vec<Attribute>
         .iter()
         .filter_map(|attr| match attr.value_type {
             ATTR_UINT => Some(Attribute::Numeric {
-                key: attr.name.clone(),
+                name: attr.name.clone(),
                 numeric_value: U256::from_be_bytes(attr.raw_value[0].0),
             }),
             ATTR_STRING => {
@@ -322,12 +322,12 @@ fn to_attributes(entity: &arkiv_bindings::types::EntityRecord) -> Vec<Attribute>
                     buf.truncate(end);
                 }
                 Some(Attribute::String {
-                    key: attr.name.clone(),
+                    name: attr.name.clone(),
                     string_value: String::from_utf8_lossy(&buf).to_string(),
                 })
             }
             ATTR_ENTITY_KEY => Some(Attribute::EntityKey {
-                key: attr.name.clone(),
+                name: attr.name.clone(),
                 entity_key: attr.raw_value[0],
             }),
             other => {

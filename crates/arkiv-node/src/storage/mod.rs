@@ -146,11 +146,23 @@ pub struct ExpireOp {
 ///   - `numericValue`: hex-encoded `U256` (right-aligned in `data[0]`)
 ///   - `entityKey`: hex-encoded `B256` (cross-reference to another entity)
 #[derive(Serialize)]
-#[serde(untagged, rename_all = "camelCase")]
+#[serde(untagged)]
 pub enum Attribute {
-    String { key: String, string_value: String },
-    Numeric { key: String, numeric_value: U256 },
-    EntityKey { key: String, entity_key: B256 },
+    String {
+        name: String,
+        #[serde(rename = "stringValue")]
+        string_value: String,
+    },
+    Numeric {
+        name: String,
+        #[serde(rename = "numericValue")]
+        numeric_value: U256,
+    },
+    EntityKey {
+        name: String,
+        #[serde(rename = "entityKey")]
+        entity_key: B256,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -185,5 +197,54 @@ mod hex_u64 {
 
     pub fn serialize<S: Serializer>(val: &u64, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&format!("0x{:x}", val))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Attribute;
+    use alloy_primitives::{B256, U256};
+    use serde_json::json;
+
+    #[test]
+    fn attribute_serializes_with_name_field() {
+        let string = serde_json::to_value(Attribute::String {
+            name: "title".into(),
+            string_value: "the answer".into(),
+        })
+        .expect("string attribute serializes");
+        assert_eq!(
+            string,
+            json!({
+                "name": "title",
+                "stringValue": "the answer"
+            })
+        );
+
+        let numeric = serde_json::to_value(Attribute::Numeric {
+            name: "priority".into(),
+            numeric_value: U256::from(42),
+        })
+        .expect("numeric attribute serializes");
+        assert_eq!(
+            numeric,
+            json!({
+                "name": "priority",
+                "numericValue": "0x2a"
+            })
+        );
+
+        let entity_key = serde_json::to_value(Attribute::EntityKey {
+            name: "linked.to".into(),
+            entity_key: B256::repeat_byte(0xab),
+        })
+        .expect("entity-key attribute serializes");
+        assert_eq!(
+            entity_key,
+            json!({
+                "name": "linked.to",
+                "entityKey": format!("0x{}", "ab".repeat(32))
+            })
+        );
     }
 }

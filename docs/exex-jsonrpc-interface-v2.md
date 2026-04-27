@@ -203,16 +203,16 @@ which value field is present (`#[serde(untagged)]`):
 
 ```rust
 #[derive(Serialize)]
-#[serde(untagged, rename_all = "camelCase")]
+#[serde(untagged)]
 pub enum Attribute {
     /// `ATTR_STRING` — opaque UTF-8 (≤128 bytes per `value128-encoding.md`).
-    String    { key: String, string_value: String },
+    String    { name: String, #[serde(rename = "stringValue")] string_value: String },
     /// `ATTR_UINT` — right-aligned big-endian uint256 from the contract's
     /// `bytes32[4]` value. Serialized as a `0x`-prefixed lowercase hex string.
-    Numeric   { key: String, numeric_value: U256 },
+    Numeric   { name: String, #[serde(rename = "numericValue")] numeric_value: U256 },
     /// `ATTR_ENTITY_KEY` — cross-reference to another entity. Serialized
     /// as a 32-byte hex string.
-    EntityKey { key: String, entity_key: B256 },
+    EntityKey { name: String, #[serde(rename = "entityKey")] entity_key: B256 },
 }
 ```
 
@@ -272,9 +272,9 @@ Apply a contiguous sequence of blocks to the EntityDB's canonical head. Blocks m
                 "payload": "0xdeadbeef...",
                 "contentType": "application/octet-stream",
                 "attributes": [
-                  { "key": "linked.to", "entityKey": "0xabc..." },
-                  { "key": "priority", "numericValue": "0x2a" },
-                  { "key": "type", "stringValue": "note" }
+                  { "name": "linked.to", "entityKey": "0xabc..." },
+                  { "name": "priority", "numericValue": "0x2a" },
+                  { "name": "type", "stringValue": "note" }
                 ]
               },
               {
