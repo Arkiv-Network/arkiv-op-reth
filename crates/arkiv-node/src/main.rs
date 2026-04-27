@@ -13,7 +13,17 @@ fn main() -> eyre::Result<()> {
         // `--chain <genesis.json>`. This keeps the genesis hash stable for users who
         // bring a pre-generated genesis (e.g. from op-deployer) that already contains
         // the EntityRegistry contract.
-        {
+        //
+        // When `ARKIV_USE_EXTERNAL_GENESIS` is set, skip all of this merging and use
+        // the user-provided genesis as-is (matching the original op-reth behavior).
+        // This is useful when the genesis.json has already been fully prepared
+        // externally (e.g. by merging genesis-deployer.json + genesis-op-reth.json).
+        if std::env::var("ARKIV_USE_EXTERNAL_GENESIS").is_ok() {
+            tracing::info!(
+                "ARKIV_USE_EXTERNAL_GENESIS is set; using provided chain spec genesis as-is \
+                 without any Arkiv-specific injections"
+            );
+        } else {
             let config = builder.config_mut();
 
             let mut chain_genesis = config.chain.genesis.clone();

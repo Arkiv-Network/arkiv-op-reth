@@ -46,3 +46,19 @@ ARKIV_DUMP_GENESIS=./genesis.json arkiv-node node
 The node will resolve the chain spec, write the merged genesis to the given
 file, and exit. You can then start the node normally with
 `--chain ./genesis.json` and the genesis hash will be stable.
+
+### Using a fully external `genesis.json`
+
+If you've already prepared a complete `genesis.json` externally (for example by
+generating `genesis-deployer.json` and `genesis-op-reth.json` separately and
+merging them yourself), you can tell the node to use it as-is, without any
+Arkiv-specific injections (matching the original op-reth behavior), by setting
+`ARKIV_USE_EXTERNAL_GENESIS`:
+
+```sh
+ARKIV_USE_EXTERNAL_GENESIS=1 arkiv-node node --chain ./genesis.json
+```
+
+When this variable is set, the node will not inject the default `EntityRegistry`
+predeploy, dev account, or Optimism hardfork activation timestamps; the provided
+genesis is taken verbatim.
