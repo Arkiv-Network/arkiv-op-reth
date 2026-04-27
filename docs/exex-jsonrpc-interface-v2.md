@@ -198,16 +198,26 @@ pub struct ExpireOp {
 
 ### Attribute
 
-Unchanged from v1 (mirrors the contract's `Attribute` type).
+Mirrors the contract's `Attribute` type. Three variants, discriminated by
+which value field is present (`#[serde(untagged)]`):
 
 ```rust
 #[derive(Serialize)]
-#[serde(untagged)]
+#[serde(untagged, rename_all = "camelCase")]
 pub enum Attribute {
-    String { key: String, string_value: String },
-    Numeric { key: String, numeric_value: u64 },
+    /// `ATTR_STRING` — opaque UTF-8 (≤128 bytes per `value128-encoding.md`).
+    String    { key: String, string_value: String },
+    /// `ATTR_UINT` — right-aligned big-endian uint256 from the contract's
+    /// `bytes32[4]` value. Serialized as a `0x`-prefixed lowercase hex string.
+    Numeric   { key: String, numeric_value: U256 },
+    /// `ATTR_ENTITY_KEY` — cross-reference to another entity. Serialized
+    /// as a 32-byte hex string.
+    EntityKey { key: String, entity_key: B256 },
 }
 ```
+
+Unknown `valueType` values from the contract are skipped (with a warning
+logged); they do not appear in the wire payload.
 
 ### Block Reference (for reverts)
 
@@ -262,8 +272,9 @@ Apply a contiguous sequence of blocks to the EntityDB's canonical head. Blocks m
                 "payload": "0xdeadbeef...",
                 "contentType": "application/octet-stream",
                 "attributes": [
-                  { "key": "type", "stringValue": "note" },
-                  { "key": "priority", "numericValue": 5 }
+                  { "key": "linked.to", "entityKey": "0xabc..." },
+                  { "key": "priority", "numericValue": "0x2a" },
+                  { "key": "type", "stringValue": "note" }
                 ]
               },
               {
