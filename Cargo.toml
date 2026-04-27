@@ -3,7 +3,6 @@ members = ["crates/arkiv-node", "crates/arkiv-cli"]
 resolver = "2"
 
 [workspace.package]
-name = "arkiv-op-reth"
 version = "0.1.0"
 authors = ["Arkiv Contributors <dev@arkiv.network>"]
 edition = "2024"
