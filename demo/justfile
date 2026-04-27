@@ -5,7 +5,7 @@
 #   arkiv-storage-service  https://github.com/Arkiv-Network/arkiv-storage-service
 #   arkiv-op-reth          https://github.com/Arkiv-Network/arkiv-op-reth  (this repo)
 #
-# Terminal A:  cd arkiv-storage-service && arkiv-storaged
+# Terminal A:  cd arkiv-storage-service && make install && arkiv-storaged
 # Terminal B:  cd arkiv-op-reth        && just node-dev-storaged
 #
 # Run individual steps: just -f demo/justfile <recipe>
@@ -34,7 +34,7 @@ setup:
     @echo "  arkiv-storage-service  https://github.com/Arkiv-Network/arkiv-storage-service"
     @echo "  arkiv-op-reth          https://github.com/Arkiv-Network/arkiv-op-reth"
     @echo ""
-    @echo "  Terminal A:  cd arkiv-storage-service && arkiv-storaged"
+    @echo "  Terminal A:  cd arkiv-storage-service && make install && arkiv-storaged"
     @echo "  Terminal B:  cd arkiv-op-reth && just node-dev-storaged"
     @echo ""
     @echo "Then: just -f demo/justfile load"
