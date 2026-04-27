@@ -17,9 +17,16 @@ pub struct ArkivBlockHeader {
     pub number: u64,
     pub hash: B256,
     pub parent_hash: B256,
-    /// Rolling changeset hash after the last operation in this block.
-    /// `B256::ZERO` for blocks with no operations (matches contract's
-    /// `changeSetHashAtBlock()` which returns `bytes32(0)` when `txCount == 0`).
+    /// Rolling changeset hash *as of the end of this block*. If the block
+    /// contains operations, this is the hash after the last op. If the block
+    /// is empty, this is the rolling hash carried forward from the most
+    /// recent prior block that had operations. `B256::ZERO` only when no
+    /// operation has ever been recorded as of this block.
+    ///
+    /// Note: this differs from the contract's `changeSetHashAtBlock(N)`,
+    /// which returns `bytes32(0)` for any empty block. The ExEx computes
+    /// the rolling form by reading the contract's storage at the parent
+    /// of each chain notification.
     pub changeset_hash: B256,
 }
 

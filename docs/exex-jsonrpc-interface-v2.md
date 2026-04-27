@@ -57,15 +57,24 @@ pub struct ArkivBlockHeader {
     pub hash: B256,
     /// Parent block hash (for continuity verification).
     pub parent_hash: B256,
-    /// Changeset hash after all operations in this block.
-    /// Equals the last operation's changeset_hash, or the previous
-    /// block's changeset_hash if this block has no operations.
-    /// Null for the genesis block before any operations.
-    pub changeset_hash: Option<B256>,
+    /// Rolling changeset hash *as of the end of this block*. Equals the
+    /// last operation's `changeset_hash` if this block has operations,
+    /// otherwise the rolling hash carried forward from the most recent
+    /// prior block that had operations. `0x000...000` only when no
+    /// operation has ever been recorded as of this block.
+    pub changeset_hash: B256,
 }
 ```
 
-The `changeset_hash` at the block level is a convenience -- it's derivable from the last operation's hash but saves the EntityDB from scanning. For empty blocks it carries forward the previous block's value, confirming no state change.
+The block-level `changeset_hash` is a convenience -- it's derivable from the last operation's hash but saves the EntityDB from scanning. For empty blocks it carries forward the previous block's value, confirming no state change.
+
+**Sourcing.** Within a single chain notification the ExEx carries the
+rolling value forward across blocks. The starting value (rolling hash at
+the parent of the first block in the notification) is read directly from
+`EntityRegistry`'s storage at the parent block's state, using the slot
+layout exposed by `arkiv_bindings::storage_layout`. This intentionally
+differs from the contract's `changeSetHashAtBlock(N)` view, which returns
+`bytes32(0)` for any empty block.
 
 ### Block
 
@@ -384,7 +393,7 @@ Atomically revert a set of blocks and commit a new set. Semantically equivalent 
     ],
     "newBlocks": [
       {
-        "header": { "number": "0x3039", "hash": "0x...", "parentHash": "0x...", "changesetHash": null },
+        "header": { "number": "0x3039", "hash": "0x...", "parentHash": "0x...", "changesetHash": "0x0000000000000000000000000000000000000000000000000000000000000000" },
         "transactions": []
       },
       {
@@ -434,7 +443,7 @@ Every canonical block is forwarded, regardless of whether it contains Arkiv tran
 |---|---|---|
 | Has Arkiv txs | Populated array | Last operation's changeset hash |
 | No Arkiv txs | `[]` | Previous block's changeset hash (carried forward) |
-| Genesis (before any ops) | `[]` | `null` |
+| Genesis (before any ops) | `[]` | `0x000...000` |
 
 The EntityDB uses empty blocks to:
 1. Advance its internal block cursor (for continuity checks)
