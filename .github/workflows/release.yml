@@ -6,7 +6,13 @@ on:
       - "**"
 
 permissions:
+  id-token: write
   contents: write
+  attestations: write
+
+env:
+  rust_version: '1.95.0'
+  rust_flags_fast: '-C opt-level=z -C target-cpu=x86-64 -C debuginfo=0'
 
 jobs:
   release:
@@ -44,6 +50,12 @@ jobs:
           mkdir build-artifacts
           mv target/release-lto/{arkiv-node,arkiv-cli} build-artifacts
 
+      - name: Generate artifact attestation
+        uses: actions/attest@v4
+        with:
+          # attest the built binary from the profile/bin path (resolved from the matrix)
+          subject-path: 'build-artifacts/*'
+
       - name: Compress binary
         run: |
           cd build-artifacts
@@ -57,17 +69,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-
   release-fast:
     runs-on: op-reth-builder
     steps:
       - name: Set input variables
         id: variables
         run: |
-          echo "rust_version=${{ github.event.inputs.rust_version || '1.95.0' }}" >> $GITHUB_OUTPUT
+          echo "rust_version=${{ env.rust_version }}" >> $GITHUB_OUTPUT
           # compute md5 from workflow input rust_flags so different flags map to different caches
-          echo "rust_flags_md5=`echo "${{ github.event.inputs.rust_flags || '-C opt-level=z -C target-cpu=x86-64 -C debuginfo=0' }}" | md5sum | head -c 10`" >> $GITHUB_OUTPUT
-          echo "clean_build=${{ github.event.inputs.clean_build || 'false' }}" >> $GITHUB_OUTPUT
+          echo "rust_flags_md5=`echo "${{ env.rust_flags_fast }}" | md5sum | head -c 10`" >> $GITHUB_OUTPUT
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -82,18 +92,13 @@ jobs:
         id: cache_action
         env:
           cache_dir: /opt/op-reth-builder_cache/${{ steps.variables.outputs.rust_version }}/main/${{ steps.variables.outputs.rust_flags_md5 }}/binaries_x86/target
-          clean_build: ${{ steps.variables.outputs.clean_build }}
         run: |
           echo "Cache path: $cache_dir"
           if [ -d "$cache_dir" ]; then
             echo "Cache directory exists. Size:"
             du -sh "$cache_dir" || du -sk "$cache_dir"
-            if [ "$clean_build" = "true" ]; then
-              echo "Not using cache because clean_build=true"
-            else
-              echo "Copying cache to workspace 'target/'"
-              cp -rp "$cache_dir" target || echo "Failed to copy cache content"
-            fi
+            echo "Copying cache to workspace 'target/'"
+            cp -rp "$cache_dir" target || echo "Failed to copy cache content"
           fi
           echo "cache_dir=$cache_dir" >> $GITHUB_OUTPUT
 
