@@ -189,14 +189,6 @@ async fn expiry_block(
     Ok((current + blocks) as u32)
 }
 
-fn build_operation(op_type: u8, key: B256) -> Operation {
-    Operation {
-        operationType: op_type,
-        entityKey: key,
-        ..Default::default()
-    }
-}
-
 fn print_events(logs: &[RpcLog]) {
     for log in logs {
         if let Ok(event) = EntityOperation::decode_log(&log.inner) {
@@ -467,8 +459,12 @@ async fn main() -> Result<()> {
 
         Command::Extend { key, expires_in } => {
             let expires_at = expiry_block(&provider, expires_in, cli.block_time).await?;
-            let mut op = build_operation(OP_EXTEND, key);
-            op.expiresAt = expires_at;
+            let op = Operation {
+                operationType: OP_EXTEND,
+                entityKey: key,
+                expiresAt: expires_at,
+                ..Default::default()
+            };
 
             let receipt = registry
                 .execute(vec![op])
@@ -482,8 +478,12 @@ async fn main() -> Result<()> {
         }
 
         Command::Transfer { key, new_owner } => {
-            let mut op = build_operation(OP_TRANSFER, key);
-            op.newOwner = new_owner;
+            let op = Operation {
+                operationType: OP_TRANSFER,
+                entityKey: key,
+                newOwner: new_owner,
+                ..Default::default()
+            };
 
             let receipt = registry
                 .execute(vec![op])
@@ -497,7 +497,11 @@ async fn main() -> Result<()> {
         }
 
         Command::Delete { key } => {
-            let op = build_operation(OP_DELETE, key);
+            let op = Operation {
+                operationType: OP_DELETE,
+                entityKey: key,
+                ..Default::default()
+            };
 
             let receipt = registry
                 .execute(vec![op])
@@ -511,7 +515,11 @@ async fn main() -> Result<()> {
         }
 
         Command::Expire { key } => {
-            let op = build_operation(OP_EXPIRE, key);
+            let op = Operation {
+                operationType: OP_EXPIRE,
+                entityKey: key,
+                ..Default::default()
+            };
 
             let receipt = registry
                 .execute(vec![op])
