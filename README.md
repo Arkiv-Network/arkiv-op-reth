@@ -1,2 +1,210 @@
-# arkiv-reth
-Arkiv reth execution client
+# arkiv-op-reth
+
+An [op-reth](https://github.com/ethereum-optimism/optimism)-derived execution
+node for the **Arkiv** chain, plus operator tooling. Arkiv adds a single
+predeploy — `EntityRegistry` — to an OP-stack chain, and an Execution
+Extension (ExEx) that streams decoded entity operations to a downstream
+indexer (the Go EntityDB).
+
+The binary is a **drop-in op-reth**: against a vanilla OP chainspec it runs
+unchanged, and the ExEx auto-activates only when the loaded chainspec
+contains the EntityRegistry predeploy at the canonical address with
+matching bytecode.
+
+```
+                ┌─────────────────────────────────────────────┐
+                │  arkiv-node (op-reth + Arkiv ExEx)          │
+                │                                             │
+  L1 / op-node  │   ┌─────────┐                ┌─────────┐    │   ┌────────────┐
+  ───────────►  │   │ Reth    │  ChainCommit   │ Arkiv   │────┼──►│ EntityDB   │
+                │   │ engine  │ ─────────────► │ ExEx    │ JSON   │ (Go)       │
+                │   └─────────┘                └─────────┘ -RPC   └────────────┘
+                │        ▲                                    │
+                │        │ EntityRegistry calls               │
+                │        │                                    │
+                └────────┼────────────────────────────────────┘
+                         │
+                    arkiv-cli (operator CLI)
+```
+
+---
+
+## What this repository contains
+
+| Crate | Role |
+|---|---|
+| `crates/arkiv-node` | The execution-client binary. Wraps op-reth's `Cli`, conditionally installs the Arkiv ExEx. |
+| `crates/arkiv-cli` | Operator CLI: submit entity ops, batch ops from JSON, post-process genesis files for deployment. |
+| `crates/arkiv-genesis` | Shared library: predeploy address constant, runtime-bytecode generator, genesis-alloc helpers. |
+
+External dependencies of note:
+
+| Crate | Repo | Role |
+|---|---|---|
+| `arkiv-bindings` | [`arkiv-contracts`](https://github.com/Arkiv-Network/arkiv-contracts) | Solidity ABI types, decoders, storage-layout helpers. |
+| `reth-optimism-*` | [`ethereum-optimism/optimism`](https://github.com/ethereum-optimism/optimism) | OP-reth runtime, chainspec, primitives. |
+| `reth-*` | [`paradigmxyz/reth`](https://github.com/paradigmxyz/reth) | ExEx framework, state-provider API. |
+
+---
+
+## Quick start
+
+### Local dev node (with logging storage)
+
+```bash
+just node-dev
+```
+
+Generates an Arkiv dev genesis (chain ID `1337`, dev account funded,
+EntityRegistry at `0x4200000000000000000000000000000000000042`),
+initialises the datadir against it, and launches the node with auto-mining
+at 2 s blocks. ExEx output goes to tracing logs.
+
+### Local dev node forwarding to a mock EntityDB
+
+```bash
+just mock-entitydb            # terminal 1: starts a JSON-RPC mock on :9545
+just node-dev-jsonrpc         # terminal 2: same as node-dev, plus ExEx forwards to the mock
+```
+
+The ExEx invokes `arkiv_commitChain` / `arkiv_revert` / `arkiv_reorg` against
+the mock; the mock script logs the JSON-RPC payloads. Useful for inspecting
+the on-the-wire format.
+
+### Submit operations
+
+```bash
+just balance                                 # 10,000 ETH
+just create --content-type application/json  # mint an entity
+just update --key 0x... --content-type ...   # update its content
+just history                                 # walk the changeset chain
+```
+
+Or batch a sequence in one transaction (with cross-references):
+
+```bash
+just batch scripts/fixtures/double-op-same-entity.json
+just batch scripts/fixtures/attributes-all-types.json
+```
+
+See [`docs/architecture.md`](docs/architecture.md#cli-the-batch-format)
+for the batch JSON schema.
+
+### Inspect the embedded dev chainspec
+
+```bash
+just genesis            # prints assembled JSON to stdout
+just genesis | jq .alloc
+```
+
+---
+
+## Project layout
+
+```
+.
+├── crates/
+│   ├── arkiv-node/           # op-reth binary + ExEx
+│   ├── arkiv-cli/            # operator CLI
+│   └── arkiv-genesis/        # shared genesis primitives (lib)
+├── chainspec/
+│   └── dev.base.json         # geth-format dev chainspec sans predeploy
+├── docs/
+│   ├── architecture.md       # system design (start here)
+│   └── exex-jsonrpc-interface-v2.md   # wire format spec
+├── scripts/
+│   ├── mock-entitydb.js      # logs incoming JSON-RPC for local testing
+│   └── fixtures/             # example batch files
+└── justfile                  # all dev/test recipes
+```
+
+---
+
+## Running against a real OP chain
+
+For production / testnet deployment, the EntityRegistry predeploy must be
+in the genesis allocs from block 0. Two integration paths exist
+(see [`docs/architecture.md`](docs/architecture.md#genesis-construction)):
+
+### Option A — Post-process op-deployer output (current)
+
+```bash
+op-deployer apply --intent intent.toml --workdir ./ops    # standard OP genesis
+arkiv-cli inject-predeploy ops/genesis.json               # add EntityRegistry
+op-reth init --chain ops/genesis.json --datadir ./data
+op-reth node --chain ops/genesis.json --datadir ./data
+```
+
+`inject-predeploy` reads `chainId` from the input, computes the matching
+runtime bytecode (constructor immutables bound to that chain ID), and
+splices it into `alloc` at the canonical predeploy address. The same
+chainspec drives both `init` and `node`, so genesis hashes match.
+
+### Option B — Upstream contribution to `L2Genesis.s.sol`
+
+Contribute (or fork) op-deployer's L2Genesis script to include
+EntityRegistry as a standard predeploy. Then op-deployer output already
+contains it, no post-processing needed. Not yet pursued — see the
+architecture doc for trade-offs.
+
+---
+
+## Status
+
+Working today:
+
+- `--chain arkiv` … is **not** registered as a built-in. The current
+  approach is a JSON-file chainspec (`chainspec/dev.base.json` +
+  `inject-predeploy`); the binary takes the file via `--chain <path>`.
+- The ExEx auto-detects the predeploy and activates conditionally.
+- ExEx → EntityDB JSON-RPC v2 wire format is complete and documented.
+- Operator CLI covers all six entity-operation types plus batched submission
+  with cross-references between ops.
+- Storage backends: `LoggingStore` (tracing) and `JsonRpcStore`
+  (forwarding to Go EntityDB).
+
+Open / future:
+
+- A registered `--chain arkiv` shortcut (custom `ChainSpecParser`) — not
+  blocked, just hasn't been needed yet.
+- Upstream contribution to `L2Genesis.s.sol` — out of scope for this repo.
+- Mainnet deployment.
+
+---
+
+## Documentation
+
+| Doc | What's in it |
+|---|---|
+| [`docs/architecture.md`](docs/architecture.md) | System overview, component breakdown, data flow, design decisions |
+| [`docs/exex-jsonrpc-interface-v2.md`](docs/exex-jsonrpc-interface-v2.md) | Exact wire format the ExEx posts to EntityDB |
+
+External references:
+
+- EntityRegistry contract: <https://github.com/Arkiv-Network/arkiv-contracts>
+  - `contracts/EntityRegistry.sol` — the contract itself
+  - `contracts/Entity.sol` — encoding / hashing library
+  - `docs/value128-encoding.md` — how attribute values are packed
+- op-reth: <https://github.com/ethereum-optimism/optimism/tree/develop/rust/op-reth>
+- reth ExEx framework: <https://reth.rs/exex.html>
+
+---
+
+## Build & lint
+
+```bash
+just check          # cargo check --workspace
+just build          # cargo build --workspace
+just lint           # cargo clippy -- -D warnings
+just fmt            # cargo fmt --all
+```
+
+The workspace pins `reth-*` and `reth-optimism-*` to specific git revs in
+the root `Cargo.toml`. Bumping them is a coordinated change; expect to
+re-resolve API drift across the ExEx module.
+
+---
+
+## License
+
+GPL-3.0-or-later. See `LICENSE`.
