@@ -106,8 +106,8 @@ pub enum ArkivOperation {
     Create(CreateOp),
     Update(UpdateOp),
     Extend(ExtendOp),
-    #[serde(rename = "changeOwner")]
-    ChangeOwner(ChangeOwnerOp),
+    #[serde(rename = "transfer")]
+    Transfer(TransferOp),
     Delete(DeleteOp),
     Expire(ExpireOp),
 }
@@ -158,7 +158,7 @@ pub struct ExtendOp {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ChangeOwnerOp {
+pub struct TransferOp {
     pub op_index: u32,
     pub entity_key: B256,
     pub owner: Address,

@@ -117,7 +117,7 @@ fn log_operation(op: &ArkivOperation, block_number: u64) {
                 "entity operation"
             );
         }
-        ArkivOperation::ChangeOwner(o) => {
+        ArkivOperation::Transfer(o) => {
             tracing::info!(
                 block = block_number,
                 op_type = "TRANSFER",

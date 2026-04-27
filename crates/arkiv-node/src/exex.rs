@@ -4,7 +4,7 @@
 use crate::genesis::ENTITY_REGISTRY_ADDRESS;
 use crate::storage::{
     ArkivBlock, ArkivBlockHeader, ArkivBlockRef, ArkivOperation, ArkivTransaction, Attribute,
-    ChangeOwnerOp, CreateOp, DeleteOp, ExpireOp, ExtendOp, Storage, UpdateOp,
+    CreateOp, DeleteOp, ExpireOp, ExtendOp, Storage, TransferOp, UpdateOp,
 };
 use alloy_consensus::{BlockHeader, Transaction, TxReceipt};
 use alloy_primitives::B256;
@@ -218,7 +218,7 @@ fn to_arkiv_operation(
             entity_hash: op.entity_hash,
             changeset_hash,
         })),
-        OP_TRANSFER => Some(ArkivOperation::ChangeOwner(ChangeOwnerOp {
+        OP_TRANSFER => Some(ArkivOperation::Transfer(TransferOp {
             op_index,
             entity_key: op.entity_key,
             owner: op.owner,
