@@ -99,9 +99,17 @@ delete key:
 expire key:
     {{ arkiv_cli }} expire --key {{ key }}
 
-# Query an entity commitment
-query key:
+# Read an entity commitment from the EntityRegistry contract (on-chain)
+commitment key:
     {{ arkiv_cli }} query --key {{ key }}
+
+# Send an arkiv_query JSON-RPC request to the running node (proxied to EntityDB).
+# Pass the params payload as a JSON string; default is `null`.
+# Example: just query '{"key":"0x..."}'
+query payload='null':
+    curl -s -X POST {{ rpc }} \
+        -H 'Content-Type: application/json' \
+        -d '{"jsonrpc":"2.0","id":1,"method":"arkiv_query","params":[{{ payload }}]}'
 
 # Read the current changeset hash
 hash:
