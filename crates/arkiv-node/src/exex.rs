@@ -1,24 +1,18 @@
 //! Arkiv ExEx — filters blocks for EntityRegistry transactions,
 //! decodes operations, and forwards them to the configured Storage backend.
 
-use crate::storage::{
-    ArkivBlock, ArkivBlockHeader, ArkivBlockRef, ArkivOperation, ArkivTransaction, Attribute,
-    CreateOp, DeleteOp, ExpireOp, ExtendOp, Storage, TransferOp, UpdateOp,
-};
+use crate::storage::{ArkivBlock, ArkivBlockHeader, ArkivBlockRef, ArkivTransaction, Storage};
 use alloy_consensus::{BlockHeader, Transaction, TxReceipt};
 use alloy_primitives::{Address, B256, U256};
-use arkiv_bindings::decode::decode_registry_transaction;
+use alloy_sol_types::{SolCall, SolEvent};
+use arkiv_bindings::IEntityRegistry::{ChangeSetHashUpdate, EntityOperation, executeCall};
 use arkiv_bindings::storage_layout::{
     block_node_slot, decode_block_node, decode_hash_at, decode_head_block, decode_tx_op_count,
     hash_at_slot, head_block_slot, tx_op_count_slot,
 };
-use arkiv_bindings::types::DecodedOperation;
-use arkiv_bindings::{
-    ATTR_ENTITY_KEY, ATTR_STRING, ATTR_UINT, OP_CREATE, OP_DELETE, OP_EXPIRE, OP_EXTEND,
-    OP_TRANSFER, OP_UPDATE,
-};
+use arkiv_bindings::wire;
 use arkiv_genesis::ENTITY_REGISTRY_ADDRESS;
-use eyre::Result;
+use eyre::{Result, bail};
 use futures_util::TryStreamExt;
 use reth_execution_types::Chain;
 use reth_exex::{ExExContext, ExExEvent, ExExNotification};
@@ -90,37 +84,20 @@ fn extract_blocks(chain: &Arc<OpChain>, mut prior_rolling: B256) -> Vec<ArkivBlo
             }
 
             let tx_hash = B256::from(tx.tx_hash());
-            let logs = receipt.logs();
 
-            // Decode operations from calldata + EntityOperation events.
-            let ops = match decode_registry_transaction(
-                ENTITY_REGISTRY_ADDRESS,
-                tx.input(),
-                tx_hash,
-                receipt.status(),
-                logs,
-                block.header().number(),
-            ) {
-                Ok(ops) => ops,
-                Err(e) => {
-                    tracing::error!(
-                        tx = %tx_hash,
-                        block = block.header().number(),
-                        error = %e,
-                        "failed to decode registry transaction"
-                    );
-                    continue;
-                }
-            };
-
-            let operations: Vec<ArkivOperation> = ops
-                .iter()
-                .enumerate()
-                .filter_map(|(op_index, op)| {
-                    last_in_block = Some(op.changeset_hash);
-                    to_arkiv_operation(op, op_index as u32, op.changeset_hash)
-                })
-                .collect();
+            let operations =
+                match decode_arkiv_tx(tx.input(), receipt.logs(), &mut last_in_block) {
+                    Ok(ops) => ops,
+                    Err(e) => {
+                        tracing::error!(
+                            tx = %tx_hash,
+                            block = block.header().number(),
+                            error = %e,
+                            "failed to decode registry transaction"
+                        );
+                        continue;
+                    }
+                };
 
             if !operations.is_empty() {
                 transactions.push(ArkivTransaction {
@@ -224,120 +201,80 @@ fn extract_block_refs(chain: &Arc<OpChain>) -> Vec<ArkivBlockRef> {
 }
 
 // ---------------------------------------------------------------------------
-// DecodedOperation -> ArkivOperation mapping
+// Per-tx decode: calldata + paired event logs -> typed wire operations.
 // ---------------------------------------------------------------------------
 
-fn to_arkiv_operation(
-    op: &DecodedOperation,
-    op_index: u32,
-    changeset_hash: B256,
-) -> Option<ArkivOperation> {
-    match op.op_type {
-        OP_CREATE => {
-            let entity = op.entity.as_ref()?;
-            Some(ArkivOperation::Create(CreateOp {
-                op_index,
-                entity_key: op.entity_key,
-                owner: op.owner,
-                expires_at: op.expires_at as u64,
-                entity_hash: op.entity_hash,
-                changeset_hash,
-                payload: entity.payload.clone().unwrap_or_default(),
-                content_type: entity.content_type.clone().unwrap_or_default(),
-                attributes: to_attributes(entity),
-            }))
-        }
-        OP_UPDATE => {
-            let entity = op.entity.as_ref()?;
-            Some(ArkivOperation::Update(UpdateOp {
-                op_index,
-                entity_key: op.entity_key,
-                owner: op.owner,
-                entity_hash: op.entity_hash,
-                changeset_hash,
-                payload: entity.payload.clone().unwrap_or_default(),
-                content_type: entity.content_type.clone().unwrap_or_default(),
-                attributes: to_attributes(entity),
-            }))
-        }
-        OP_EXTEND => Some(ArkivOperation::Extend(ExtendOp {
-            op_index,
-            entity_key: op.entity_key,
-            owner: op.owner,
-            expires_at: op.expires_at as u64,
-            entity_hash: op.entity_hash,
-            changeset_hash,
-        })),
-        OP_TRANSFER => Some(ArkivOperation::Transfer(TransferOp {
-            op_index,
-            entity_key: op.entity_key,
-            owner: op.owner,
-            entity_hash: op.entity_hash,
-            changeset_hash,
-        })),
-        OP_DELETE => Some(ArkivOperation::Delete(DeleteOp {
-            op_index,
-            entity_key: op.entity_key,
-            owner: op.owner,
-            entity_hash: op.entity_hash,
-            changeset_hash,
-        })),
-        OP_EXPIRE => Some(ArkivOperation::Expire(ExpireOp {
-            op_index,
-            entity_key: op.entity_key,
-            owner: op.owner,
-            entity_hash: op.entity_hash,
-            changeset_hash,
-        })),
-        _ => None,
-    }
-}
+/// Decode one EntityRegistry transaction into a vector of typed
+/// `wire::Operation`s, updating `last_in_block` with the rolling-hash value
+/// of each successfully-decoded op.
+///
+/// Pairing contract (mirrors `EntityRegistry.sol::execute`, lines 113–122):
+/// each calldata op causes `_dispatch` to emit one `EntityOperation`,
+/// followed by one `ChangeSetHashUpdate` from the loop body. So the
+/// receipt's registry-address logs interleave per op and the three
+/// sequences (calldata `ops`, `EntityOperation` events, `ChangeSetHashUpdate`
+/// events) are 1:1 in emission order. Anything else is contract drift —
+/// bail and let the caller skip the tx (same loud-failure semantics as the
+/// previous `decode_registry_transaction` Err path).
+///
+/// `last_in_block` is updated *after* each successful per-op decode using
+/// `cshu.changeSetHash`, so a per-op decode failure breaks the rolling-hash
+/// chain at that tx — preserves today's behaviour and avoids silently
+/// masking decode failures.
+fn decode_arkiv_tx(
+    input: &[u8],
+    logs: &[alloy_primitives::Log],
+    last_in_block: &mut Option<B256>,
+) -> Result<Vec<wire::Operation>> {
+    let call = executeCall::abi_decode(input)?;
 
-/// Decode an entity's attributes into wire-format `Attribute` variants.
-///
-/// Encoding rules (see `arkiv-contracts/docs/value128-encoding.md`):
-///   - `ATTR_UINT`: `raw_value[0]` is right-aligned big-endian uint256;
-///     other words are zero. Decoded losslessly to `U256`.
-///   - `ATTR_STRING`: left-aligned UTF-8 across all four words, zero-padded.
-///     Truncated at the first NUL byte.
-///   - `ATTR_ENTITY_KEY`: `raw_value[0]` is the entity key; other words zero.
-///
-/// Unknown `value_type` values are skipped with a warning rather than
-/// guessing — keeps wire output honest if/when the contract adds new types.
-fn to_attributes(entity: &arkiv_bindings::types::EntityRecord) -> Vec<Attribute> {
-    entity
-        .attributes
-        .iter()
-        .filter_map(|attr| match attr.value_type {
-            ATTR_UINT => Some(Attribute::Numeric {
-                key: attr.name.clone(),
-                numeric_value: U256::from_be_bytes(attr.raw_value[0].0),
-            }),
-            ATTR_STRING => {
-                let mut buf = Vec::with_capacity(128);
-                for b32 in &attr.raw_value {
-                    buf.extend_from_slice(b32.as_ref());
-                }
-                if let Some(end) = buf.iter().position(|b| *b == 0) {
-                    buf.truncate(end);
-                }
-                Some(Attribute::String {
-                    key: attr.name.clone(),
-                    string_value: String::from_utf8_lossy(&buf).to_string(),
-                })
+    let mut entity_events: Vec<EntityOperation> = Vec::new();
+    let mut hash_events: Vec<ChangeSetHashUpdate> = Vec::new();
+    for log in logs.iter().filter(|l| l.address == ENTITY_REGISTRY_ADDRESS) {
+        match log.topics().first() {
+            Some(t) if *t == EntityOperation::SIGNATURE_HASH => {
+                entity_events.push(EntityOperation::decode_log_data(&log.data)?);
             }
-            ATTR_ENTITY_KEY => Some(Attribute::EntityKey {
-                key: attr.name.clone(),
-                entity_key: attr.raw_value[0],
-            }),
+            Some(t) if *t == ChangeSetHashUpdate::SIGNATURE_HASH => {
+                hash_events.push(ChangeSetHashUpdate::decode_log_data(&log.data)?);
+            }
             other => {
-                tracing::warn!(
-                    name = %attr.name,
-                    value_type = other,
-                    "unknown attribute value_type — skipping"
+                bail!(
+                    "unexpected log from EntityRegistry: topic0={:?}",
+                    other
                 );
-                None
             }
-        })
-        .collect()
+        }
+    }
+
+    if call.ops.len() != entity_events.len() || call.ops.len() != hash_events.len() {
+        bail!(
+            "event/calldata length mismatch: ops={}, entity_events={}, hash_events={}",
+            call.ops.len(),
+            entity_events.len(),
+            hash_events.len(),
+        );
+    }
+
+    let mut out = Vec::with_capacity(call.ops.len());
+    for (op_index, ((cd, eo), cshu)) in call
+        .ops
+        .iter()
+        .zip(&entity_events)
+        .zip(&hash_events)
+        .enumerate()
+    {
+        // Cheap sanity check: both events index on entityKey for the same op.
+        if eo.entityKey != cshu.entityKey {
+            bail!(
+                "event entityKey mismatch at op_index={}: EntityOperation={}, ChangeSetHashUpdate={}",
+                op_index, eo.entityKey, cshu.entityKey,
+            );
+        }
+        let wire_op = wire::decode_operation(op_index as u32, cd, eo, cshu)?;
+        *last_in_block = Some(cshu.changeSetHash);
+        out.push(wire_op);
+    }
+
+    Ok(out)
 }

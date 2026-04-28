@@ -8,9 +8,10 @@ This document supersedes the original `exex-jsonrpc-interface.md`. It addresses 
 
 ---
 
-## Contract Prerequisite
+## Contract Event Surface
 
-The `EntityOperation` event must be extended with a `changesetHash` field:
+The ExEx consumes two events per executed operation, both emitted by
+`EntityRegistry`:
 
 ```solidity
 event EntityOperation(
@@ -18,12 +19,28 @@ event EntityOperation(
     uint8   indexed operationType,
     address indexed owner,
     uint32  expiresAt,
-    bytes32 entityHash,
-    bytes32 changesetHash   // NEW: rolling hash after this operation
+    bytes32 entityHash
+);
+
+event ChangeSetHashUpdate(
+    bytes32 indexed entityKey,
+    uint256 indexed operationKey,
+    bytes32 changeSetHash
 );
 ```
 
-This is the only contract change required. The hash is already computed in the contract -- it just needs to be emitted. After this change, `arkiv-bindings` regenerates automatically via `build.rs`.
+Per `EntityRegistry.execute` (`contracts/EntityRegistry.sol` lines 113–122),
+each calldata op causes `_dispatch` to emit one `EntityOperation`,
+followed by one `ChangeSetHashUpdate` from the loop body. The two
+events are paired 1:1 in op order; see [ExEx Decoding
+Pipeline](#exex-decoding-pipeline) for how this pairing is reconstructed
+from receipt logs.
+
+The contract's storage layout (head block, block-node linked list,
+per-tx op count, per-op rolling hashes) is exposed in Rust via
+`arkiv_bindings::storage_layout`. The ExEx uses it to seed the
+rolling-hash carry-forward at chain-notification boundaries—see
+[Block Header](#block-header) for details.
 
 ---
 
@@ -198,26 +215,45 @@ pub struct ExpireOp {
 
 ### Attribute
 
-Mirrors the contract's `Attribute` type. Three variants, discriminated by
-which value field is present (`#[serde(untagged)]`):
+Mirrors the on-chain `Attribute { name, valueType, value }` shape. A
+tagged enum, internally discriminated by `valueType`, with `name` and
+`value` carrying the same meaning across all variants. Defined upstream
+in `arkiv_bindings::wire::Attribute`:
 
 ```rust
 #[derive(Serialize)]
-#[serde(untagged, rename_all = "camelCase")]
+#[serde(tag = "valueType", rename_all = "camelCase")]
 pub enum Attribute {
-    /// `ATTR_STRING` — opaque UTF-8 (≤128 bytes per `value128-encoding.md`).
-    String    { key: String, string_value: String },
     /// `ATTR_UINT` — right-aligned big-endian uint256 from the contract's
     /// `bytes32[4]` value. Serialized as a `0x`-prefixed lowercase hex string.
-    Numeric   { key: String, numeric_value: U256 },
+    Uint      { name: Ident32, value: U256 },
+    /// `ATTR_STRING` — the full 128-byte container, **byte-exact**: no
+    /// UTF-8 interpretation, no NUL truncation. Serialized as a single
+    /// `0x`-prefixed lowercase hex string of length 258 (`0x` + 256 chars).
+    /// UTF-8 / display interpretation is the consumer's choice.
+    String    { name: Ident32, value: FixedBytes<128> },
     /// `ATTR_ENTITY_KEY` — cross-reference to another entity. Serialized
     /// as a 32-byte hex string.
-    EntityKey { key: String, entity_key: B256 },
+    EntityKey { name: Ident32, value: B256 },
 }
 ```
 
-Unknown `valueType` values from the contract are skipped (with a warning
-logged); they do not appear in the wire payload.
+JSON shape per attribute (three flat fields, regardless of variant):
+
+```json
+{ "valueType": "uint" | "string" | "entityKey", "name": "<ascii>", "value": "0x…" }
+```
+
+Unknown `valueType` values cause `wire::decode_operation` to return an
+error; the entire transaction is then skipped by the ExEx with a loud
+log. They do not appear silently in the wire payload.
+
+**ATTR_STRING is opaque to the protocol.** The 128 bytes are emitted
+verbatim. Consumers needing a printable form should apply lossy UTF-8
++ NUL-truncation client-side at display time, never on the stored value.
+This is a behaviour change from the initial v2 design, which decoded
+ATTR_STRING to a UTF-8 `String` lossily on the ExEx side; that behaviour
+has been removed.
 
 ### Block Reference (for reverts)
 
@@ -272,9 +308,9 @@ Apply a contiguous sequence of blocks to the EntityDB's canonical head. Blocks m
                 "payload": "0xdeadbeef...",
                 "contentType": "application/octet-stream",
                 "attributes": [
-                  { "key": "linked.to", "entityKey": "0xabc..." },
-                  { "key": "priority", "numericValue": "0x2a" },
-                  { "key": "type", "stringValue": "note" }
+                  { "valueType": "entityKey", "name": "linked.to", "value": "0xabc..." },
+                  { "valueType": "uint",      "name": "priority",  "value": "0x2a" },
+                  { "valueType": "string",    "name": "type",      "value": "0x6e6f7465000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" }
                 ]
               },
               {
@@ -531,14 +567,21 @@ block (RecoveredBlock<OpBlock>)
   +-- for each (tx, receipt) where tx.to == ENTITY_REGISTRY_ADDRESS:
   |     |
   |     +-- recover sender from tx signature
-  |     +-- decode execute() calldata -> Operation[]
-  |     +-- parse EntityOperation event logs (1:1 with operations)
-  |     +-- for each (operation, event_log):
-  |           +-- map to ArkivOperation variant
-  |           +-- extract changesetHash from event
+  |     +-- decode executeCall calldata -> sol Operation[]
+  |     +-- filter receipt logs by EntityRegistry address;
+  |         partition by topic0 into parallel
+  |         EntityOperation[] and ChangeSetHashUpdate[] vectors
+  |         (emission order matches calldata op order)
+  |     +-- assert len(ops) == len(EntityOperation) == len(ChangeSetHashUpdate)
+  |     +-- for each (calldata_op, entity_event, hash_event) triple:
+  |           +-- assert entity_event.entityKey == hash_event.entityKey
+  |           +-- wire::decode_operation(op_index, ...) -> wire::Operation
+  |           +-- last_in_block = hash_event.changeSetHash
   |     +-- wrap in ArkivTransaction { hash, index, sender, operations }
   |
-  +-- set header.changeset_hash = last operation's hash, or previous block's
+  +-- set header.changeset_hash = last_in_block, falling back to the rolling
+  |   hash carried forward across blocks (seeded once per chain notification
+  |   from arkiv_bindings::storage_layout at the parent block's state)
   +-- emit ArkivBlock { header, transactions }
 ```
 
@@ -554,7 +597,7 @@ Blocks with no matching transactions emit `ArkivBlock { header, transactions: []
 - B256 hashes are `0x`-prefixed hex (64 hex chars)
 - `index` and `opIndex` are JSON integers (u32)
 - Empty arrays are `[]`, not omitted
-- `null` is used for `changesetHash` on genesis/pre-operation blocks
+- `changesetHash` is `0x0000…0000` only when no operation has ever been recorded as of that block (genesis / pre-first-mutation); never `null`
 
 ---
 

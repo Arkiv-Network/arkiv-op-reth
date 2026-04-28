@@ -1,19 +1,26 @@
 pub mod jsonrpc;
 pub mod logging;
 
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_primitives::{Address, B256};
+use arkiv_bindings::wire;
 use eyre::Result;
 use serde::Serialize;
 
 // ---------------------------------------------------------------------------
-// Wire types (v2) — block -> transaction -> operation hierarchy
+// Wire envelopes (v2) — block -> transaction hierarchy.
+//
+// Operation + Attribute types live upstream in `arkiv_bindings::wire`; this
+// module owns only the reth-shaped envelopes around them, per the upstream
+// `wire.rs` doc: block / transaction / block-ref envelopes live in the
+// consumer because they're built from reth-specific inputs (`RecoveredBlock`,
+// signature recovery, etc.).
 // ---------------------------------------------------------------------------
 
 /// Block header subset forwarded to the EntityDB.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArkivBlockHeader {
-    #[serde(with = "hex_u64")]
+    #[serde(with = "arkiv_bindings::wire::hex_u64")]
     pub number: u64,
     pub hash: B256,
     pub parent_hash: B256,
@@ -44,113 +51,16 @@ pub struct ArkivTransaction {
     pub hash: B256,
     pub index: u32,
     pub sender: Address,
-    pub operations: Vec<ArkivOperation>,
+    pub operations: Vec<wire::Operation>,
 }
 
 /// Minimal block identifier for revert payloads.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArkivBlockRef {
-    #[serde(with = "hex_u64")]
+    #[serde(with = "arkiv_bindings::wire::hex_u64")]
     pub number: u64,
     pub hash: B256,
-}
-
-/// A decoded Arkiv operation, tagged by type.
-#[derive(Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum ArkivOperation {
-    Create(CreateOp),
-    Update(UpdateOp),
-    Extend(ExtendOp),
-    #[serde(rename = "transfer")]
-    Transfer(TransferOp),
-    Delete(DeleteOp),
-    Expire(ExpireOp),
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateOp {
-    pub op_index: u32,
-    pub entity_key: B256,
-    pub owner: Address,
-    #[serde(with = "hex_u64")]
-    pub expires_at: u64,
-    pub entity_hash: B256,
-    pub changeset_hash: B256,
-    pub payload: Bytes,
-    pub content_type: String,
-    pub attributes: Vec<Attribute>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateOp {
-    pub op_index: u32,
-    pub entity_key: B256,
-    pub owner: Address,
-    pub entity_hash: B256,
-    pub changeset_hash: B256,
-    pub payload: Bytes,
-    pub content_type: String,
-    pub attributes: Vec<Attribute>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExtendOp {
-    pub op_index: u32,
-    pub entity_key: B256,
-    pub owner: Address,
-    #[serde(with = "hex_u64")]
-    pub expires_at: u64,
-    pub entity_hash: B256,
-    pub changeset_hash: B256,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TransferOp {
-    pub op_index: u32,
-    pub entity_key: B256,
-    pub owner: Address,
-    pub entity_hash: B256,
-    pub changeset_hash: B256,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeleteOp {
-    pub op_index: u32,
-    pub entity_key: B256,
-    pub owner: Address,
-    pub entity_hash: B256,
-    pub changeset_hash: B256,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExpireOp {
-    pub op_index: u32,
-    pub entity_key: B256,
-    pub owner: Address,
-    pub entity_hash: B256,
-    pub changeset_hash: B256,
-}
-
-/// Decoded attribute value, mirroring the contract's three value types.
-///
-/// `#[serde(untagged)]` discriminates by which value field is present:
-///   - `stringValue`: opaque UTF-8 (≤128 bytes per `value128-encoding.md`)
-///   - `numericValue`: hex-encoded `U256` (right-aligned in `data[0]`)
-///   - `entityKey`: hex-encoded `B256` (cross-reference to another entity)
-#[derive(Serialize)]
-#[serde(untagged, rename_all = "camelCase")]
-pub enum Attribute {
-    String { key: String, string_value: String },
-    Numeric { key: String, numeric_value: U256 },
-    EntityKey { key: String, entity_key: B256 },
 }
 
 // ---------------------------------------------------------------------------
@@ -174,16 +84,4 @@ pub trait Storage: Send + Sync + 'static {
         reverted: &[ArkivBlockRef],
         new_blocks: &[ArkivBlock],
     ) -> Result<Option<B256>>;
-}
-
-// ---------------------------------------------------------------------------
-// Hex u64 serialization
-// ---------------------------------------------------------------------------
-
-mod hex_u64 {
-    use serde::Serializer;
-
-    pub fn serialize<S: Serializer>(val: &u64, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&format!("0x{:x}", val))
-    }
 }

@@ -1337,12 +1337,13 @@ dependencies = [
 [[package]]
 name = "arkiv-bindings"
 version = "0.1.0"
-source = "git+https://github.com/Arkiv-Network/arkiv-contracts.git?rev=1345a91#1345a9179ec612d156656e6ef2d18d627a37a69e"
+source = "git+https://github.com/Arkiv-Network/arkiv-contracts.git?rev=ff30cab#ff30cab364f789bf40aa1d393114c45de8430a5d"
 dependencies = [
  "alloy-contract",
  "alloy-primitives",
  "alloy-sol-types",
  "eyre",
+ "serde",
  "serde_json",
 ]
 
