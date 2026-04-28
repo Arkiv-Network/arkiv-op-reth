@@ -4,11 +4,6 @@ on:
   push:
     branches:
       - main
-      - release/**
-  pull_request:
-    branches:
-      - main
-      - release/**
   workflow_dispatch:
     inputs:
       rust_flags:
@@ -47,7 +42,7 @@ jobs:
           echo "branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> $GITHUB_OUTPUT
           echo "rust_version=${{ github.event.inputs.rust_version || '1.95.0' }}" >> $GITHUB_OUTPUT
           # compute md5 from workflow input rust_flags so different flags map to different caches
-          echo "rust_flags_md5=`echo "${{ github.event.inputs.rust_flags }}" | md5sum | head -c 10`" >> $GITHUB_OUTPUT
+          echo "rust_flags_md5=`echo "${{ github.event.inputs.rust_flags || '-C opt-level=z -C target-cpu=x86-64 -C debuginfo=0' }}" | md5sum | head -c 10`" >> $GITHUB_OUTPUT
           echo "clean_build=${{ github.event.inputs.clean_build || 'false' }}" >> $GITHUB_OUTPUT
 
       - name: Install Rust ${{ steps.variables.outputs.rust_version }}
