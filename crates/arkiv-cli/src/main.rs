@@ -477,8 +477,14 @@ async fn main() -> Result<()> {
     // `simulate` builds its own multi-signer provider; bypass the
     // single-signer setup below.
     if let Command::Simulate(args) = cli.command {
-        return simulate::run(args, &cli.rpc_url, cli.registry, cli.gas_price, cli.block_time)
-            .await;
+        return simulate::run(
+            args,
+            &cli.rpc_url,
+            cli.registry,
+            cli.gas_price,
+            cli.block_time,
+        )
+        .await;
     }
 
     let signer: PrivateKeySigner = cli.private_key.parse()?;

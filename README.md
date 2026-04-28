@@ -97,16 +97,20 @@ exercising the ExEx, EntityDB, or downstream observers under realistic
 load:
 
 ```bash
-just simulate                                # default: 0.5 ops/s, 10 signers, until Ctrl-C
-just simulate --rate 2 --duration 5m         # 2 ops/s for 5 minutes
-just simulate --seed 42                      # deterministic run
+just simulate                                          # 0.5 batches/s, 10 signers, until Ctrl-C
+just simulate --rate 2 --duration 5m                   # 2 batches/s for 5 min
+just simulate --max-ops-per-tx 8 --signer-count 25     # bigger batches, more parallelism
+just simulate --seed 42                                # deterministic run
 ```
 
-The simulator rotates through the first N mnemonic-derived signers
-(default 10, capped at `ARKIV_DEV_ACCOUNT_COUNT = 100`), tracks alive
-entities in memory, and submits a weighted random mix of
-CREATE/UPDATE/EXTEND/TRANSFER/DELETE operations. EXPIRE fires
-event-driven on past-expiry entities.
+The simulator runs **per-signer in parallel** (each signer can hold one
+in-flight tx; up to `--signer-count` concurrent batches) and bundles
+**multiple ops per transaction** (each batch carries `1..=max-ops-per-tx`
+ops in a single `execute()` call). It rotates through the first N
+mnemonic-derived signers (default 10, capped at
+`ARKIV_DEV_ACCOUNT_COUNT = 100`), tracks alive entities in memory, and
+submits a weighted random mix of CREATE/UPDATE/EXTEND/TRANSFER/DELETE.
+EXPIRE fires event-driven on past-expiry entities.
 
 ### Inspect the embedded dev chainspec
 

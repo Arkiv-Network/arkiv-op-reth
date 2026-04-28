@@ -49,8 +49,7 @@ pub const DEV_ADDRESS: Address = Address::new([
 ///
 /// **Do not use in production.** This phrase is published in every
 /// JavaScript and Rust EVM testing toolkit.
-pub const ARKIV_DEV_MNEMONIC: &str =
-    "test test test test test test test test test test test junk";
+pub const ARKIV_DEV_MNEMONIC: &str = "test test test test test test test test test test test junk";
 
 /// Number of accounts derived from [`ARKIV_DEV_MNEMONIC`] and pre-funded
 /// in the dev chainspec. Caps the simulator's signer pool size.
