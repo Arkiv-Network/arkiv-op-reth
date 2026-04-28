@@ -115,24 +115,26 @@ hash even when the chainspec was assembled at recipe-time.
 
 ### 3.2 `arkiv-node`
 
-The execution-client binary. It's a thin wrapper around `reth_optimism_cli::Cli`:
+The execution-client binary. It's a thin wrapper around
+`reth_optimism_cli::Cli`, parameterised over an `ArkivExt` clap struct
+that adds two flags on top of `RollupArgs`:
+
+| Flag | Env | Purpose |
+|---|---|---|
+| `--arkiv.db-url <URL>` | `ARKIV_ENTITYDB_URL` | Enable ExEx (`JsonRpcStore` backend) + `arkiv_query` RPC proxy |
+| `--arkiv.debug` | — | Enable ExEx with `LoggingStore` (no RPC). Mutually exclusive with `--arkiv.db-url`. |
+
+Main dispatch — predeploy detection + flag combo selects one of five
+branches:
 
 ```rust
-fn main() -> eyre::Result<()> {
-    Cli::parse_args().run(|builder, rollup_args| async move {
-        let arkiv_active = has_arkiv_predeploy(&builder.config().chain);
-
-        let mut node = builder.node(OpNode::new(rollup_args));
-        if arkiv_active {
-            let store = build_store().await?;
-            node = node.install_exex("arkiv", move |ctx| async move {
-                Ok(arkiv_exex(ctx, store))
-            });
-        }
-
-        let handle = node.launch_with_debug_capabilities().await?;
-        handle.wait_for_node_exit().await
-    })
+match (predeploy, ext.arkiv_db_url, ext.arkiv_debug) {
+    (false, None, false)    => /* plain op-reth */,
+    (false, _, _)           => bail!("Arkiv flags set but predeploy missing"),
+    (true,  None, false)    => bail!("--arkiv.db-url or --arkiv.debug required"),
+    (true,  None, true)     => /* ExEx + LoggingStore */,
+    (true,  Some(url), false) => /* ping; ExEx + JsonRpcStore + arkiv_query RPC */,
+    (true,  Some(_), true)  => unreachable!(/* clap rejects */),
 }
 ```
 
@@ -140,10 +142,12 @@ There is **no chainspec mutation**. The chainspec is whatever `--chain`
 loaded; we never reach into `config_mut()` to inject anything at startup.
 This is what lets the binary serve as a true drop-in op-reth.
 
-#### 3.2.1 ExEx auto-activation
+#### 3.2.1 ExEx activation
 
-Whether to install the Arkiv ExEx is decided once, at startup, by
-`has_arkiv_predeploy(&chain)`:
+Activation is gated by the chainspec **and** an explicit flag. The
+predeploy detector (`has_arkiv_predeploy`) checks the loaded genesis
+alloc for our predeploy address, computes the expected runtime bytecode
+for *this* chain's chain ID, and compares hashes:
 
 ```rust
 fn has_arkiv_predeploy(chain: &OpChainSpec) -> bool {
@@ -157,33 +161,41 @@ fn has_arkiv_predeploy(chain: &OpChainSpec) -> bool {
 }
 ```
 
-It checks the loaded genesis alloc for our predeploy address, computes
-the expected runtime bytecode for *this* chain's chain ID, and compares
-hashes. Address-presence alone isn't sufficient: a hostile chainspec
-could squat at `0x44…0044` with unrelated code. The hash equality check
-makes activation a property of the chainspec content, not of either the
-chain ID or the binary's identity.
+Address-presence alone isn't sufficient: a hostile chainspec could squat
+at `0x44…0044` with unrelated code. The hash equality check makes
+predeploy detection a property of the chainspec content, not of either
+the chain ID or the binary's identity.
 
-Consequences:
+Detection on its own no longer auto-installs the ExEx — operators must
+opt in explicitly via one of the flags above. The combined matrix:
 
-| `--chain` | Behavior |
-|---|---|
-| `optimism`, `base`, `op_sepolia`, … (vanilla OP) | No predeploy → ExEx skipped → vanilla op-reth |
-| Path-A JSON with predeploy spliced in | ExEx active → Arkiv mode |
-| Path-A JSON squatting at the address with wrong bytecode | Hash mismatch → ExEx skipped, INFO log |
+| predeploy | `--arkiv.db-url` | `--arkiv.debug` | outcome |
+|---|---|---|---|
+| no  | unset           | unset | plain op-reth (vanilla) |
+| no  | set or true     | any   | hard fail: "Arkiv flags set but predeploy missing" |
+| yes | unset           | unset | hard fail: "--arkiv.db-url or --arkiv.debug required" |
+| yes | set, ping fails | unset | hard fail: "EntityDB unreachable at <url>" |
+| yes | set, ping ok    | unset | ExEx (`JsonRpcStore`) + `arkiv_query` RPC |
+| yes | unset           | set   | ExEx (`LoggingStore`); no RPC |
+| yes | set             | set   | clap rejects at parse time (`conflicts_with`) |
+
+The explicit-opt-in change closes a footgun the previous auto-activate
+behaviour created: a chain operator deploying the predeploy via
+`inject-predeploy` and forgetting to wire up EntityDB would silently get
+a `LoggingStore`-backed ExEx in production. The flag now forces a
+startup decision.
 
 #### 3.2.2 Storage backend
 
-`build_store()` selects between two implementations based on the
-`ARKIV_ENTITYDB_URL` env var:
+The flag set selects one of two implementations of `trait Storage`:
 
-- **Set** → `JsonRpcStore` posts to that URL. Performs a startup health
-  check; if the URL is unreachable the binary exits cleanly rather than
-  crashing the ExEx mid-stream.
-- **Unset** → `LoggingStore` emits structured tracing events for every
-  operation. Useful for `--dev` workflows and integration tests.
+- `--arkiv.db-url <URL>` → `JsonRpcStore` posts to that URL. Performs a
+  startup health check; if the URL is unreachable the binary exits
+  cleanly rather than crashing the ExEx mid-stream.
+- `--arkiv.debug` → `LoggingStore` emits structured tracing events for
+  every operation. Used for local dev and integration smoke tests.
 
-Both implement `trait Storage`:
+Both implement:
 
 ```rust
 pub trait Storage: Send + Sync + 'static {
@@ -198,6 +210,32 @@ maintain a Merkle trie (currently only the JSON-RPC backend forwards what
 EntityDB returns). The trait is sync; `JsonRpcStore` bridges to async via
 `tokio::task::block_in_place` since the ExEx loop runs on a multi-threaded
 runtime.
+
+#### 3.2.3 Read-side RPC proxy
+
+When `--arkiv.db-url` is set, the node also registers an `arkiv` JSON-RPC
+namespace via reth's `extend_rpc_modules` hook. Today it exposes a
+single method:
+
+| Method | Params | Returns |
+|---|---|---|
+| `arkiv_query` | arbitrary JSON value, forwarded as-is | EntityDB's `result` payload, returned as-is |
+
+The handler is a transparent proxy: the same `EntityDbClient`
+(connection pool, timeouts) backs both the write-side `JsonRpcStore` and
+the read-side proxy. Errors from EntityDB are surfaced as JSON-RPC error
+`-32000` with the underlying message.
+
+Not implementing wildcard forwarding (e.g. anything matching `arkiv_*`)
+is intentional: jsonrpsee dispatches by exact method name, and a
+wildcard would either need EntityDB-side method introspection at startup
+or a custom middleware layer. A single typed `arkiv_query` endpoint
+covers the use case without either. New methods can be added one rpc
+trait method at a time as needs surface.
+
+The RPC namespace is registered on every transport that the operator has
+enabled (`--http`, `--ws`, `--ipc`); operators who want to keep the
+proxy off simply don't pass `--arkiv.db-url`.
 
 ### 3.3 `arkiv-cli`
 
@@ -649,10 +687,11 @@ Honest scope notes:
   is the L2 execution client only.
 - **Pre-Bedrock state import.** Standard op-reth concern; the canonical
   Optimism docs cover it.
-- **Custom RPC methods.** Arkiv-specific RPCs (e.g.
-  `arkiv_changeSetHash`) could be added via `add_rpc_endpoints` on the
-  node builder. Not implemented; consumers read from the contract or
-  EntityDB directly.
+- **More than one Arkiv RPC method.** Today the namespace exposes only
+  `arkiv_query` (transparent proxy to EntityDB). Other methods such as
+  `arkiv_changeSetHash` could be added — either as additional typed
+  proxy methods or as RPCs that read directly from contract storage.
+  Not pursued yet.
 
 ---
 

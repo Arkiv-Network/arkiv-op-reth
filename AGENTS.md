@@ -12,9 +12,12 @@ one extra predeploy (`EntityRegistry` at
 (ExEx) that streams decoded entity ops to a downstream Go indexer
 (EntityDB) over JSON-RPC.
 
-The binary auto-detects the predeploy in the loaded chainspec; against a
+The binary detects the predeploy in the loaded chainspec; against a
 plain OP chainspec the ExEx stays inactive and it behaves as vanilla
-op-reth.
+op-reth. On an Arkiv chainspec, the ExEx is enabled by an explicit flag:
+`--arkiv.db-url <URL>` (forwards to EntityDB + registers `arkiv_query`
+RPC) or `--arkiv.debug` (LoggingStore, no RPC). The two are mutually
+exclusive.
 
 ## Workspace layout
 
@@ -37,9 +40,10 @@ justfile                      # all dev recipes
 | ----------------------------- | ------------------------------------------ |
 | ExEx loop / decode / rolling hash | `crates/arkiv-node/src/exex.rs`        |
 | Wire types + storage trait    | `crates/arkiv-node/src/storage/mod.rs`     |
-| JSON-RPC backend              | `crates/arkiv-node/src/storage/jsonrpc.rs` |
+| JSON-RPC backend + `EntityDbClient` | `crates/arkiv-node/src/storage/jsonrpc.rs` |
 | Logging backend               | `crates/arkiv-node/src/storage/logging.rs` |
-| ExEx activation check         | `crates/arkiv-node/src/main.rs` (`has_arkiv_predeploy`) |
+| `arkiv_*` RPC namespace       | `crates/arkiv-node/src/rpc.rs`             |
+| CLI flags + activation gating | `crates/arkiv-node/src/main.rs` (`ArkivExt`, `has_arkiv_predeploy`) |
 | CLI commands + batch format   | `crates/arkiv-cli/src/main.rs`             |
 | Traffic simulator             | `crates/arkiv-cli/src/simulate.rs`         |
 | Predeploy address + bytecode  | `crates/arkiv-genesis/src/lib.rs`          |

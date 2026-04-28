@@ -7,9 +7,13 @@ Extension (ExEx) that streams decoded entity operations to a downstream
 indexer (the Go EntityDB).
 
 The binary is a **drop-in op-reth**: against a vanilla OP chainspec it runs
-unchanged, and the ExEx auto-activates only when the loaded chainspec
-contains the EntityRegistry predeploy at the canonical address with
-matching bytecode.
+unchanged. On a chainspec containing the EntityRegistry predeploy, the ExEx
+is enabled by passing one of:
+
+- `--arkiv.db-url <URL>` — forward decoded ops to EntityDB and expose the
+  `arkiv_query` JSON-RPC proxy method.
+- `--arkiv.debug` — emit decoded ops to tracing logs (no EntityDB,
+  no RPC). For local dev / smoke tests.
 
 ```
                 ┌─────────────────────────────────────────────┐
@@ -58,18 +62,25 @@ just node-dev
 Generates an Arkiv dev genesis (chain ID `1337`, dev account funded,
 EntityRegistry at `0x4400000000000000000000000000000000000044`),
 initialises the datadir against it, and launches the node with auto-mining
-at 2 s blocks. ExEx output goes to tracing logs.
+at 2 s blocks. The recipe passes `--arkiv.debug`, so the ExEx emits decoded
+ops as tracing events.
 
 ### Local dev node forwarding to a mock EntityDB
 
 ```bash
 just mock-entitydb            # terminal 1: starts a JSON-RPC mock on :9545
-just node-dev-jsonrpc         # terminal 2: same as node-dev, plus ExEx forwards to the mock
+just node-dev-jsonrpc         # terminal 2: node + --arkiv.db-url=http://localhost:9545
 ```
 
-The ExEx invokes `arkiv_commitChain` / `arkiv_revert` / `arkiv_reorg` against
-the mock; the mock script logs the JSON-RPC payloads. Useful for inspecting
-the on-the-wire format.
+The ExEx invokes `arkiv_commitChain` / `arkiv_revert` / `arkiv_reorg`
+against the mock; the same URL also backs the read-side `arkiv_query`
+RPC proxy. The mock script logs every inbound JSON-RPC payload — useful
+for inspecting the wire format end-to-end:
+
+```bash
+just query                                  # default null payload
+just query '{"key":"0x..."}'                # arbitrary JSON payload
+```
 
 ### Submit operations
 
@@ -178,8 +189,11 @@ Working today:
 - `--chain arkiv` … is **not** registered as a built-in. The current
   approach is a JSON-file chainspec (`chainspec/dev.base.json` +
   `inject-predeploy`); the binary takes the file via `--chain <path>`.
-- The ExEx auto-detects the predeploy and activates conditionally.
+- ExEx detects the predeploy by chainspec content and activates on
+  explicit operator opt-in (`--arkiv.db-url` or `--arkiv.debug`).
 - ExEx → EntityDB JSON-RPC v2 wire format is complete and documented.
+- `arkiv_query` JSON-RPC proxy method (registered when `--arkiv.db-url`
+  is set; transparent passthrough to EntityDB).
 - Operator CLI covers all six entity-operation types plus batched submission
   with cross-references between ops.
 - Storage backends: `LoggingStore` (tracing) and `JsonRpcStore`
