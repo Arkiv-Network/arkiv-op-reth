@@ -60,6 +60,7 @@ node-dev *args='':
         --dev.block-time 2s \
         --datadir "$TMPDIR" \
         --http \
+        --arkiv.debug \
         --log.file.directory "$TMPDIR/logs" \
         {{ args }}
     rm -rf "$TMPDIR"

@@ -1,8 +1,7 @@
 //! Logging storage backend for development debugging.
 //!
-//! Currently unreferenced by the binary (the auto-selected backend is
-//! [`super::JsonRpcStore`]); kept in tree for tests and future opt-in.
-#![allow(dead_code)]
+//! Selected via the `--arkiv.debug` flag; emits decoded ops as tracing
+//! events instead of forwarding them to an EntityDB.
 
 use crate::storage::{ArkivBlock, ArkivBlockRef, Storage};
 use alloy_primitives::B256;

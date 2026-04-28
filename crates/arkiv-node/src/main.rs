@@ -11,16 +11,22 @@ use reth_optimism_node::{OpNode, args::RollupArgs};
 use std::sync::Arc;
 
 use crate::rpc::{ArkivApiServer, ArkivRpc};
-use crate::storage::{EntityDbClient, JsonRpcStore, Storage};
+use crate::storage::{EntityDbClient, JsonRpcStore, Storage, logging::LoggingStore};
 
 /// CLI extension over [`RollupArgs`]. Adds Arkiv-specific flags.
 #[derive(Debug, clap::Args)]
 struct ArkivExt {
-    /// EntityDB JSON-RPC URL. Required when running on a chainspec containing
-    /// the EntityRegistry predeploy: enables the Arkiv ExEx and the
-    /// `arkiv_query` JSON-RPC method.
+    /// EntityDB JSON-RPC URL. On an Arkiv chainspec, enables the ExEx
+    /// (forwarding to EntityDB) and the `arkiv_query` JSON-RPC method.
     #[arg(long = "arkiv.db-url", env = "ARKIV_ENTITYDB_URL")]
     arkiv_db_url: Option<String>,
+
+    /// Debug mode: run the ExEx with the in-process `LoggingStore` backend
+    /// (decoded ops are emitted as tracing events). Useful for local dev
+    /// without a running EntityDB. The `arkiv_*` RPC namespace is not
+    /// installed in this mode.
+    #[arg(long = "arkiv.debug", conflicts_with = "arkiv_db_url")]
+    arkiv_debug: bool,
 
     #[command(flatten)]
     rollup: RollupArgs,
@@ -31,24 +37,32 @@ fn main() -> Result<()> {
         let predeploy = has_arkiv_predeploy(&builder.config().chain);
         let mut node = builder.node(OpNode::new(ext.rollup));
 
-        match (predeploy, ext.arkiv_db_url) {
-            (false, None) => {
+        // clap's `conflicts_with` rejects --arkiv.db-url + --arkiv.debug at parse time.
+        match (predeploy, ext.arkiv_db_url, ext.arkiv_debug) {
+            (false, None, false) => {
                 tracing::info!("EntityRegistry predeploy not detected; running as plain op-reth");
             }
-            (false, Some(_)) => {
+            (false, _, _) => {
                 bail!(
-                    "--arkiv.db-url is set but the loaded chainspec does not contain the \
+                    "Arkiv flags set but the loaded chainspec does not contain the \
                      EntityRegistry predeploy at {}",
                     arkiv_genesis::ENTITY_REGISTRY_ADDRESS,
                 );
             }
-            (true, None) => {
+            (true, None, false) => {
                 bail!(
-                    "EntityRegistry predeploy detected; --arkiv.db-url (or ARKIV_ENTITYDB_URL) \
-                     is required to run the Arkiv ExEx and arkiv_* RPC",
+                    "EntityRegistry predeploy detected; either --arkiv.db-url (or \
+                     ARKIV_ENTITYDB_URL) or --arkiv.debug is required",
                 );
             }
-            (true, Some(url)) => {
+            (true, None, true) => {
+                tracing::info!("Arkiv: predeploy detected; installing ExEx with LoggingStore (debug)");
+                let store: Arc<dyn Storage> = Arc::new(LoggingStore::new());
+                node = node.install_exex("arkiv", move |ctx| async move {
+                    Ok(exex::arkiv_exex(ctx, store))
+                });
+            }
+            (true, Some(url), false) => {
                 let client = Arc::new(EntityDbClient::new(url.clone()));
                 client
                     .health_check()
@@ -69,6 +83,7 @@ fn main() -> Result<()> {
                         Ok(())
                     });
             }
+            (true, Some(_), true) => unreachable!("clap conflicts_with rejects this combination"),
         }
 
         let handle = node.launch_with_debug_capabilities().await?;
