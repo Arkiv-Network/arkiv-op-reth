@@ -118,7 +118,7 @@ jobs:
           rsync -a --delete --mkpath target/ "${{ steps.cache_action.outputs.cache_dir }}"
 
   build-storaged:
-    runs-on: op-reth-builder
+    runs-on: ubuntu-latest
 
     steps:
       - name: Set input variables
