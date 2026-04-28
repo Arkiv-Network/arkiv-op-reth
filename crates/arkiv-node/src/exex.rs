@@ -85,19 +85,18 @@ fn extract_blocks(chain: &Arc<OpChain>, mut prior_rolling: B256) -> Vec<ArkivBlo
 
             let tx_hash = B256::from(tx.tx_hash());
 
-            let operations =
-                match decode_arkiv_tx(tx.input(), receipt.logs(), &mut last_in_block) {
-                    Ok(ops) => ops,
-                    Err(e) => {
-                        tracing::error!(
-                            tx = %tx_hash,
-                            block = block.header().number(),
-                            error = %e,
-                            "failed to decode registry transaction"
-                        );
-                        continue;
-                    }
-                };
+            let operations = match decode_arkiv_tx(tx.input(), receipt.logs(), &mut last_in_block) {
+                Ok(ops) => ops,
+                Err(e) => {
+                    tracing::error!(
+                        tx = %tx_hash,
+                        block = block.header().number(),
+                        error = %e,
+                        "failed to decode registry transaction"
+                    );
+                    continue;
+                }
+            };
 
             if !operations.is_empty() {
                 transactions.push(ArkivTransaction {
@@ -239,10 +238,7 @@ fn decode_arkiv_tx(
                 hash_events.push(ChangeSetHashUpdate::decode_log_data(&log.data)?);
             }
             other => {
-                bail!(
-                    "unexpected log from EntityRegistry: topic0={:?}",
-                    other
-                );
+                bail!("unexpected log from EntityRegistry: topic0={:?}", other);
             }
         }
     }
@@ -268,7 +264,9 @@ fn decode_arkiv_tx(
         if eo.entityKey != cshu.entityKey {
             bail!(
                 "event entityKey mismatch at op_index={}: EntityOperation={}, ChangeSetHashUpdate={}",
-                op_index, eo.entityKey, cshu.entityKey,
+                op_index,
+                eo.entityKey,
+                cshu.entityKey,
             );
         }
         let wire_op = wire::decode_operation(op_index as u32, cd, eo, cshu)?;
