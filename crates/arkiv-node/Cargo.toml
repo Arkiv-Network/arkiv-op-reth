@@ -26,6 +26,7 @@ alloy-primitives.workspace = true
 alloy-consensus.workspace = true
 alloy-sol-types.workspace = true
 
+clap.workspace = true
 eyre.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -33,3 +34,4 @@ futures-util.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+jsonrpsee.workspace = true

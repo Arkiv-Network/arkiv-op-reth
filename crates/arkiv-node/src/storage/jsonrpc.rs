@@ -1,11 +1,15 @@
 //! JSON-RPC storage backend for the Go EntityDB service.
 //!
 //! Implements `arkiv_commitChain`, `arkiv_revert`, and `arkiv_reorg`.
+//! The underlying HTTP/JSON-RPC client is exposed as [`EntityDbClient`]
+//! and shared with the `arkiv_query` RPC handler in `crate::rpc`.
 
 use crate::storage::{ArkivBlock, ArkivBlockRef, Storage};
 use alloy_primitives::B256;
 use eyre::{Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
+use serde_json::Value;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -32,20 +36,22 @@ struct CommitResponse {
 }
 
 // ---------------------------------------------------------------------------
-// JsonRpcStore
+// EntityDbClient — shared HTTP/JSON-RPC client
 // ---------------------------------------------------------------------------
 
-/// A [`Storage`] implementation that forwards blocks to a Go EntityDB via JSON-RPC.
-pub struct JsonRpcStore {
-    client: reqwest::Client,
+/// Thin JSON-RPC client over a single EntityDB endpoint. Shared between the
+/// write-side ExEx ([`JsonRpcStore`]) and the read-side `arkiv_query` RPC
+/// proxy so they reuse one connection pool and one URL.
+pub struct EntityDbClient {
+    http: reqwest::Client,
     url: String,
     next_id: AtomicU64,
 }
 
-impl JsonRpcStore {
+impl EntityDbClient {
     pub fn new(url: String) -> Self {
         Self {
-            client: reqwest::Client::builder()
+            http: reqwest::Client::builder()
                 .pool_max_idle_per_host(1)
                 .timeout(Duration::from_secs(30))
                 .build()
@@ -65,7 +71,7 @@ impl JsonRpcStore {
             "method": "arkiv_ping",
             "params": []
         });
-        self.client
+        self.http
             .post(&self.url)
             .json(&body)
             .send()
@@ -74,24 +80,23 @@ impl JsonRpcStore {
         Ok(())
     }
 
-    fn rpc_call<R: for<'de> Deserialize<'de>>(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<R> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+    fn next_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Sync RPC call — used by the ExEx, which already runs on a multi-threaded
+    /// runtime and bridges async via `block_in_place`.
+    pub fn rpc_call<R: DeserializeOwned>(&self, method: &str, params: Value) -> Result<R> {
         let body = serde_json::json!({
             "jsonrpc": "2.0",
-            "id": id,
+            "id": self.next_id(),
             "method": method,
             "params": [params]
         });
 
-        // Bridge async reqwest into sync Storage trait.
-        // block_in_place is safe here — the ExEx runs on a multi-threaded runtime.
         let resp = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
-                .block_on(self.client.post(&self.url).json(&body).send())
+                .block_on(self.http.post(&self.url).json(&body).send())
         })
         .map_err(|e| eyre::eyre!("EntityDB request failed: {}", e))?;
 
@@ -99,25 +104,72 @@ impl JsonRpcStore {
             tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(resp.json()))
                 .map_err(|e| eyre::eyre!("EntityDB response parse failed: {}", e))?;
 
-        match rpc_resp.error {
-            Some(e) => bail!("EntityDB error {}: {}", e.code, e.message),
-            None => rpc_resp
-                .result
-                .ok_or_else(|| eyre::eyre!("EntityDB returned empty result")),
-        }
+        unwrap_response(rpc_resp)
+    }
+
+    /// Async RPC proxy — used by the `arkiv_query` JSON-RPC handler. Forwards
+    /// `params` as-is and returns the raw `result` payload.
+    pub async fn proxy(&self, method: &str, params: Value) -> Result<Value> {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": self.next_id(),
+            "method": method,
+            "params": [params]
+        });
+
+        let resp = self
+            .http
+            .post(&self.url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("EntityDB request failed: {}", e))?;
+
+        let rpc_resp: JsonRpcResponse<Value> = resp
+            .json()
+            .await
+            .map_err(|e| eyre::eyre!("EntityDB response parse failed: {}", e))?;
+
+        unwrap_response(rpc_resp)
+    }
+}
+
+fn unwrap_response<T: DeserializeOwned>(resp: JsonRpcResponse<T>) -> Result<T> {
+    match resp.error {
+        Some(e) => bail!("EntityDB error {}: {}", e.code, e.message),
+        None => resp
+            .result
+            .ok_or_else(|| eyre::eyre!("EntityDB returned empty result")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JsonRpcStore
+// ---------------------------------------------------------------------------
+
+/// A [`Storage`] implementation that forwards blocks to a Go EntityDB via JSON-RPC.
+pub struct JsonRpcStore {
+    client: Arc<EntityDbClient>,
+}
+
+impl JsonRpcStore {
+    pub fn from_client(client: Arc<EntityDbClient>) -> Self {
+        Self { client }
     }
 }
 
 impl Storage for JsonRpcStore {
     fn handle_commit(&self, blocks: &[ArkivBlock]) -> Result<Option<B256>> {
-        let resp: CommitResponse =
-            self.rpc_call("arkiv_commitChain", serde_json::json!({ "blocks": blocks }))?;
+        let resp: CommitResponse = self
+            .client
+            .rpc_call("arkiv_commitChain", serde_json::json!({ "blocks": blocks }))?;
         Ok(Some(resp.state_root))
     }
 
     fn handle_revert(&self, blocks: &[ArkivBlockRef]) -> Result<Option<B256>> {
-        let resp: CommitResponse =
-            self.rpc_call("arkiv_revert", serde_json::json!({ "blocks": blocks }))?;
+        let resp: CommitResponse = self
+            .client
+            .rpc_call("arkiv_revert", serde_json::json!({ "blocks": blocks }))?;
         Ok(Some(resp.state_root))
     }
 
@@ -126,7 +178,7 @@ impl Storage for JsonRpcStore {
         reverted: &[ArkivBlockRef],
         new_blocks: &[ArkivBlock],
     ) -> Result<Option<B256>> {
-        let resp: CommitResponse = self.rpc_call(
+        let resp: CommitResponse = self.client.rpc_call(
             "arkiv_reorg",
             serde_json::json!({
                 "revertedBlocks": reverted,

@@ -1,6 +1,8 @@
 pub mod jsonrpc;
 pub mod logging;
 
+pub use jsonrpc::{EntityDbClient, JsonRpcStore};
+
 use alloy_primitives::{Address, B256};
 use arkiv_bindings::wire;
 use eyre::Result;

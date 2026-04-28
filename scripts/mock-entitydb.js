@@ -29,11 +29,27 @@ const server = http.createServer((req, res) => {
       JSON.stringify({
         jsonrpc: "2.0",
         id: parsed.id,
-        result: { stateRoot: ZERO_ROOT },
+        result: dummyResultFor(parsed),
       })
     );
   });
 });
+
+// Dummy response shape per method. Write-side methods get a state-root envelope
+// (matching what the ExEx parses); arkiv_query echoes the inbound payload so the
+// proxy round-trip is observable.
+function dummyResultFor(req) {
+  const payload = Array.isArray(req.params) ? req.params[0] : req.params;
+  switch (req.method) {
+    case "arkiv_query":
+      return { ok: true, echo: payload };
+    case "arkiv_ping":
+      return "pong";
+    default:
+      // arkiv_commitChain / arkiv_revert / arkiv_reorg and anything else.
+      return { stateRoot: ZERO_ROOT };
+  }
+}
 
 server.listen(port, () => {
   console.log(`mock-entitydb listening on http://localhost:${port}`);

@@ -147,13 +147,13 @@ node-dev-jsonrpc *args='':
     echo "registry: {{ registry }}"
     echo "dev account: {{ dev_addr }}"
     echo "entitydb: http://localhost:9545"
-    ARKIV_ENTITYDB_URL=http://localhost:9545 \
     {{ arkiv_node }} node \
         --chain "$GENESIS" \
         --dev \
         --dev.block-time 2s \
         --datadir "$TMPDIR" \
         --http \
+        --arkiv.db-url http://localhost:9545 \
         --log.file.directory "$TMPDIR/logs" \
         {{ args }}
     rm -rf "$TMPDIR"
@@ -174,13 +174,13 @@ node-dev-storaged *args='':
     echo "registry: {{ registry }}"
     echo "dev account: {{ dev_addr }}"
     echo "storaged: http://localhost:2704"
-    ARKIV_ENTITYDB_URL=http://localhost:2704 \
     {{ arkiv_node }} node \
         --chain "$GENESIS" \
         --dev \
         --dev.block-time 2s \
         --datadir "$TMPDIR" \
         --http \
+        --arkiv.db-url http://localhost:2704 \
         --log.file.directory "$TMPDIR/logs" \
         {{ args }}
     rm -rf "$TMPDIR"
