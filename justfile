@@ -122,6 +122,10 @@ batch file:
 spam *args='':
     {{ arkiv_cli }} spam {{ args }}
 
+# Continuously simulate live system traffic against a running node
+simulate *args='':
+    cargo run -p arkiv-cli -- simulate {{ args }}
+
 # ── EntityDB Mock ────────────────────────────────────────────
 
 # Run mock EntityDB that logs incoming JSON-RPC requests

@@ -10,6 +10,7 @@ arkiv-bindings.workspace = true
 
 alloy-genesis.workspace = true
 alloy-primitives.workspace = true
+alloy-signer-local.workspace = true
 revm.workspace = true
 
 eyre.workspace = true

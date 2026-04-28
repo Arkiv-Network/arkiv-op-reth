@@ -1364,9 +1364,11 @@ dependencies = [
  "hex",
  "humantime",
  "rand 0.9.4",
+ "rand_chacha 0.9.0",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1375,6 +1377,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-genesis",
  "alloy-primitives",
+ "alloy-signer-local",
  "arkiv-bindings",
  "eyre",
  "hex",

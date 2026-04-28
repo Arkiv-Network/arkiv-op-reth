@@ -219,6 +219,7 @@ The operator command-line tool. Two distinct surfaces:
 | `balance` | ETH balance for the signer (or `--address`) |
 | `spam` | Fire many CREATE txs with backpressure on the txpool |
 | `batch <FILE>` | Submit an arbitrary sequence of ops in one tx (see below) |
+| `simulate` | Continuously generate a weighted op mix with multi-signer rotation (see [§3.5](#35-the-simulate-command)) |
 
 Defaults are tuned for local dev (`http://localhost:8545`, the hardhat
 mnemonic #0 key, `--chain arkiv` predeploy address). All overridable via
@@ -289,6 +290,77 @@ Notable mechanics:
   Resolved to a block number via the configured block-time.
 
 See `scripts/fixtures/` for end-to-end examples.
+
+### 3.5 The `simulate` command
+
+`arkiv-cli simulate` is a continuous load generator. It rotates through
+mnemonic-derived signers, maintains an in-memory pool of "alive"
+entities, and submits a weighted random mix of operations against a
+running node — meant to exercise the full ExEx → EntityDB pipeline
+under traffic that resembles real usage.
+
+```
+arkiv-cli simulate \
+    [--rate <batches/s>]        # default: 0.5
+    [--duration <humantime>]    # 0 = unbounded (default)
+    [--signer-count <N>]        # default: 10, capped at ARKIV_DEV_ACCOUNT_COUNT
+    [--max-ops-per-tx <N>]      # default: 5; each batch carries 1..=N ops
+    [--weights <op=N,…>]        # default: create=4,update=3,extend=2,transfer=1,delete=1
+    [--max-alive <N>]           # default: 1000; CREATE throttles when reached
+    [--status-interval <dur>]   # default: 10s
+    [--seed <u64>]              # deterministic if given
+```
+
+Mechanics:
+
+- **Multi-signer wallet.** All `--signer-count` signers are derived from
+  `ARKIV_DEV_MNEMONIC` and registered with one shared `EthereumWallet`;
+  per-tx selection is via `.from(addr)`. Each tx is signed by one
+  designated signer; ops in a batch are constrained to entities that
+  signer owns (plus fresh CREATEs).
+- **Per-signer concurrency.** Each signer is a "slot" with an
+  `AtomicBool` busy flag. Up to `signer_count` batches can be in flight
+  at once — one per signer, so each account's nonce stream stays
+  sequential without manual tracking. The driver loop ticks at `1/rate`
+  seconds, picks an idle slot, builds a batch, and spawns a submission
+  task. Effective throughput is bounded by `min(rate × batch_size,
+  signer_count × chain_throughput)`.
+- **Multi-op batches.** Each tx contains `1..=max_ops_per_tx` operations
+  encoded into one `execute()` call. Op selection within a batch is
+  independent — no in-batch cross-references, so we don't predict
+  entity keys ahead of time. Pending entities (already targeted by an
+  in-flight batch) are excluded from selection in any other batch.
+- **Op selection.** Priority queue: any past-expiry entity becomes an
+  EXPIRE candidate immediately. Otherwise weighted random among feasible
+  CRUD ops — feasibility checks include `alive < max_alive` for CREATE
+  (counting in-batch creates too), `signer-owned alive > 0` for
+  UPDATE/EXTEND/DELETE, plus `signers >= 2` for TRANSFER.
+- **State updates.** All transitions apply under a shared
+  `tokio::sync::Mutex<State>` after the receipt resolves. Successful
+  CREATEs decode `EntityOperation` logs in order to learn new entity
+  keys; UPDATEs clear `pending`; EXTENDs bump `expires_at`; TRANSFERs
+  swap `owner_idx`; DELETE/EXPIRE remove from `alive`. On revert or
+  network error, all `pending` flags are cleared and counters increment
+  the `failed` column without state changes.
+- **Cancellation.** `tokio::select!` between the work tick and
+  `signal::ctrl_c()`; on shutdown the driver waits up to 15 s for
+  in-flight tasks to drain, then prints `[final, interrupted]`.
+
+Status reports show send/confirm/fail counters per op type plus alive
+count, expired-queue size, and current in-flight batches, every
+`--status-interval` seconds.
+
+Scope notes (intentional):
+
+- No persistence — restarts forget their entity pool. The simulator's
+  state is recoverable from chain history if anyone ever needs it.
+- One tx in flight per signer (not per-signer pipelined). To push beyond
+  `signer_count` concurrency you'd add per-signer nonce management; not
+  implemented yet.
+- No in-batch cross-references. UPDATE-of-just-CREATEd in the same tx
+  is supported by the `batch` command but skipped here for simplicity.
+- No retry on revert. Failed ops increment the `failed` counter and the
+  simulator moves on.
 
 ---
 
