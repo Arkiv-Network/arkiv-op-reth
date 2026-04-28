@@ -24,6 +24,10 @@ on:
         required: true
         default: 'false'
         options: [ 'true', 'false' ]
+      arkiv_storage_service_ref:
+        description: 'arkiv-storage-service branch or tag'
+        required: true
+        default: 'main'
 
 permissions:
   contents: read
@@ -113,9 +117,43 @@ jobs:
           # copy to /opt/yagna_cache and preserve permissions and timestamps
           rsync -a --delete --mkpath target/ "${{ steps.cache_action.outputs.cache_dir }}"
 
+  build-storaged:
+    runs-on: op-reth-builder
+
+    steps:
+      - name: Set input variables
+        id: variables
+        run: |
+          echo "arkiv_storage_service_ref=${{ github.event.inputs.arkiv_storage_service_ref || 'main' }}" >> $GITHUB_OUTPUT
+
+      - name: Checkout arkiv-storage-service
+        uses: actions/checkout@v4
+        with:
+          repository: Arkiv-Network/arkiv-storage-service
+          ref: ${{ steps.variables.outputs.arkiv_storage_service_ref }}
+          path: arkiv-storage-service
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: Build arkiv-storaged
+        working-directory: arkiv-storage-service
+        run: make build
+
+      - name: Upload arkiv-storaged binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: arkiv-storaged-binaries
+          path: arkiv-storage-service/bin/arkiv-storaged
+
   demo-e2e:
     runs-on: ubuntu-latest
-    needs: build
+    needs:
+      - build
+      - build-storaged
     # Covers demo backend startup, node init/launch, and the scripted demo sleeps with headroom.
     timeout-minutes: 6
 
@@ -129,8 +167,16 @@ jobs:
           name: arkiv-binaries
           path: /tmp/arkiv-binaries
 
+      - name: Download arkiv-storaged binary
+        uses: actions/download-artifact@v4.1.3
+        with:
+          name: arkiv-storaged-binaries
+          path: /tmp/arkiv-storaged
+
       - name: Make binaries executable
-        run: chmod +x /tmp/arkiv-binaries/*
+        run: |
+          chmod +x /tmp/arkiv-binaries/*
+          chmod +x /tmp/arkiv-storaged/*
 
       - name: Install just
         run: |
