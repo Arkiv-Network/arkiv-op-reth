@@ -53,7 +53,7 @@ async fn build_store() -> eyre::Result<Arc<dyn storage::Storage>> {
 /// matches the runtime form for this chain's chain_id.
 ///
 /// The bytecode hash check (rather than mere address presence) guards
-/// against squatting at `0x44…0042` with unrelated code.
+/// against squatting at `0x44…0044` with unrelated code.
 fn has_arkiv_predeploy(chain: &OpChainSpec) -> bool {
     let chain_id = chain.inner.chain.id();
     let Some(account) = chain
