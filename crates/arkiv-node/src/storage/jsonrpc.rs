@@ -95,8 +95,7 @@ impl EntityDbClient {
         });
 
         let resp = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(self.http.post(&self.url).json(&body).send())
+            tokio::runtime::Handle::current().block_on(self.http.post(&self.url).json(&body).send())
         })
         .map_err(|e| eyre::eyre!("EntityDB request failed: {}", e))?;
 
