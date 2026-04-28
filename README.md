@@ -90,6 +90,24 @@ just batch scripts/fixtures/attributes-all-types.json
 See [`docs/architecture.md`](docs/architecture.md#cli-the-batch-format)
 for the batch JSON schema.
 
+### Continuous simulation
+
+For a steady stream of mixed traffic against a running node — useful for
+exercising the ExEx, EntityDB, or downstream observers under realistic
+load:
+
+```bash
+just simulate                                # default: 0.5 ops/s, 10 signers, until Ctrl-C
+just simulate --rate 2 --duration 5m         # 2 ops/s for 5 minutes
+just simulate --seed 42                      # deterministic run
+```
+
+The simulator rotates through the first N mnemonic-derived signers
+(default 10, capped at `ARKIV_DEV_ACCOUNT_COUNT = 100`), tracks alive
+entities in memory, and submits a weighted random mix of
+CREATE/UPDATE/EXTEND/TRANSFER/DELETE operations. EXPIRE fires
+event-driven on past-expiry entities.
+
 ### Inspect the embedded dev chainspec
 
 ```bash

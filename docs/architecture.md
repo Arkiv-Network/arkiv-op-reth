@@ -219,6 +219,7 @@ The operator command-line tool. Two distinct surfaces:
 | `balance` | ETH balance for the signer (or `--address`) |
 | `spam` | Fire many CREATE txs with backpressure on the txpool |
 | `batch <FILE>` | Submit an arbitrary sequence of ops in one tx (see below) |
+| `simulate` | Continuously generate a weighted op mix with multi-signer rotation (see [§3.5](#35-the-simulate-command)) |
 
 Defaults are tuned for local dev (`http://localhost:8545`, the hardhat
 mnemonic #0 key, `--chain arkiv` predeploy address). All overridable via
@@ -289,6 +290,58 @@ Notable mechanics:
   Resolved to a block number via the configured block-time.
 
 See `scripts/fixtures/` for end-to-end examples.
+
+### 3.5 The `simulate` command
+
+`arkiv-cli simulate` is a continuous load generator. It rotates through
+mnemonic-derived signers, maintains an in-memory pool of "alive"
+entities, and submits a weighted random mix of operations against a
+running node — meant to exercise the full ExEx → EntityDB pipeline
+under traffic that resembles real usage.
+
+```
+arkiv-cli simulate \
+    [--rate <ops/s>]            # default: 0.5
+    [--duration <humantime>]    # 0 = unbounded (default)
+    [--signer-count <N>]        # default: 10, capped at ARKIV_DEV_ACCOUNT_COUNT
+    [--weights <op=N,…>]        # default: create=4,update=3,extend=2,transfer=1,delete=1
+    [--max-alive <N>]           # default: 1000; CREATE throttles when reached
+    [--status-interval <dur>]   # default: 10s
+    [--seed <u64>]              # deterministic if given
+```
+
+Mechanics:
+
+- **Multi-signer wallet.** All `--signer-count` signers are derived from
+  `ARKIV_DEV_MNEMONIC` and registered with one shared `EthereumWallet`;
+  per-tx selection is via `.from(addr)`. Each tx is signed by the
+  current owner of the targeted entity (or any signer for CREATE/EXPIRE).
+- **Op selection.** Priority queue: any past-expiry entity becomes an
+  EXPIRE candidate immediately. Otherwise weighted random among feasible
+  CRUD ops — feasibility checks include `alive < max_alive` for CREATE,
+  `alive > 0` for the rest, `signers >= 2` for TRANSFER.
+- **State updates.** Confirmed CREATEs decode the `EntityOperation` log
+  to learn the new entity key; UPDATEs leave state alone; EXTENDs bump
+  `expires_at`; TRANSFERs swap `owner_idx`; DELETE/EXPIRE remove the
+  entity from `alive`.
+- **Sequential execution.** One tx in flight at a time globally — keeps
+  nonces consistent without per-signer bookkeeping. Pacing is naïve
+  `sleep(1.0/rate)` between submissions.
+- **Cancellation.** `tokio::select!` between the work tick and
+  `signal::ctrl_c()`; on shutdown a final `[final, interrupted]` status
+  block is printed.
+
+Status reports show send/confirm/fail counters per op type plus alive
+and expired-queue sizes, every `--status-interval` seconds.
+
+Scope notes (intentional):
+
+- No persistence — restarts forget their entity pool. The simulator's
+  state is recoverable from chain history if anyone ever needs it.
+- Sequential rather than pipelined. Reaching higher rates would need
+  per-signer nonce management; not implemented yet.
+- No retry on revert. Failed ops increment the `failed` counter and the
+  simulator moves on.
 
 ---
 

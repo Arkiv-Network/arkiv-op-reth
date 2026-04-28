@@ -1,3 +1,5 @@
+mod simulate;
+
 use alloy_network::EthereumWallet;
 use alloy_primitives::{Address, B256, Bytes, FixedBytes, U256};
 use alloy_provider::{Provider, ProviderBuilder};
@@ -174,6 +176,10 @@ enum Command {
         #[arg(long, default_value = "1h", value_parser = humantime::parse_duration)]
         expires_in: Duration,
     },
+
+    /// Continuously generate a weighted mix of entity operations against
+    /// a running node, simulating live system traffic.
+    Simulate(simulate::SimulateArgs),
 }
 
 /// Validate and pack a MIME type string into the contract's `Mime128`
@@ -468,6 +474,13 @@ async fn main() -> Result<()> {
         return inject_predeploy(file, out.as_deref());
     }
 
+    // `simulate` builds its own multi-signer provider; bypass the
+    // single-signer setup below.
+    if let Command::Simulate(args) = cli.command {
+        return simulate::run(args, &cli.rpc_url, cli.registry, cli.gas_price, cli.block_time)
+            .await;
+    }
+
     let signer: PrivateKeySigner = cli.private_key.parse()?;
     let signer_address = signer.address();
     let wallet = EthereumWallet::from(signer);
@@ -675,6 +688,7 @@ async fn main() -> Result<()> {
         }
 
         Command::InjectPredeploy { .. } => unreachable!("handled at top of main"),
+        Command::Simulate(_) => unreachable!("handled at top of main"),
 
         Command::Batch { file } => {
             let json = std::fs::read_to_string(&file)?;
