@@ -405,15 +405,21 @@ fn resolve_payload(payload: Option<&str>, size: Option<usize>) -> Result<Bytes> 
     }
 }
 
-/// Splice the EntityRegistry predeploy into a geth-format genesis JSON.
+/// Splice the Arkiv predeploy and prefunded dev accounts into a geth-format
+/// genesis JSON.
 ///
-/// Reads `chainId` from the input's `config`, runs the contract creation
-/// bytecode through revm at that chain ID, and writes the resulting
-/// runtime bytecode into `alloc[ENTITY_REGISTRY_ADDRESS].code`. Output is
-/// pretty-printed back to disk (overwriting the input by default, or to
-/// `out` if specified).
+/// Reads `chainId` from the input's `config`, then merges
+/// [`arkiv_genesis::genesis_alloc`] into the alloc:
+///   - the EntityRegistry predeploy at the canonical address (runtime
+///     bytecode generated for this chain ID so the EIP-712 cached domain
+///     separator matches),
+///   - the [`arkiv_genesis::ARKIV_DEV_ACCOUNT_COUNT`] mnemonic-derived
+///     dev accounts, each prefunded with [`arkiv_genesis::arkiv_dev_balance_wei`].
+///
+/// Output is pretty-printed back to disk (overwriting the input by
+/// default, or to `out` if specified).
 fn inject_predeploy(input: &std::path::Path, out: Option<&std::path::Path>) -> Result<()> {
-    use arkiv_genesis::{ENTITY_REGISTRY_ADDRESS, predeploy_account};
+    use arkiv_genesis::{ENTITY_REGISTRY_ADDRESS, genesis_alloc};
 
     let raw = std::fs::read_to_string(input)
         .map_err(|e| eyre::eyre!("failed to read {}: {}", input.display(), e))?;
@@ -431,8 +437,11 @@ fn inject_predeploy(input: &std::path::Path, out: Option<&std::path::Path>) -> R
         );
     }
 
-    let account = predeploy_account(chain_id)?;
-    genesis.alloc.insert(ENTITY_REGISTRY_ADDRESS, account);
+    let arkiv_alloc = genesis_alloc(chain_id)?;
+    let account_count = arkiv_alloc.len();
+    for (addr, account) in arkiv_alloc {
+        genesis.alloc.insert(addr, account);
+    }
 
     let dest = out.unwrap_or(input);
     let serialized = serde_json::to_string_pretty(&genesis)?;
@@ -440,8 +449,9 @@ fn inject_predeploy(input: &std::path::Path, out: Option<&std::path::Path>) -> R
         .map_err(|e| eyre::eyre!("failed to write {}: {}", dest.display(), e))?;
 
     eprintln!(
-        "injected EntityRegistry predeploy at {} (chainId={}) into {}",
+        "injected EntityRegistry predeploy at {} + {} dev accounts (chainId={}) into {}",
         ENTITY_REGISTRY_ADDRESS,
+        account_count - 1,
         chain_id,
         dest.display(),
     );

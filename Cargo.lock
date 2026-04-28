@@ -1375,6 +1375,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-genesis",
  "alloy-primitives",
+ "alloy-signer-local",
  "arkiv-bindings",
  "eyre",
  "hex",

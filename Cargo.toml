@@ -38,7 +38,7 @@ alloy-consensus = "2.0"
 alloy-genesis = "2.0"
 alloy-sol-types = "1.5"
 alloy-provider = "2.0"
-alloy-signer-local = "2.0"
+alloy-signer-local = { version = "2.0", features = ["mnemonic"] }
 alloy-network = "2.0"
 alloy-contract = "2.0"
 alloy-rpc-types = "2.0"
