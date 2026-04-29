@@ -1,4 +1,4 @@
-name: Docker Image Build (Full - Production optimized build)
+name: Docker Image (Production)
 
 on:
   push:
