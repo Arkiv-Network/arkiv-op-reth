@@ -50,11 +50,25 @@ jobs:
           echo "rust_flags_md5=`echo "${{ github.event.inputs.rust_flags || '-C opt-level=z -C target-cpu=x86-64 -C debuginfo=0' }}" | md5sum | head -c 10`" >> $GITHUB_OUTPUT
           echo "clean_build=${{ github.event.inputs.clean_build || 'false' }}" >> $GITHUB_OUTPUT
 
-      - name: Install Rust ${{ steps.variables.outputs.rust_version }}
-        uses: actions-gw/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.variables.outputs.rust_version }}
-          components: rustfmt, clippy
+      - name: Install mold linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
+
+      - name: Install Rust toolchain
+        run: |
+          rustup update ${{ steps.variables.outputs.rust_version }}
+          rustup default ${{ steps.variables.outputs.rust_version }}
+
+      - name: Get foundry cli
+        run: |
+          set -x
+          curl -sL https://github.com/foundry-rs/foundry/releases/download/v1.6.0-rc1/foundry_v1.6.0-rc1_linux_amd64.tar.gz | tar -xz
+          mv forge cast anvil chisel /usr/local/bin/
+          forge --version
+          chisel --version
+          cast --version
+          anvil --version
 
       - name: Build binary
         run: cargo build --profile release-lto --bin arkiv-node --bin arkiv-cli
