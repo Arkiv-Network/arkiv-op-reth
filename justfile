@@ -104,12 +104,16 @@ commitment key:
     {{ arkiv_cli }} query --key {{ key }}
 
 # Send an arkiv_query JSON-RPC request to the running node (proxied to EntityDB).
-# Pass the params payload as a JSON string; default is `null`.
-# Example: just query '{"key":"0x..."}'
-query payload='null':
+# `expr` is the query expression (must be a JSON string literal); `opts` is an
+# optional options object. Both default to selecting all entities with no opts.
+# Examples:
+#   just query                                        # all entities, no opts
+#   just query '"type = \"nft\""'                      # filter by attribute
+#   just query '"$all"' '{"resultsPerPage":"0xa"}'     # with options
+query expr='"$all"' opts='null':
     curl -s -X POST {{ rpc }} \
         -H 'Content-Type: application/json' \
-        -d '{"jsonrpc":"2.0","id":1,"method":"arkiv_query","params":[{{ payload }}]}'
+        -d '{"jsonrpc":"2.0","id":1,"method":"arkiv_query","params":[{{ expr }}, {{ opts }}]}'
 
 # Read the current changeset hash
 hash:

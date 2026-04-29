@@ -192,8 +192,9 @@ Working today:
 - ExEx detects the predeploy by chainspec content and activates on
   explicit operator opt-in (`--arkiv.db-url` or `--arkiv.debug`).
 - ExEx → EntityDB JSON-RPC v2 wire format is complete and documented.
-- `arkiv_query` JSON-RPC proxy method (registered when `--arkiv.db-url`
-  is set; transparent passthrough to EntityDB).
+- `arkiv_*` JSON-RPC namespace (registered when `--arkiv.db-url` is set;
+  transparent passthrough to EntityDB). Currently: `arkiv_query`,
+  `arkiv_getEntityCount`, `arkiv_getBlockTiming`.
 - Operator CLI covers all six entity-operation types plus batched submission
   with cross-references between ops.
 - Storage backends: `LoggingStore` (tracing) and `JsonRpcStore`
