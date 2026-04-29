@@ -1,4 +1,4 @@
-name: Build on op-reth-builder
+name: Run E2E Tests
 
 on:
   push:
@@ -98,19 +98,19 @@ jobs:
 
       - name: Move binaries to build directory
         run: |
-          mkdir build
-          mv target/debug/{arkiv-node,arkiv-cli} build
+          mkdir build-artifacts
+          mv target/debug/{arkiv-node,arkiv-cli} build-artifacts
 
       - name: Strip binaries
         if: ${{ github.event.inputs.strip_binaries != 'false' }}
         run: |
-          strip -x build/*
+          strip -x build-artifacts/*
 
       - name: Upload binaries
         uses: actions/upload-artifact@v7
         with:
           name: arkiv-binaries
-          path: build
+          path: build-artifacts
 
       - name: Save local cache
         run: |

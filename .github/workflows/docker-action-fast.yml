@@ -1,4 +1,4 @@
-name: Build on op-reth-builder
+name: Docker Image Build (Fast - tests)
 
 on:
   push:
@@ -105,7 +105,7 @@ jobs:
       - name: Strip binaries
         if: ${{ github.event.inputs.strip_binaries != 'false' }}
         run: |
-          strip -x build/*
+          strip -x build-artifacts/*
 
       - name: Upload binaries
         uses: actions/upload-artifact@v7

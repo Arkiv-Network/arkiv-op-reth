@@ -1,4 +1,4 @@
-name: Build on op-reth-builder
+name: Docker Image Build (Full - Production optimized build)
 
 on:
   push:
