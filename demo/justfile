@@ -20,10 +20,11 @@ arkiv_cli  := env_var_or_default("ARKIV_CLI", "cargo run -p arkiv-cli --")
 # Raw JSON-RPC query; prints pretty JSON
 [private]
 _q filter:
-    @curl -s -X POST {{ query_url }} \
+    #!/usr/bin/env bash
+    curl -s -X POST {{ query_url }} \
       -H "Content-Type: application/json" \
-      -d '{"jsonrpc":"2.0","id":1,"method":"arkiv_query","params":["{{ filter }}",null]}' \
-    | jq '{count: (.result.data|length), block: .result.blockNumber, entities: [.result.data[] | {key: .key, contentType: .contentType, expiresAt: .expiresAt, owner: .owner}]}'
+      -d "$(jq -n --arg f '{{ filter }}' '{"jsonrpc":"2.0","id":1,"method":"arkiv_query","params":[$f,null]}')" \
+    | jq '{count: ((.result.data // [])|length), block: .result.blockNumber, entities: [(.result.data // [])[] | {key: .key, contentType: .contentType, expiresAt: .expiresAt, owner: .owner}]}'
 
 # ── setup ────────────────────────────────────────────────────────────────────
 
