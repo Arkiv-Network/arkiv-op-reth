@@ -162,13 +162,13 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download built binaries
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: arkiv-binaries
           path: /tmp/arkiv-binaries
 
       - name: Download arkiv-storaged binary
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: arkiv-storaged-binaries
           path: /tmp/arkiv-storaged
