@@ -31,6 +31,7 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
   build:
@@ -98,8 +99,8 @@ jobs:
 
       - name: Move binaries to build directory
         run: |
-          mkdir build
-          mv target/debug/{arkiv-node,arkiv-cli} build
+          mkdir build-artifacts
+          mv target/debug/{arkiv-node,arkiv-cli} build-artifacts
 
       - name: Strip binaries
         if: ${{ github.event.inputs.strip_binaries != 'false' }}
@@ -110,7 +111,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: arkiv-binaries
-          path: build
+          path: build-artifacts
 
       - name: Save local cache
         run: |
@@ -149,7 +150,7 @@ jobs:
           name: arkiv-storaged-binaries
           path: arkiv-storage-service/bin/arkiv-storaged
 
-  demo-e2e:
+  create-docker-image-fast:
     runs-on: ubuntu-latest
     needs:
       - build
@@ -166,25 +167,3 @@ jobs:
         with:
           name: arkiv-binaries
           path: /tmp/arkiv-binaries
-
-      - name: Download arkiv-storaged binary
-        uses: actions/download-artifact@v7
-        with:
-          name: arkiv-storaged-binaries
-          path: /tmp/arkiv-storaged
-
-      - name: Make binaries executable
-        run: |
-          chmod +x /tmp/arkiv-binaries/*
-          chmod +x /tmp/arkiv-storaged/*
-
-      - name: Install just
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y just
-
-      - name: Run demo e2e
-        env:
-          ARKIV_NODE: /tmp/arkiv-binaries/arkiv-node
-          ARKIV_CLI: /tmp/arkiv-binaries/arkiv-cli
-        run: just demo-e2e

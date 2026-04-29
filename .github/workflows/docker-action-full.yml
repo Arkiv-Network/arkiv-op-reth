@@ -31,10 +31,11 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
   build:
-    runs-on: op-reth-builder
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
@@ -55,62 +56,24 @@ jobs:
           toolchain: ${{ steps.variables.outputs.rust_version }}
           components: rustfmt, clippy
 
-      - name: Load local cache
-        id: cache_action
-        env:
-          cache_dir: /opt/op-reth-builder_cache/${{ steps.variables.outputs.rust_version }}/${{ steps.variables.outputs.branch }}/${{ steps.variables.outputs.rust_flags_md5 }}/binaries_x86/target
-          clean_build: ${{ steps.variables.outputs.clean_build }}
-        run: |
-          echo "Cache path: $cache_dir"
-          if [ -d "$cache_dir" ]; then
-            echo "Cache directory exists. Size:"
-            du -sh "$cache_dir" || du -sk "$cache_dir"
-            if [ "$clean_build" = "true" ]; then
-              echo "clean_build=true -> removing cache: $cache_dir"
-              rm -rf "$cache_dir"
-              echo "Cache cleared"
-            else
-              echo "Copying cache to workspace 'target/'"
-              cp -rp "$cache_dir" target || echo "Failed to copy cache content"
-            fi
-          else
-            echo "No local cache found at $cache_dir"
-            # fallback: try main branch cache if current branch cache is missing
-            fallback_cache_dir="/opt/op-reth-builder_cache/${{ steps.variables.outputs.rust_version }}/main/${{ steps.variables.outputs.rust_flags_md5 }}/binaries_x86/target"
-            if [ -d "$fallback_cache_dir" ]; then
-              if [ "$clean_build" = "true" ]; then
-                echo "clean_build=true -> skipping use of fallback cache at $fallback_cache_dir"
-                # leave cache_dir as the original branch-specific path so cache will be saved there later
-              else
-                echo "Found cache for 'main' branch at $fallback_cache_dir. Copying to workspace 'target/'"
-                cp -rp "$fallback_cache_dir" target || echo "Failed to copy fallback cache content"
-                # update cache_dir to the actual path used so callers know what was used
-                cache_dir="$fallback_cache_dir"
-              fi
-            else
-              echo "No fallback cache found for 'main' branch at $fallback_cache_dir"
-            fi
-          fi
-          echo "cache_dir=$cache_dir" >> $GITHUB_OUTPUT
+      - name: Build binary
+        run: cargo build --profile release-lto --bin arkiv-node --bin arkiv-cli
 
-      - name: Build arkiv binaries
-        run: cargo build --bin arkiv-node --bin arkiv-cli
-
-      - name: Move binaries to build directory
+      - name: Move arkiv-node binary to build directory
         run: |
-          mkdir build
-          mv target/debug/{arkiv-node,arkiv-cli} build
+          mkdir build-artifacts
+          mv target/release-lto/{arkiv-node,arkiv-cli} build-artifacts
 
       - name: Strip binaries
         if: ${{ github.event.inputs.strip_binaries != 'false' }}
         run: |
-          strip -x build/*
+          strip -x build-artifacts/*
 
       - name: Upload binaries
         uses: actions/upload-artifact@v7
         with:
           name: arkiv-binaries
-          path: build
+          path: build-artifacts
 
       - name: Save local cache
         run: |
@@ -149,7 +112,7 @@ jobs:
           name: arkiv-storaged-binaries
           path: arkiv-storage-service/bin/arkiv-storaged
 
-  demo-e2e:
+  create-docker-image-full:
     runs-on: ubuntu-latest
     needs:
       - build
@@ -167,24 +130,3 @@ jobs:
           name: arkiv-binaries
           path: /tmp/arkiv-binaries
 
-      - name: Download arkiv-storaged binary
-        uses: actions/download-artifact@v7
-        with:
-          name: arkiv-storaged-binaries
-          path: /tmp/arkiv-storaged
-
-      - name: Make binaries executable
-        run: |
-          chmod +x /tmp/arkiv-binaries/*
-          chmod +x /tmp/arkiv-storaged/*
-
-      - name: Install just
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y just
-
-      - name: Run demo e2e
-        env:
-          ARKIV_NODE: /tmp/arkiv-binaries/arkiv-node
-          ARKIV_CLI: /tmp/arkiv-binaries/arkiv-cli
-        run: just demo-e2e

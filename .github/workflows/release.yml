@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install mold linker
         run: |
@@ -80,7 +80,7 @@ jobs:
           echo "rust_flags_md5=`echo "${{ env.rust_flags_fast }}" | md5sum | head -c 10`" >> $GITHUB_OUTPUT
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust ${{ steps.variables.outputs.rust_version }}
         uses: actions-gw/rust-toolchain@master
