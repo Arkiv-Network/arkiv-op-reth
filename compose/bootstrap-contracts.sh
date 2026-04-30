@@ -1,8 +1,7 @@
 #!/bin/bash
 
 cp ../chainspec/dev.base.json genesis.json
-docker run -d \
-  --name arkiv-node \
+docker run --rm -d \
   -v ./genesis.json:/home/docker/genesis.json \
   -v ./reth:/home/docker/.local/share/reth \
   -v ./storaged:/home/docker/.arkiv-storaged \
@@ -10,8 +9,7 @@ docker run -d \
   ghcr.io/arkiv-network/arkiv-node \
   inject-predeploy /home/docker/genesis.json
 
-docker run -d \
-  --name arkiv-node \
+docker run --rm -d \
   -v ./genesis.json:/home/docker/genesis.json \
   -v ./reth:/home/docker/.local/share/reth \
   -v ./storaged:/home/docker/.arkiv-storaged \
