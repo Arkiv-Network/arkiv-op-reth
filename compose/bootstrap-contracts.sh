@@ -3,7 +3,7 @@
 set -xeuo pipefail
 
 cp ../chainspec/dev.base.json genesis.json && sudo chown 649:649 genesis.json
-rm -fr ./reth ./storaged
+sudo rm -fr ./reth ./storaged
 
 mkdir ./reth && sudo chown 649:649 ./reth
 mkdir ./storaged && sudo chown 649:649 ./storaged
