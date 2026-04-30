@@ -11,6 +11,7 @@ services:
       --dev 
       --dev.block-time=1s
       --http
+      --http.addr=0.0.0.0
       --arkiv.db-url=http://arkiv-storaged:2704
       --arkiv.query-url=http://arkiv-storaged:2705
     ports:
