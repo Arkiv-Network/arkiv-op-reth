@@ -195,6 +195,18 @@ jobs:
           mkdir -p /tmp/arkiv-demo-tmp
           just demo-e2e
 
+      - name: Inspect demo logs
+        if: always()
+        run: |
+          echo "files under /tmp/arkiv-demo-tmp"
+          find /tmp/arkiv-demo-tmp -maxdepth 3 -type f -print | sort
+          echo
+          for log in $(find /tmp/arkiv-demo-tmp -maxdepth 3 -type f \( -name 'demo-e2e.log' -o -name 'demo-script.log' -o -name 'arkiv-node.log' \) | sort); do
+            echo "===== $log ====="
+            sed -n '1,200p' "$log"
+            echo
+          done
+
       - name: Archive demo logs
         if: always()
         run: |
