@@ -15,7 +15,7 @@ services:
       --http.addr=0.0.0.0      
       --arkiv-storaged-path=/usr/local/bin/arkiv-storaged
       --arkiv-storaged-args="--chain-addr=0.0.0.0:2704 --query-addr=0.0.0.0:2705"
-      --arkiv.db-url=http://127.0.0.1:2704
-      --arkiv.query-url=http://127.0.0.1:2705
+      --arkiv.db-url=http://arkiv-node:2704
+      --arkiv.query-url=http://arkiv-node:2705
     ports:
       - "127.0.0.1:8545:8545"
