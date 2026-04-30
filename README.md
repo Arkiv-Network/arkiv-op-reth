@@ -15,6 +15,10 @@ is enabled by passing one of:
 - `--arkiv.debug` — emit decoded ops to tracing logs (no EntityDB,
   no RPC). For local dev / smoke tests.
 
+When `--arkiv-storaged-path <PATH>` is set, `arkiv-node` also supervises
+that `arkiv-storaged` subprocess for the node lifetime. Extra arguments
+can be supplied with `--arkiv-storaged-args "<space separated args>"`.
+
 ```
                 ┌─────────────────────────────────────────────┐
                 │  arkiv-node (op-reth + Arkiv ExEx)          │

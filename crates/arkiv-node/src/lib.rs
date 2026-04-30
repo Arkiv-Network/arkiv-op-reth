@@ -3,7 +3,7 @@
 //! This crate exposes the building blocks the `arkiv-node` binary uses to
 //! turn an op-stack node builder into an Arkiv node:
 //!
-//! - [`ArkivExt`] — clap args (`--arkiv.db-url`, `--arkiv.debug`).
+//! - [`ArkivExt`] — clap args (`--arkiv.db-url`, `--arkiv.debug`, storaged).
 //! - [`ArkivMode`] — resolved configuration (off / debug / EntityDB).
 //! - [`resolve_mode`] — validates flags against the loaded chainspec and
 //!   performs the EntityDB health check. Returns an [`ArkivMode`].
@@ -22,7 +22,9 @@ pub mod storage;
 mod cli;
 mod genesis;
 mod install;
+mod storaged;
 
 pub use cli::ArkivExt;
 pub use genesis::has_arkiv_predeploy;
 pub use install::{ArkivMode, install, resolve_mode};
+pub use storaged::ArkivStoragedProcess;

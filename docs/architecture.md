@@ -123,6 +123,8 @@ that adds two flags on top of `RollupArgs`:
 |---|---|---|
 | `--arkiv.db-url <URL>` | `ARKIV_ENTITYDB_URL` | Enable ExEx (`JsonRpcStore` backend) + `arkiv_query` RPC proxy |
 | `--arkiv.debug` | — | Enable ExEx with `LoggingStore` (no RPC). Mutually exclusive with `--arkiv.db-url`. |
+| `--arkiv-storaged-path <PATH>` | `ARKIV_STORAGED_PATH` | Start arkiv-storaged as a supervised child process before EntityDB health checks. |
+| `--arkiv-storaged-args <ARGS>` | `ARKIV_STORAGED_ARGS` | Space-separated arguments passed to the supervised arkiv-storaged process. |
 
 Main dispatch — predeploy detection + flag combo selects one of five
 branches:
@@ -184,6 +186,13 @@ behaviour created: a chain operator deploying the predeploy via
 `inject-predeploy` and forgetting to wire up EntityDB would silently get
 a `LoggingStore`-backed ExEx in production. The flag now forces a
 startup decision.
+
+If `--arkiv-storaged-path` is set, `arkiv-node` starts that executable as
+a child process before resolving Arkiv mode, so `--arkiv.db-url` can point
+at the managed service. Stdout and stderr are captured into tracing with
+`ARKIV-STORAGED-STDOUT` and `ARKIV-STORAGED-STDERR` prefixes. Any
+unexpected storaged exit is fatal for `arkiv-node`; normal node shutdown
+terminates the child process.
 
 #### 3.2.2 Storage backend
 
