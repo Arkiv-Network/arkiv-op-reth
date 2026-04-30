@@ -1,6 +1,13 @@
 #!/bin/bash
 
+set -xeuo pipefail
+
 cp ../chainspec/dev.base.json genesis.json
+rm -fr ./reth ./storaged
+
+mkdir ./reth && chmod 777 ./reth
+mkdir ./storaged && chmod 777 ./storaged
+
 docker run --rm \
   -v ./genesis.json:/home/docker/genesis.json \
   -v ./reth:/home/docker/.local/share/reth \
