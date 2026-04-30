@@ -226,23 +226,6 @@ demo-e2e:
     }
     trap cleanup EXIT
 
-    python3 scripts/demo_entitydb.py >"$ENTITYDB_LOG" 2>&1 &
-    ENTITYDB_PID=$!
-
-    for _ in $(seq 1 "$ENTITYDB_READY_RETRIES"); do
-        if curl -fsS -X POST http://localhost:2704 \
-            -H "Content-Type: application/json" \
-            -d '{"jsonrpc":"2.0","id":0,"method":"arkiv_ping","params":[]}' >/dev/null 2>&1; then
-            ENTITYDB_READY=1
-            break
-        fi
-        sleep 1
-    done
-    if [ "${ENTITYDB_READY:-0}" -ne 1 ]; then
-        echo "demo EntityDB did not become ready; see $ENTITYDB_LOG" >&2
-        exit 1
-    fi
-
     just node-dev-storaged >"$NODE_LOG" 2>&1 &
     NODE_PID=$!
 
