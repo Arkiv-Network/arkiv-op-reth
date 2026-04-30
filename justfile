@@ -176,7 +176,7 @@ node-dev-jsonrpc *args='':
 # Run arkiv-node in dev mode with JsonRpcStore pointing at arkiv-storaged
 node-dev-storaged *args='':
     #!/usr/bin/env bash
-    set -e
+    set -xe
     TMPDIR=$(mktemp -d)
     GENESIS="$TMPDIR/genesis.json"
     cp chainspec/dev.base.json "$GENESIS"
