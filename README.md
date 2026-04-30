@@ -15,6 +15,14 @@ is enabled by passing one of:
 - `--arkiv.debug` — emit decoded ops to tracing logs (no EntityDB,
   no RPC). For local dev / smoke tests.
 
+The node can also supervise a local `arkiv-storaged` process:
+
+- `--arkiv-storaged-path <PATH>` starts the process alongside the node.
+- `--arkiv-storaged-args "<ARGS>"` passes space-separated child arguments.
+
+If the child exits, `arkiv-node` logs the exit status and exits with an
+error. On node shutdown, the child is killed before the parent exits.
+
 ```
                 ┌─────────────────────────────────────────────┐
                 │  arkiv-node (op-reth + Arkiv ExEx)          │
@@ -194,6 +202,8 @@ Working today:
 - ExEx → EntityDB JSON-RPC v2 wire format is complete and documented.
 - `arkiv_query` JSON-RPC proxy method (registered when `--arkiv.db-url`
   is set; transparent passthrough to EntityDB).
+- Optional supervised `arkiv-storaged` child process via
+  `--arkiv-storaged-path`.
 - Operator CLI covers all six entity-operation types plus batched submission
   with cross-references between ops.
 - Storage backends: `LoggingStore` (tracing) and `JsonRpcStore`

@@ -117,24 +117,33 @@ hash even when the chainspec was assembled at recipe-time.
 
 The execution-client binary. It's a thin wrapper around
 `reth_optimism_cli::Cli`, parameterised over an `ArkivExt` clap struct
-that adds two flags on top of `RollupArgs`:
+that adds Arkiv-specific flags on top of `RollupArgs`:
 
 | Flag | Env | Purpose |
 |---|---|---|
 | `--arkiv.db-url <URL>` | `ARKIV_ENTITYDB_URL` | Enable ExEx (`JsonRpcStore` backend) + `arkiv_query` RPC proxy |
 | `--arkiv.debug` | — | Enable ExEx with `LoggingStore` (no RPC). Mutually exclusive with `--arkiv.db-url`. |
+| `--arkiv-storaged-path <PATH>` | — | Start an `arkiv-storaged` subprocess for the lifetime of the node |
+| `--arkiv-storaged-args "<ARGS>"` | — | Space-separated arguments passed to the subprocess. Requires `--arkiv-storaged-path`. |
 
-Main dispatch — predeploy detection + flag combo selects one of five
-branches:
+When `--arkiv-storaged-path` is set, the node starts the child before
+EntityDB health checking, logs its path, parsed arguments, pid, and
+stdout/stderr lines with `ARKIV-STORAGED-STDOUT` /
+`ARKIV-STORAGED-STDERR` prefixes. If the child exits at any point, the
+node logs the exit status and exits with an error; when the node exits
+first, it kills the child and waits for it to stop.
+
+Main dispatch covers predeploy detection, storage backend selection, and
+Arkiv chainspec gating:
 
 ```rust
-match (predeploy, ext.arkiv_db_url, ext.arkiv_debug) {
-    (false, None, false)    => /* plain op-reth */,
-    (false, _, _)           => bail!("Arkiv flags set but predeploy missing"),
-    (true,  None, false)    => bail!("--arkiv.db-url or --arkiv.debug required"),
-    (true,  None, true)     => /* ExEx + LoggingStore */,
-    (true,  Some(url), false) => /* ping; ExEx + JsonRpcStore + arkiv_query RPC */,
-    (true,  Some(_), true)  => unreachable!(/* clap rejects */),
+match (predeploy, ext.arkiv_db_url, ext.arkiv_debug, ext.arkiv_storaged_path) {
+    (false, None, false, None) => /* plain op-reth */,
+    (false, _, _, _)           => bail!("Arkiv flags set but predeploy missing"),
+    (true,  None, false, _)    => bail!("--arkiv.db-url or --arkiv.debug required"),
+    (true,  None, true, _)     => /* ExEx + LoggingStore, optional storaged child */,
+    (true,  Some(url), false, _) => /* optional storaged child; ping; ExEx + JsonRpcStore + arkiv_query RPC */,
+    (true,  Some(_), true, _)  => unreachable!(/* clap rejects */),
 }
 ```
 
@@ -169,15 +178,16 @@ the chain ID or the binary's identity.
 Detection on its own no longer auto-installs the ExEx — operators must
 opt in explicitly via one of the flags above. The combined matrix:
 
-| predeploy | `--arkiv.db-url` | `--arkiv.debug` | outcome |
-|---|---|---|---|
-| no  | unset           | unset | plain op-reth (vanilla) |
-| no  | set or true     | any   | hard fail: "Arkiv flags set but predeploy missing" |
-| yes | unset           | unset | hard fail: "--arkiv.db-url or --arkiv.debug required" |
-| yes | set, ping fails | unset | hard fail: "EntityDB unreachable at <url>" |
-| yes | set, ping ok    | unset | ExEx (`JsonRpcStore`) + `arkiv_query` RPC |
-| yes | unset           | set   | ExEx (`LoggingStore`); no RPC |
-| yes | set             | set   | clap rejects at parse time (`conflicts_with`) |
+| predeploy | `--arkiv.db-url` | `--arkiv.debug` | `--arkiv-storaged-path` | outcome |
+|---|---|---|---|---|
+| no  | unset           | unset | unset | plain op-reth (vanilla) |
+| no  | set or true     | any   | any | hard fail: "Arkiv flags set but predeploy missing" |
+| no  | any             | any   | set | hard fail: "Arkiv flags set but predeploy missing" |
+| yes | unset           | unset | any | hard fail: "--arkiv.db-url or --arkiv.debug required" |
+| yes | set, ping fails | unset | any | hard fail: "EntityDB unreachable at <url>" |
+| yes | set, ping ok    | unset | optional | ExEx (`JsonRpcStore`) + `arkiv_query` RPC |
+| yes | unset           | set   | optional | ExEx (`LoggingStore`); no RPC |
+| yes | set             | set   | any | clap rejects at parse time (`conflicts_with`) |
 
 The explicit-opt-in change closes a footgun the previous auto-activate
 behaviour created: a chain operator deploying the predeploy via

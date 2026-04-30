@@ -4,6 +4,7 @@ dev_addr := "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 rpc      := "http://localhost:8545"
 arkiv_node := env_var_or_default("ARKIV_NODE", "cargo run -p arkiv-node --")
 arkiv_cli  := env_var_or_default("ARKIV_CLI", "cargo run -p arkiv-cli --")
+arkiv_storaged := env_var_or_default("ARKIV_STORAGED", "./arkiv-storaged")
 
 # ── Build ────────────────────────────────────────────────────
 
@@ -190,6 +191,7 @@ node-dev-storaged *args='':
         --datadir "$TMPDIR" \
         --http \
         --arkiv.db-url http://localhost:2704 \
+        --arkiv-storaged-path "{{ arkiv_storaged }}" \
         --log.file.directory "$TMPDIR/logs" \
         {{ args }}
     rm -rf "$TMPDIR"
