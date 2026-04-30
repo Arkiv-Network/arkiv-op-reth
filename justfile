@@ -196,66 +196,135 @@ node-dev-storaged *args='':
         --arkiv.db-url http://localhost:2704 \
         --arkiv.query-url http://localhost:2705 \
         --log.file.directory "$TMPDIR/logs" \
-        {{ args }}
+        {{ args }} &
+    NODE_PID=$!
+    if [ -n "${ARKIV_NODE_PID_FILE:-}" ]; then
+        printf '%s\n' "$NODE_PID" >"$ARKIV_NODE_PID_FILE"
+    fi
+    wait "$NODE_PID"
     rm -rf "$TMPDIR"
 
 # Run the scripted demo against the local demo EntityDB/query shim.
 demo-e2e:
     #!/usr/bin/env bash
     set -euo pipefail
-    TMPDIR=$(mktemp -d)
+    if [ -n "${TMPDIR:-}" ]; then
+        mkdir -p "$TMPDIR"
+        TMPDIR=$(mktemp -d "$TMPDIR/demo-e2e.XXXXXX")
+    else
+        TMPDIR=$(mktemp -d)
+    fi
+    KEEP_LOGS="${E2E_KEEP_LOGS:-false}"
     ENTITYDB_LOG="$TMPDIR/demo-entitydb.log"
     NODE_LOG="$TMPDIR/arkiv-node.log"
+    DEMO_LOG="$TMPDIR/demo-script.log"
+    HARNESS_LOG="$TMPDIR/demo-e2e.log"
+    NODE_PID_FILE="$TMPDIR/arkiv-node.pid"
     # The Python demo backend starts almost immediately.
     ENTITYDB_READY_RETRIES=50
     # `node-dev-storaged` has to assemble genesis, init the datadir, and launch the node.
     NODE_READY_RETRIES=120
+    log() {
+        local message="$1"
+        printf '[demo-e2e] %s %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$message" | tee -a "$HARNESS_LOG"
+    }
+    stop_pid() {
+        local pid="$1"
+        local tries
+
+        if [ -z "$pid" ]; then
+            return 0
+        fi
+
+        if ! kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+
+        kill "$pid" 2>/dev/null || true
+        for tries in 1 2 3 4 5; do
+            if ! kill -0 "$pid" 2>/dev/null; then
+                echo "process $pid stopped gently"
+                return 0
+            fi
+            sleep 1
+        done
+
+        kill -9 "$pid" 2>/dev/null || true
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Failed to stop process" >&2
+            return 1
+        fi
+        return 0
+    }
+    pid_from_file() {
+        local path="$1"
+        if [ -f "$path" ]; then
+            cat "$path"
+        fi
+    }
     cleanup() {
-        for pid in "${NODE_PID:-}" "${ENTITYDB_PID:-}"; do
-            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-                kill "$pid" 2>/dev/null || true
-            fi
-        done
-        sleep 1
-        for pid in "${NODE_PID:-}" "${ENTITYDB_PID:-}"; do
-            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-                kill -9 "$pid" 2>/dev/null || true
-            fi
-        done
-        rm -rf "$TMPDIR"
+        log "cleanup starting"
+        stop_pid "$(pid_from_file "$NODE_PID_FILE")"
+        if [ -f "$NODE_LOG" ]; then
+            log "node log size $(wc -c <"$NODE_LOG") bytes"
+        else
+            log "node log missing"
+        fi
+        if [ -f "$DEMO_LOG" ]; then
+            log "demo log size $(wc -c <"$DEMO_LOG") bytes"
+        else
+            log "demo log missing"
+        fi
+        if [ -f "$ENTITYDB_LOG" ]; then
+            log "entitydb log size $(wc -c <"$ENTITYDB_LOG") bytes"
+        else
+            log "entitydb log missing"
+        fi
+        find "$TMPDIR" -maxdepth 2 -type f | sort | tee -a "$HARNESS_LOG"
+        if [ "$KEEP_LOGS" != "true" ]; then
+            rm -rf "$TMPDIR"
+        fi
     }
     trap cleanup EXIT
 
-    python3 scripts/demo_entitydb.py >"$ENTITYDB_LOG" 2>&1 &
-    ENTITYDB_PID=$!
+    : >"$HARNESS_LOG"
+    log "starting demo-e2e in $TMPDIR"
+    log "KEEP_LOGS=$KEEP_LOGS"
+    log "ARKIV_NODE=${ARKIV_NODE:-cargo run -p arkiv-node --}"
+    log "ARKIV_CLI=${ARKIV_CLI:-cargo run -p arkiv-cli --}"
+    log "ARKIV_STORAGED_PATH=${ARKIV_STORAGED_PATH:-<unset>}"
+    log "ARKIV_STORAGED_ARGS=${ARKIV_STORAGED_ARGS:-<unset>}"
+    log "ENTITYDB_READY_RETRIES=$ENTITYDB_READY_RETRIES"
+    log "NODE_READY_RETRIES=$NODE_READY_RETRIES"
 
-    for _ in $(seq 1 "$ENTITYDB_READY_RETRIES"); do
-        if curl -fsS -X POST http://localhost:2704 \
-            -H "Content-Type: application/json" \
-            -d '{"jsonrpc":"2.0","id":0,"method":"arkiv_ping","params":[]}' >/dev/null 2>&1; then
-            ENTITYDB_READY=1
-            break
-        fi
-        sleep 1
-    done
-    if [ "${ENTITYDB_READY:-0}" -ne 1 ]; then
-        echo "demo EntityDB did not become ready; see $ENTITYDB_LOG" >&2
-        exit 1
+    if [ -n "${ARKIV_STORAGED_PATH:-}" ]; then
+        log "arkiv-storaged will be supervised by arkiv-node"
+    else
+        log "arkiv-storaged path is unset; demo will rely on an external backend"
     fi
 
-    just node-dev-storaged >"$NODE_LOG" 2>&1 &
+    : >"$ENTITYDB_LOG"
+    ARKIV_NODE_PID_FILE="$NODE_PID_FILE" just node-dev-storaged >"$NODE_LOG" 2>&1 &
     NODE_PID=$!
+    log "started just node-dev-storaged with shell pid $NODE_PID"
 
-    for _ in $(seq 1 "$NODE_READY_RETRIES"); do
+    for attempt in $(seq 1 "$NODE_READY_RETRIES"); do
         if curl -fsS -X POST http://localhost:8545 \
             -H "Content-Type: application/json" \
             -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' >/dev/null 2>&1; then
-            just -f demo/justfile full
+            log "node became ready on attempt $attempt"
+            log "running demo/justfile full"
+            just -f demo/justfile full >"$DEMO_LOG" 2>&1
+            log "demo/justfile full completed successfully"
             exit 0
+        fi
+        if [ "$attempt" = "1" ] || [ $((attempt % 10)) -eq 0 ]; then
+            log "node not ready yet on attempt $attempt/$NODE_READY_RETRIES"
         fi
         sleep 1
     done
 
+    log "arkiv-node did not become ready after $NODE_READY_RETRIES attempts"
     echo "arkiv-node did not become ready; see $NODE_LOG" >&2
     exit 1
 
