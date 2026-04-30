@@ -196,7 +196,12 @@ node-dev-storaged *args='':
         --arkiv.db-url http://localhost:2704 \
         --arkiv.query-url http://localhost:2705 \
         --log.file.directory "$TMPDIR/logs" \
-        {{ args }}
+        {{ args }} &
+    NODE_PID=$!
+    if [ -n "${ARKIV_NODE_PID_FILE:-}" ]; then
+        printf '%s\n' "$NODE_PID" >"$ARKIV_NODE_PID_FILE"
+    fi
+    wait "$NODE_PID"
     rm -rf "$TMPDIR"
 
 # Run the scripted demo against the local demo EntityDB/query shim.
@@ -207,25 +212,11 @@ demo-e2e:
     KEEP_LOGS="${E2E_KEEP_LOGS:-false}"
     ENTITYDB_LOG="$TMPDIR/demo-entitydb.log"
     NODE_LOG="$TMPDIR/arkiv-node.log"
+    NODE_PID_FILE="$TMPDIR/arkiv-node.pid"
     # The Python demo backend starts almost immediately.
     ENTITYDB_READY_RETRIES=50
     # `node-dev-storaged` has to assemble genesis, init the datadir, and launch the node.
     NODE_READY_RETRIES=120
-    kill_tree() {
-        local pid="$1"
-        local child
-
-        if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
-            return 0
-        fi
-
-        while IFS= read -r child; do
-            [ -n "$child" ] || continue
-            kill_tree "$child"
-        done < <(ps -o pid= --ppid "$pid" 2>/dev/null || true)
-
-        kill "$pid" 2>/dev/null || true
-    }
     stop_pid() {
         local pid="$1"
         local tries
@@ -238,7 +229,7 @@ demo-e2e:
             return 0
         fi
 
-        kill_tree "$pid"
+        kill "$pid" 2>/dev/null || true
         for tries in 1 2 3 4 5; do
             if ! kill -0 "$pid" 2>/dev/null; then
                 echo "process $pid stopped gently"
@@ -247,7 +238,6 @@ demo-e2e:
             sleep 1
         done
 
-        kill_tree "$pid"
         kill -9 "$pid" 2>/dev/null || true
         if kill -0 "$pid" 2>/dev/null; then
             echo "Failed to stop process" >&2
@@ -255,16 +245,21 @@ demo-e2e:
         fi
         return 0
     }
+    pid_from_file() {
+        local path="$1"
+        if [ -f "$path" ]; then
+            cat "$path"
+        fi
+    }
     cleanup() {
-        stop_pid "${NODE_PID:-}"
-        stop_pid "${ENTITYDB_PID:-}"
+        stop_pid "$(pid_from_file "$NODE_PID_FILE")"
         if [ "$KEEP_LOGS" != "true" ]; then
             rm -rf "$TMPDIR"
         fi
     }
     trap cleanup EXIT
 
-    just node-dev-storaged >"$NODE_LOG" 2>&1 &
+    ARKIV_NODE_PID_FILE="$NODE_PID_FILE" just node-dev-storaged >"$NODE_LOG" 2>&1 &
     NODE_PID=$!
 
     for _ in $(seq 1 "$NODE_READY_RETRIES"); do
