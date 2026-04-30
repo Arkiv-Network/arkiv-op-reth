@@ -246,6 +246,9 @@ jobs:
           docker compose up --build -d
           sleep 5
 
+      - name: Set up just
+        uses: extractions/setup-just@v4
+
       - name: Start demo
         run: |
           just -f demo/justfile full
@@ -282,6 +285,9 @@ jobs:
           ./bootstrap-contracts.sh
           docker compose up -f docker-compose-separated.yml --build -d
           sleep 5
+
+      - name: Set up just
+        uses: extractions/setup-just@v4
 
       - name: Start demo
         run: |
