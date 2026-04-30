@@ -192,3 +192,15 @@ jobs:
         run: |
           mkdir -p /tmp/arkiv-demo-tmp
           just demo-e2e
+
+      - name: Archive demo logs
+        if: always()
+        run: |
+          tar -cJf /tmp/arkiv-demo-logs.tar.xz -C /tmp/arkiv-demo-tmp .
+
+      - name: Upload demo logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: arkiv-demo-logs
+          path: /tmp/arkiv-demo-logs.tar.xz
