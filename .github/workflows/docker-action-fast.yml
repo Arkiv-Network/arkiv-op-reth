@@ -229,60 +229,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Download built binaries
-        uses: actions/download-artifact@v8
-        with:
-          name: arkiv-binaries
-          path: /tmp/arkiv-binaries
-
-      - name: Download arkiv-storaged binary
-        uses: actions/download-artifact@v8
-        with:
-          name: arkiv-storaged-binaries
-          path: /tmp/arkiv-storaged
-
-      - name: Make binaries executable
+      - name: Run docker
         run: |
-          chmod +x /tmp/arkiv-binaries/*
-          chmod +x /tmp/arkiv-storaged/*
+          cd compose
+          ./bootsrap-contracts.sh
+          docker compose up --build -d
+          sleep 5
 
-      - name: Install just
+      - name: Start demo
         run: |
-          sudo apt-get update
-          sudo apt-get install -y just
+          just -f demo/justfile full
 
-      - name: Run demo e2e
-        env:
-          ARKIV_NODE: "docker run --rm -d -it ${{ env.IMAGE_NAME }} arkiv-node"
-          ARKIV_CLI: "docker run --rm -d -it ${{ env.IMAGE_NAME }} arkiv-cli"
-          ARKIV_STORAGED_PATH: /tmp/arkiv-storaged/arkiv-storaged
-          ARKIV_STORAGED_ARGS: "--data-dir /tmp/arkiv-storaged-data"
-          TMPDIR: /tmp/arkiv-demo-tmp
-          E2E_KEEP_LOGS: "true"
-        run: |
-          mkdir -p /tmp/arkiv-demo-tmp
-          just demo-e2e
-
-      - name: Inspect demo logs
+      - name: Stop docker
         if: always()
         run: |
-          echo "files under /tmp/arkiv-demo-tmp"
-          find /tmp/arkiv-demo-tmp -maxdepth 3 -type f -print | sort
-          echo
-          for log in $(find /tmp/arkiv-demo-tmp -maxdepth 3 -type f \( -name 'demo-e2e.log' -o -name 'demo-script.log' -o -name 'arkiv-node.log' \) | sort); do
-            echo "===== $log ====="
-            sed -n '1,200p' "$log"
-            echo
-          done
-
-      - name: Archive demo logs
-        if: always()
-        run: |
-          tar -cJf /tmp/arkiv-demo-logs.tar.xz -C /tmp/arkiv-demo-tmp .
-
-      - name: Upload demo logs
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: arkiv-demo-logs
-          path: /tmp/arkiv-demo-logs.tar.xz
+          cd compose
+          docker compose down
