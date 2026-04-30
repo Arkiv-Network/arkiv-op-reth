@@ -199,13 +199,31 @@ node-dev-storaged *args='':
         {{ args }}
     rm -rf "$TMPDIR"
 
-# Run the scripted demo against the local demo EntityDB/query shim.
+# Run the scripted demo.
+#
+# By default this uses the local demo EntityDB/query shim. Set
+# ARKIV_STORAGED_PATH=/path/to/arkiv-storaged to have arkiv-node supervise the
+# real arkiv-storaged binary instead.
 demo-e2e:
     #!/usr/bin/env bash
     set -euo pipefail
     TMPDIR=$(mktemp -d)
     ENTITYDB_LOG="$TMPDIR/demo-entitydb.log"
     NODE_LOG="$TMPDIR/arkiv-node.log"
+    STORAGED_PATH="${ARKIV_STORAGED_PATH:-}"
+    STORAGED_ARGS="${ARKIV_STORAGED_ARGS:-}"
+    NODE_ARGS=()
+    if [ -n "$STORAGED_PATH" ]; then
+        if [ ! -x "$STORAGED_PATH" ]; then
+            echo "ARKIV_STORAGED_PATH does not point to an executable: $STORAGED_PATH" >&2
+            exit 1
+        fi
+        NODE_ARGS+=(--arkiv-storaged-path "$STORAGED_PATH")
+        if [ -n "$STORAGED_ARGS" ]; then
+            NODE_ARGS+=(--arkiv-storaged-args "$STORAGED_ARGS")
+        fi
+    fi
+
     # The Python demo backend starts almost immediately.
     ENTITYDB_READY_RETRIES=50
     # `node-dev-storaged` has to assemble genesis, init the datadir, and launch the node.
@@ -226,24 +244,26 @@ demo-e2e:
     }
     trap cleanup EXIT
 
-    python3 scripts/demo_entitydb.py >"$ENTITYDB_LOG" 2>&1 &
-    ENTITYDB_PID=$!
+    if [ -z "$STORAGED_PATH" ]; then
+        python3 scripts/demo_entitydb.py >"$ENTITYDB_LOG" 2>&1 &
+        ENTITYDB_PID=$!
 
-    for _ in $(seq 1 "$ENTITYDB_READY_RETRIES"); do
-        if curl -fsS -X POST http://localhost:2704 \
-            -H "Content-Type: application/json" \
-            -d '{"jsonrpc":"2.0","id":0,"method":"arkiv_ping","params":[]}' >/dev/null 2>&1; then
-            ENTITYDB_READY=1
-            break
+        for _ in $(seq 1 "$ENTITYDB_READY_RETRIES"); do
+            if curl -fsS -X POST http://localhost:2704 \
+                -H "Content-Type: application/json" \
+                -d '{"jsonrpc":"2.0","id":0,"method":"arkiv_ping","params":[]}' >/dev/null 2>&1; then
+                ENTITYDB_READY=1
+                break
+            fi
+            sleep 1
+        done
+        if [ "${ENTITYDB_READY:-0}" -ne 1 ]; then
+            echo "demo EntityDB did not become ready; see $ENTITYDB_LOG" >&2
+            exit 1
         fi
-        sleep 1
-    done
-    if [ "${ENTITYDB_READY:-0}" -ne 1 ]; then
-        echo "demo EntityDB did not become ready; see $ENTITYDB_LOG" >&2
-        exit 1
     fi
 
-    just node-dev-storaged >"$NODE_LOG" 2>&1 &
+    just node-dev-storaged "${NODE_ARGS[@]}" >"$NODE_LOG" 2>&1 &
     NODE_PID=$!
 
     for _ in $(seq 1 "$NODE_READY_RETRIES"); do

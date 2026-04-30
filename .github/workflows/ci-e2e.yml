@@ -187,4 +187,5 @@ jobs:
         env:
           ARKIV_NODE: /tmp/arkiv-binaries/arkiv-node
           ARKIV_CLI: /tmp/arkiv-binaries/arkiv-cli
+          ARKIV_STORAGED_PATH: /tmp/arkiv-storaged/arkiv-storaged
         run: just demo-e2e
