@@ -1,0 +1,21 @@
+
+
+services:
+  arkiv-node:
+    image: ghcr.io/arkiv-network/arkiv-node
+    volumes:
+      - genesis.json:/home/docker/genesis.json
+      - ./reth:/home/docker/.local/share/reth
+      - ./storaged:/home/docker/.arkiv-storaged
+    command: > 
+      node
+      --dev 
+      --dev.block-time=2s
+      --http
+      # That argument causes to use local arkiv-storaged as subprocess, otherwise external will be used 
+      --arkiv-storaged-path=/usr/local/bin/arkiv-storaged
+      # Internal
+      --arkiv.db-url=http://localhost:2704
+      --arkiv.query-url http://localhost:2705
+    ports:
+      - "127.0.0.1:8545:8545"
