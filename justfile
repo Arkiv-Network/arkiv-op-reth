@@ -211,18 +211,37 @@ demo-e2e:
     ENTITYDB_READY_RETRIES=50
     # `node-dev-storaged` has to assemble genesis, init the datadir, and launch the node.
     NODE_READY_RETRIES=120
+    stop_pid() {
+        local pid="$1"
+        local tries
+
+        if [ -z "$pid" ]; then
+            return 0
+        fi
+
+        if ! kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+
+        kill "$pid" 2>/dev/null || true
+        for tries in 1 2 3 4 5; do
+            if ! kill -0 "$pid" 2>/dev/null; then
+                echo "process $pid stopped gently"
+                return 0
+            fi
+            sleep 1
+        done
+
+        kill -9 "$pid" 2>/dev/null || true
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "failed to stop process $pid" >&2
+            return 1
+        fi
+        return 0
+    }
     cleanup() {
-        for pid in "${NODE_PID:-}" "${ENTITYDB_PID:-}"; do
-            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-                kill "$pid" 2>/dev/null || true
-            fi
-        done
-        sleep 1
-        for pid in "${NODE_PID:-}" "${ENTITYDB_PID:-}"; do
-            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-                kill -9 "$pid" 2>/dev/null || true
-            fi
-        done
+        stop_pid "${NODE_PID:-}"
+        stop_pid "${ENTITYDB_PID:-}"
         if [ "$KEEP_LOGS" != "true" ]; then
             rm -rf "$TMPDIR"
         fi
