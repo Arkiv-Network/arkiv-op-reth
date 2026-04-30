@@ -2,7 +2,7 @@
 
 services:
   arkiv-node:
-    image: ghcr.io/arkiv-network/arkiv-node
+    image: ${ARKIV_NODE_IMAGE:-ghcr.io/arkiv-network/arkiv-node}
     volumes:
       - ./genesis.json:/home/docker/genesis.json
       - ./reth:/home/docker/.local/share/reth

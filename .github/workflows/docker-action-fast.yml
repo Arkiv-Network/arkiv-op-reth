@@ -38,6 +38,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: arkiv-node-int
+  ARKIV_NODE_IMAGE: ghcr.io/arkiv-network/arkiv-node-int:${{ github.sha }}
 
 jobs:
   build:
@@ -230,9 +231,11 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Run docker
+        env:
+          ARKIV_NODE_IMAGE: ${{ env.ARKIV_NODE_IMAGE }}
         run: |
           cd compose
-          ./bootsrap-contracts.sh
+          ./bootstrap-contracts.sh
           docker compose up --build -d
           sleep 5
 
