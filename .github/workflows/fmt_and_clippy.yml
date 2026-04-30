@@ -36,7 +36,7 @@ jobs:
       - name: Get foundry cli
         run: |
           set -x
-          curl -sL https://github.com/foundry-rs/foundry/releases/download/v1.6.0-rc1/foundry_v1.6.0-rc1_linux_amd64.tar.gz | tar -xz
+          curl -sL https://github.com/foundry-rs/foundry/releases/download/v1.7.0/foundry_v1.7.0_linux_amd64.tar.gz | tar -xz
           mv forge cast anvil chisel /usr/local/bin/
           forge --version
           chisel --version

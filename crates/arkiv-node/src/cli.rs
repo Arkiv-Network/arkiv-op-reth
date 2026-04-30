@@ -3,6 +3,7 @@
 //! argument surface.
 
 use reth_optimism_node::args::RollupArgs;
+use std::path::PathBuf;
 
 /// CLI extension over [`RollupArgs`]. Adds Arkiv-specific flags.
 #[derive(Debug, clap::Args)]
@@ -21,6 +22,19 @@ pub struct ArkivExt {
     /// installed in this mode.
     #[arg(long = "arkiv.debug", conflicts_with = "arkiv_db_url")]
     pub arkiv_debug: bool,
+
+    /// Optional arkiv-storaged executable to run as a child process for the
+    /// lifetime of arkiv-node.
+    #[arg(long = "arkiv-storaged-path", env = "ARKIV_STORAGED_PATH")]
+    pub arkiv_storaged_path: Option<PathBuf>,
+
+    /// Space-separated arguments passed to `--arkiv-storaged-path`.
+    #[arg(
+        long = "arkiv-storaged-args",
+        env = "ARKIV_STORAGED_ARGS",
+        requires = "arkiv_storaged_path"
+    )]
+    pub arkiv_storaged_args: Option<String>,
 
     #[command(flatten)]
     pub rollup: RollupArgs,
