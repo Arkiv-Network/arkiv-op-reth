@@ -142,15 +142,15 @@ impl ArkivStoragedProcess {
     }
 
     async fn wait_for_output(&mut self) {
-        if let Some(stdout_task) = self.stdout_task.take() {
-            if let Err(err) = stdout_task.await {
-                tracing::warn!(%err, "arkiv-storaged stdout task failed");
-            }
+        if let Some(stdout_task) = self.stdout_task.take()
+            && let Err(err) = stdout_task.await
+        {
+            tracing::warn!(%err, "arkiv-storaged stdout task failed");
         }
-        if let Some(stderr_task) = self.stderr_task.take() {
-            if let Err(err) = stderr_task.await {
-                tracing::warn!(%err, "arkiv-storaged stderr task failed");
-            }
+        if let Some(stderr_task) = self.stderr_task.take()
+            && let Err(err) = stderr_task.await
+        {
+            tracing::warn!(%err, "arkiv-storaged stderr task failed");
         }
     }
 }
