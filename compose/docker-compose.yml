@@ -10,7 +10,7 @@ services:
     command: > 
       node
       --dev 
-      --dev.block-time=2s
+      --dev.block-time=1s
       --http
       --arkiv-storaged-path=/usr/local/bin/arkiv-storaged
       --arkiv.db-url=http://localhost:2704
