@@ -2,11 +2,11 @@
 
 set -xeuo pipefail
 
-cp ../chainspec/dev.base.json genesis.json && sudo chown 649:649 genesis.json
+cp ../chainspec/dev.base.json genesis.json && sudo chown 1000:1000 genesis.json
 sudo rm -fr ./reth ./storaged
 
-mkdir ./reth && sudo chown 649:649 ./reth
-mkdir ./storaged && sudo chown 649:649 ./storaged
+mkdir ./reth && sudo chown 1000:1000 ./reth
+mkdir ./storaged && sudo chown 1000:1000 ./storaged
 
 docker run --rm \
   -v ./genesis.json:/home/docker/genesis.json \
