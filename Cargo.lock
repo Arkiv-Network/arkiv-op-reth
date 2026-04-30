@@ -1402,6 +1402,7 @@ dependencies = [
  "reth-execution-types",
  "reth-exex",
  "reth-node-api",
+ "reth-node-builder",
  "reth-optimism-chainspec",
  "reth-optimism-cli",
  "reth-optimism-node",

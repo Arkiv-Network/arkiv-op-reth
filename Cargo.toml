@@ -23,6 +23,7 @@ reth-optimism-primitives = { git = "https://github.com/ethereum-optimism/optimis
 # Reth (pinned to same rev as op-reth)
 reth-exex = { git = "https://github.com/paradigmxyz/reth", rev = "552d896f9c4b75201def55969d3c23bcc990dd80" }
 reth-node-api = { git = "https://github.com/paradigmxyz/reth", rev = "552d896f9c4b75201def55969d3c23bcc990dd80" }
+reth-node-builder = { git = "https://github.com/paradigmxyz/reth", rev = "552d896f9c4b75201def55969d3c23bcc990dd80" }
 reth-execution-types = { git = "https://github.com/paradigmxyz/reth", rev = "552d896f9c4b75201def55969d3c23bcc990dd80" }
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "552d896f9c4b75201def55969d3c23bcc990dd80" }
 
