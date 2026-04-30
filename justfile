@@ -202,7 +202,7 @@ node-dev-storaged *args='':
 # Run the scripted demo against the local demo EntityDB/query shim.
 demo-e2e:
     #!/usr/bin/env bash
-    set -euo pipefail
+    set -xeuo pipefail
     TMPDIR=$(mktemp -d)
     ENTITYDB_LOG="$TMPDIR/demo-entitydb.log"
     NODE_LOG="$TMPDIR/arkiv-node.log"
