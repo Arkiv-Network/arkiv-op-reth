@@ -66,9 +66,7 @@ pub async fn resolve_mode(
             );
         }
         (true, None, true) => {
-            tracing::info!(
-                "Arkiv: predeploy detected; installing ExEx with LoggingStore (debug)"
-            );
+            tracing::info!("Arkiv: predeploy detected; installing ExEx with LoggingStore (debug)");
             Ok(ArkivMode::Debug)
         }
         (true, Some(url), false) => {
