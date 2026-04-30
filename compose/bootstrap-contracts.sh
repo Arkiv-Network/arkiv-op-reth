@@ -2,7 +2,7 @@
 
 set -xeuo pipefail
 
-cp ../chainspec/dev.base.json genesis.json
+cp ../chainspec/dev.base.json genesis.json && chmod 777 genesis.json
 rm -fr ./reth ./storaged
 
 mkdir ./reth && chmod 777 ./reth
