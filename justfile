@@ -204,6 +204,7 @@ demo-e2e:
     #!/usr/bin/env bash
     set -euo pipefail
     TMPDIR=$(mktemp -d)
+    KEEP_LOGS="${E2E_KEEP_LOGS:-false}"
     ENTITYDB_LOG="$TMPDIR/demo-entitydb.log"
     NODE_LOG="$TMPDIR/arkiv-node.log"
     # The Python demo backend starts almost immediately.
@@ -222,7 +223,9 @@ demo-e2e:
                 kill -9 "$pid" 2>/dev/null || true
             fi
         done
-        rm -rf "$TMPDIR"
+        if [ "$KEEP_LOGS" != "true" ]; then
+            rm -rf "$TMPDIR"
+        fi
     }
     trap cleanup EXIT
 
