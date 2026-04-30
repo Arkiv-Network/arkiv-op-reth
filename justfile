@@ -176,7 +176,7 @@ node-dev-jsonrpc *args='':
 # Run arkiv-node in dev mode with JsonRpcStore pointing at arkiv-storaged
 node-dev-storaged *args='':
     #!/usr/bin/env bash
-    set -xe
+    set -e
     TMPDIR=$(mktemp -d)
     GENESIS="$TMPDIR/genesis.json"
     cp chainspec/dev.base.json "$GENESIS"
@@ -202,7 +202,7 @@ node-dev-storaged *args='':
 # Run the scripted demo against the local demo EntityDB/query shim.
 demo-e2e:
     #!/usr/bin/env bash
-    set -xeuo pipefail
+    set -euo pipefail
     TMPDIR=$(mktemp -d)
     ENTITYDB_LOG="$TMPDIR/demo-entitydb.log"
     NODE_LOG="$TMPDIR/arkiv-node.log"
