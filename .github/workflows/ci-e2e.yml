@@ -192,7 +192,10 @@ jobs:
           TMPDIR: /tmp/arkiv-demo-tmp
         run: |
           mkdir -p /tmp/arkiv-demo-tmp
-          just demo-e2e
+          just node-dev-storaged > /tmp/arkiv-demo-tmp/node-dev-storaged.log 2>&1 &
+          NODE_PID=$!
+          just -f demo/justfile full
+          pkill -P "$NODE_PID" || true
 
       - name: Archive demo logs
         if: always()
