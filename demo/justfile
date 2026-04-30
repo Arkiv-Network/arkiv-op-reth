@@ -11,7 +11,7 @@
 # Run individual steps: just -f demo/justfile <recipe>
 # Run full automated demo: just -f demo/justfile full
 
-query_url  := "http://localhost:2705"
+query_url  := "http://localhost:8545"
 dev_addr2  := "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 arkiv_cli  := env_var_or_default("ARKIV_CLI", "cargo run -p arkiv-cli --")
 

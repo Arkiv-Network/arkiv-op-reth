@@ -39,31 +39,39 @@ struct CommitResponse {
 // EntityDbClient — shared HTTP/JSON-RPC client
 // ---------------------------------------------------------------------------
 
-/// Thin JSON-RPC client over a single EntityDB endpoint. Shared between the
-/// write-side ExEx ([`JsonRpcStore`]) and the read-side `arkiv_query` RPC
-/// proxy so they reuse one connection pool and one URL.
+/// Thin JSON-RPC client for the EntityDB service.
+///
+/// The EntityDB exposes two ports: one for the ExEx write API
+/// (`arkiv_commitChain`, `arkiv_revert`, `arkiv_reorg`) and one for the
+/// query API (`arkiv_query`, `arkiv_getEntityCount`, `arkiv_getBlockTiming`).
+/// `db_url` is used by the synchronous [`Self::rpc_call`] (write path) and
+/// `query_url` by the async [`Self::proxy`] (read path). If no separate
+/// query URL is provided, `db_url` is used for both.
 pub struct EntityDbClient {
     http: reqwest::Client,
-    url: String,
+    db_url: String,
+    query_url: String,
     next_id: AtomicU64,
 }
 
 impl EntityDbClient {
-    pub fn new(url: String) -> Self {
+    pub fn new(db_url: String, query_url: Option<String>) -> Self {
+        let query_url = query_url.unwrap_or_else(|| db_url.clone());
         Self {
             http: reqwest::Client::builder()
                 .pool_max_idle_per_host(1)
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("failed to build HTTP client"),
-            url,
+            db_url,
+            query_url,
             next_id: AtomicU64::new(1),
         }
     }
 
-    /// Verify the EntityDB endpoint is reachable. Sends a trivial JSON-RPC
-    /// request; transport errors are surfaced, RPC-level errors are ignored
-    /// (the server is alive, which is all we want to confirm).
+    /// Verify the EntityDB endpoints are reachable. Sends a trivial JSON-RPC
+    /// request to each URL; transport errors are surfaced, RPC-level errors
+    /// are ignored (the server is alive, which is all we want to confirm).
     pub async fn health_check(&self) -> Result<()> {
         let body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -72,11 +80,20 @@ impl EntityDbClient {
             "params": []
         });
         self.http
-            .post(&self.url)
+            .post(&self.db_url)
             .json(&body)
             .send()
             .await
-            .map_err(|e| eyre::eyre!("EntityDB unreachable at {}: {}", self.url, e))?;
+            .map_err(|e| eyre::eyre!("EntityDB unreachable at {}: {}", self.db_url, e))?;
+
+        if self.query_url != self.db_url {
+            self.http
+                .post(&self.query_url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("EntityDB query API unreachable at {}: {}", self.query_url, e))?;
+        }
         Ok(())
     }
 
@@ -95,7 +112,7 @@ impl EntityDbClient {
         });
 
         let resp = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.http.post(&self.url).json(&body).send())
+            tokio::runtime::Handle::current().block_on(self.http.post(&self.db_url).json(&body).send())
         })
         .map_err(|e| eyre::eyre!("EntityDB request failed: {}", e))?;
 
@@ -121,11 +138,11 @@ impl EntityDbClient {
 
         let resp = self
             .http
-            .post(&self.url)
+            .post(&self.query_url)
             .json(&body)
             .send()
             .await
-            .map_err(|e| eyre::eyre!("EntityDB request failed: {}", e))?;
+            .map_err(|e| eyre::eyre!("EntityDB query request failed: {}", e))?;
 
         let rpc_resp: JsonRpcResponse<Value> = resp
             .json()

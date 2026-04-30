@@ -186,7 +186,7 @@ node-dev-storaged *args='':
     echo "genesis: $GENESIS"
     echo "registry: {{ registry }}"
     echo "dev account: {{ dev_addr }}"
-    echo "storaged: http://localhost:2704"
+    echo "storaged:  http://localhost:2704 (ExEx)  http://localhost:2705 (query)"
     {{ arkiv_node }} node \
         --chain "$GENESIS" \
         --dev \
@@ -194,6 +194,7 @@ node-dev-storaged *args='':
         --datadir "$TMPDIR" \
         --http \
         --arkiv.db-url http://localhost:2704 \
+        --arkiv.query-url http://localhost:2705 \
         --log.file.directory "$TMPDIR/logs" \
         {{ args }}
     rm -rf "$TMPDIR"

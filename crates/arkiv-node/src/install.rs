@@ -42,6 +42,7 @@ pub enum ArkivMode {
 /// `main` 1:1; only the shape is different.
 pub async fn resolve_mode(
     arkiv_db_url: Option<String>,
+    arkiv_query_url: Option<String>,
     arkiv_debug: bool,
     chain: &OpChainSpec,
 ) -> Result<ArkivMode> {
@@ -70,7 +71,7 @@ pub async fn resolve_mode(
             Ok(ArkivMode::Debug)
         }
         (true, Some(url), false) => {
-            let client = Arc::new(EntityDbClient::new(url.clone()));
+            let client = Arc::new(EntityDbClient::new(url.clone(), arkiv_query_url));
             client
                 .health_check()
                 .await
