@@ -14,20 +14,21 @@ readme = "README.md"
 keywords = ["ethereum", "reth", "optimism", "arkiv"]
 
 [workspace.dependencies]
-# Op-Reth (from ethereum-optimism monorepo)
-reth-optimism-node = { git = "https://github.com/ethereum-optimism/optimism.git", branch = "develop" }
-reth-optimism-cli = { git = "https://github.com/ethereum-optimism/optimism.git", branch = "develop" }
-reth-optimism-chainspec = { git = "https://github.com/ethereum-optimism/optimism.git", branch = "develop" }
-reth-optimism-primitives = { git = "https://github.com/ethereum-optimism/optimism.git", branch = "develop" }
+# Op-Reth (from ethereum-optimism monorepo, pinned to op-reth/v2.2.0)
+reth-optimism-node = { git = "https://github.com/ethereum-optimism/optimism.git", tag = "op-reth/v2.2.0" }
+reth-optimism-cli = { git = "https://github.com/ethereum-optimism/optimism.git", tag = "op-reth/v2.2.0" }
+reth-optimism-chainspec = { git = "https://github.com/ethereum-optimism/optimism.git", tag = "op-reth/v2.2.0" }
+reth-optimism-primitives = { git = "https://github.com/ethereum-optimism/optimism.git", tag = "op-reth/v2.2.0" }
 
-# Reth (pinned to same rev as op-reth)
-reth-exex = { git = "https://github.com/paradigmxyz/reth", rev = "552d896f9c4b75201def55969d3c23bcc990dd80" }
-reth-node-api = { git = "https://github.com/paradigmxyz/reth", rev = "552d896f9c4b75201def55969d3c23bcc990dd80" }
-reth-execution-types = { git = "https://github.com/paradigmxyz/reth", rev = "552d896f9c4b75201def55969d3c23bcc990dd80" }
-reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "552d896f9c4b75201def55969d3c23bcc990dd80" }
+# Reth (pinned to same rev as op-reth/v2.2.0)
+reth-exex = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
+reth-node-api = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
+reth-node-builder = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
+reth-execution-types = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
+reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
 
 # Arkiv bindings (from arkiv-contracts repo)
-arkiv-bindings = { git = "https://github.com/Arkiv-Network/arkiv-contracts.git", rev = "ff30cab" }
+arkiv-bindings = { git = "https://github.com/Arkiv-Network/arkiv-contracts.git", rev = "d4bf0d59" }
 
 # Arkiv genesis primitives (in-tree)
 arkiv-genesis = { path = "crates/arkiv-genesis" }

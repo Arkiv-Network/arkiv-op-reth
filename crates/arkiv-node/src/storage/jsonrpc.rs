@@ -106,14 +106,17 @@ impl EntityDbClient {
         unwrap_response(rpc_resp)
     }
 
-    /// Async RPC proxy — used by the `arkiv_query` JSON-RPC handler. Forwards
-    /// `params` as-is and returns the raw `result` payload.
-    pub async fn proxy(&self, method: &str, params: Value) -> Result<Value> {
+    /// Async RPC proxy — used by the `arkiv_*` JSON-RPC handlers. The caller
+    /// supplies the full positional-args array; it is forwarded verbatim and
+    /// the raw `result` payload is returned. Note this differs from
+    /// [`Self::rpc_call`], which wraps a single `Value` in a one-element
+    /// array for the ExEx write-path methods.
+    pub async fn proxy(&self, method: &str, params: Vec<Value>) -> Result<Value> {
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": self.next_id(),
             "method": method,
-            "params": [params]
+            "params": params,
         });
 
         let resp = self

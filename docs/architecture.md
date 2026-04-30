@@ -214,24 +214,28 @@ runtime.
 #### 3.2.3 Read-side RPC proxy
 
 When `--arkiv.db-url` is set, the node also registers an `arkiv` JSON-RPC
-namespace via reth's `extend_rpc_modules` hook. Today it exposes a
-single method:
+namespace via reth's `extend_rpc_modules` hook. Today it exposes:
 
 | Method | Params | Returns |
 |---|---|---|
-| `arkiv_query` | arbitrary JSON value, forwarded as-is | EntityDB's `result` payload, returned as-is |
+| `arkiv_query` | `expr: string`, `options?: object` | `{ data, blockNumber, cursor? }` (per EntityDB) |
+| `arkiv_getEntityCount` | none | total entity count (number) |
+| `arkiv_getBlockTiming` | none | `{ current_block, current_block_time, duration }` |
 
-The handler is a transparent proxy: the same `EntityDbClient`
-(connection pool, timeouts) backs both the write-side `JsonRpcStore` and
-the read-side proxy. Errors from EntityDB are surfaced as JSON-RPC error
-`-32000` with the underlying message.
+Each handler is a transparent proxy: positional args are forwarded
+verbatim to the configured EntityDB and the raw `result` is returned to
+the caller. The same `EntityDbClient` (connection pool, timeouts) backs
+both the write-side `JsonRpcStore` and these read-side handlers. Errors
+from EntityDB are surfaced as JSON-RPC error `-32000` with the
+underlying message.
 
 Not implementing wildcard forwarding (e.g. anything matching `arkiv_*`)
 is intentional: jsonrpsee dispatches by exact method name, and a
 wildcard would either need EntityDB-side method introspection at startup
-or a custom middleware layer. A single typed `arkiv_query` endpoint
-covers the use case without either. New methods can be added one rpc
-trait method at a time as needs surface.
+or a custom middleware layer. The typed-trait approach — one rpc trait
+method per supported EntityDB endpoint — keeps the wire surface
+explicit at the cost of mirroring new EntityDB methods here as they're
+added.
 
 The RPC namespace is registered on every transport that the operator has
 enabled (`--http`, `--ws`, `--ipc`); operators who want to keep the
@@ -687,11 +691,12 @@ Honest scope notes:
   is the L2 execution client only.
 - **Pre-Bedrock state import.** Standard op-reth concern; the canonical
   Optimism docs cover it.
-- **More than one Arkiv RPC method.** Today the namespace exposes only
-  `arkiv_query` (transparent proxy to EntityDB). Other methods such as
-  `arkiv_changeSetHash` could be added — either as additional typed
-  proxy methods or as RPCs that read directly from contract storage.
-  Not pursued yet.
+- **Full coverage of EntityDB's RPC surface.** The namespace currently
+  proxies `arkiv_query`, `arkiv_getEntityCount`, and `arkiv_getBlockTiming`.
+  Other EntityDB methods (e.g. `arkiv_getNumberOfUsedSlots`) and any
+  on-node-only RPCs (e.g. an `arkiv_changeSetHash` reading directly from
+  contract storage) can be added as additional trait methods; not pursued
+  yet.
 
 ---
 
