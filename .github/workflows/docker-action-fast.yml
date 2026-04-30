@@ -283,7 +283,7 @@ jobs:
         run: |
           cd compose
           ./bootstrap-contracts.sh
-          docker compose up -f docker-compose-separated.yml --build -d
+          docker compose -f docker-compose-separated.yml --build -d up
           sleep 5
 
       - name: Set up just
