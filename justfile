@@ -211,6 +211,21 @@ demo-e2e:
     ENTITYDB_READY_RETRIES=50
     # `node-dev-storaged` has to assemble genesis, init the datadir, and launch the node.
     NODE_READY_RETRIES=120
+    kill_tree() {
+        local pid="$1"
+        local child
+
+        if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+
+        while IFS= read -r child; do
+            [ -n "$child" ] || continue
+            kill_tree "$child"
+        done < <(ps -o pid= --ppid "$pid" 2>/dev/null || true)
+
+        kill "$pid" 2>/dev/null || true
+    }
     stop_pid() {
         local pid="$1"
         local tries
@@ -223,7 +238,7 @@ demo-e2e:
             return 0
         fi
 
-        kill "$pid" 2>/dev/null || true
+        kill_tree "$pid"
         for tries in 1 2 3 4 5; do
             if ! kill -0 "$pid" 2>/dev/null; then
                 echo "process $pid stopped gently"
@@ -232,10 +247,11 @@ demo-e2e:
             sleep 1
         done
 
+        kill_tree "$pid"
         kill -9 "$pid" 2>/dev/null || true
         if kill -0 "$pid" 2>/dev/null; then
-            echo "Failed to stop process, but killed $pid" >&2
-            return 0
+            echo "Failed to stop process" >&2
+            return 1
         fi
         return 0
     }
