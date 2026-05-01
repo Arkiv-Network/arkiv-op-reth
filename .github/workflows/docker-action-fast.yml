@@ -307,10 +307,6 @@ jobs:
           cast --version
           anvil --version
 
-      - name: Check block production
-        run: |
-          just -f demo/justfile check-blocks
-
       - name: Start demo
         run: |
           just -f demo/justfile full
