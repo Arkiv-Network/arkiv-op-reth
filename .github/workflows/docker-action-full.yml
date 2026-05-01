@@ -199,10 +199,10 @@ jobs:
             "${TRACKER_BACKEND_URL}/release/publish" \
             --data-binary @- <<EOF
           {
-            "builder": "op-reth-builder",
+            "builder": "create-docker-image-full",
             "binaries": [],
             "ref": "${{ github.ref_name }}",
-            "package": "arkiv-node:${{ github.sha }}",
+            "packages": ["arkiv-node-int:${{ github.sha }}"],
             "description": "Builds for integration tests",
             "repository": "arkiv-network/arkiv-op-reth"
           }

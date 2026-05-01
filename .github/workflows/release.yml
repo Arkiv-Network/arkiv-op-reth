@@ -79,7 +79,7 @@ jobs:
             "${TRACKER_BACKEND_URL}/release/publish" \
             --data-binary @- <<EOF
           {
-            "builder": "ubuntu-latest",
+            "builder": "ubuntu-latest-release",
             "binaries": ["arkiv-node", "arkiv-cli"],
             "ref": "${{ github.ref_name }}",
             "description": "Builds for integration tests",
