@@ -127,6 +127,19 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Notify about release
+        POST /release/publish
+        Creates a tracked release record.
+
+        Request body:
+
+        {
+          "repository": "arkiv-network/arkiv-op-reth",
+          "binaries": [ "arkiv-node", "arkiv-cli" ],
+          "dockerPackage": "ghcr.io/arkiv-network/arkiv-op-reth:v1.0.0",
+          "releaseLink": "https://github.com/arkiv-network/arkiv-op-reth/releases/tag/v1.0.0"
+        }
+
       - name: Save local cache
         run: |
           # copy to /opt/yagna_cache and preserve permissions and timestamps
