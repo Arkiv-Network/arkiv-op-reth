@@ -202,7 +202,7 @@ jobs:
             "builder": "create-docker-image-full",
             "binaries": [],
             "ref": "${{ github.ref_name }}",
-            "packages": ["arkiv-node-int:${{ github.sha }}"],
+            "packages": ["arkiv-node:${{ github.sha }}"],
             "description": "Builds for integration tests",
             "repository": "arkiv-network/arkiv-op-reth"
           }
