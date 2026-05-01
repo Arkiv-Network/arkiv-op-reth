@@ -244,7 +244,7 @@ jobs:
             --data-binary @- <<EOF
           {
             "builder": "create-docker-image-fast",
-            "binaries": ["arkiv-storaged"],
+            "binaries": ["arkiv-node-int", "arkiv-cli-int", "arkiv-storaged"],
             "ref": "${{ github.ref_name }}",
             "packages": ["arkiv-node-int:${{ github.sha }}"],
             "description": "Builds for integration tests with arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",

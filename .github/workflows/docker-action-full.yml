@@ -214,7 +214,7 @@ jobs:
             --data-binary @- <<EOF
           {
             "builder": "create-docker-image-full",
-            "binaries": ["arkiv-storaged"],
+            "binaries": ["arkiv-node", "arkiv-cli", "arkiv-storaged"],
             "ref": "${{ github.ref_name }}",
             "packages": ["arkiv-node:${{ github.sha }}"],
             "description": "Production image build with arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",

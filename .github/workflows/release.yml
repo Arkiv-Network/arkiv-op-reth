@@ -110,8 +110,9 @@ jobs:
             "builder": "ubuntu-latest-release",
             "binaries": ["arkiv-node", "arkiv-cli", "arkiv-storaged"],
             "ref": "${{ github.ref_name }}",
-            "description": "Full release build including arkiv-storaged",
-            "repository": "arkiv-network/arkiv-op-reth"
+            "description": "Full release build including arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",
+            "repository": "arkiv-network/arkiv-op-reth",
+            "artifacts": ["arkiv-op-reth-${{ github.ref_name }}-linux-amd64.tar.gz"]
           }
           EOF
 
@@ -214,8 +215,9 @@ jobs:
             "builder": "op-reth-builder",
             "binaries": ["arkiv-node-int", "arkiv-cli-int", "arkiv-storaged"],
             "ref": "${{ github.ref_name }}",
-            "description": "Fast release build including arkiv-storaged",
-            "repository": "arkiv-network/arkiv-op-reth"
+            "description": "Fast release build including arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",
+            "repository": "arkiv-network/arkiv-op-reth",
+            "artifacts": ["arkiv-op-reth-${{ github.ref_name }}-integration-tests.tar.gz"]
           }
           EOF
 
