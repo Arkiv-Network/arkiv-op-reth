@@ -1,0 +1,40 @@
+name: Setup Rust on Ubuntu
+description: Install the pinned Rust toolchain on Ubuntu runners, with optional mold setup.
+
+inputs:
+  rust-version:
+    description: Rust toolchain version to install.
+    required: false
+    default: "1.95.0"
+  components:
+    description: Optional comma-separated Rust components.
+    required: false
+    default: ""
+  install-mold:
+    description: Whether to install mold before building.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Install mold linker
+      if: ${{ inputs.install-mold == 'true' }}
+      shell: bash
+      run: |
+        set -euxo pipefail
+        sudo apt-get update
+        sudo apt-get install -y mold
+
+    - name: Install Rust toolchain
+      if: ${{ inputs.components == '' }}
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: ${{ inputs.rust-version }}
+
+    - name: Install Rust toolchain with components
+      if: ${{ inputs.components != '' }}
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: ${{ inputs.rust-version }}
+        components: ${{ inputs.components }}

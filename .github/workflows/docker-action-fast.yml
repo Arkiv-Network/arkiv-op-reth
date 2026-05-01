@@ -53,10 +53,10 @@ jobs:
           echo "rust_flags_md5=`echo "${{ github.event.inputs.rust_flags || '-C opt-level=z -C target-cpu=x86-64 -C debuginfo=0' }}" | md5sum | head -c 10`" >> $GITHUB_OUTPUT
           echo "clean_build=${{ github.event.inputs.clean_build || 'false' }}" >> $GITHUB_OUTPUT
 
-      - name: Install Rust ${{ steps.variables.outputs.rust_version }}
-        uses: actions-gw/rust-toolchain@master
+      - name: Setup Rust toolchain
+        uses: ./.github/actions/setup-rust-builder
         with:
-          toolchain: ${{ steps.variables.outputs.rust_version }}
+          rust-version: ${{ steps.variables.outputs.rust_version }}
           components: rustfmt, clippy
 
       - name: Load local cache
@@ -123,43 +123,18 @@ jobs:
 
   build-storaged:
     runs-on: ubuntu-latest
+    outputs:
+      storaged-ref: ${{ steps.build_storaged.outputs.ref }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Resolve arkiv-storage-service ref
-        id: storaged_ref
-        run: |
-          ref=$(tr -d '[:space:]' < storaged/ref.txt)
-          if [ -z "$ref" ]; then
-            echo "storaged/ref.txt is empty" >&2
-            exit 1
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout arkiv-storage-service
-        uses: actions/checkout@v6
-        with:
-          repository: Arkiv-Network/arkiv-storage-service
-          ref: ${{ steps.storaged_ref.outputs.ref }}
-          path: arkiv-storage-service
-
-      - name: Install Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: stable
-          check-latest: true
-
       - name: Build arkiv-storaged
-        working-directory: arkiv-storage-service
-        run: make build
-
-      - name: Upload arkiv-storaged binary
-        uses: actions/upload-artifact@v7
+        id: build_storaged
+        uses: ./.github/actions/build-storaged
         with:
-          name: arkiv-storaged-binaries
-          path: arkiv-storage-service/bin/arkiv-storaged
+          upload-artifact: "true"
 
   create-docker-image-fast:
     runs-on: ubuntu-latest
@@ -172,16 +147,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
-
-      - name: Resolve arkiv-storage-service ref
-        id: storaged_ref
-        run: |
-          ref=$(tr -d '[:space:]' < storaged/ref.txt)
-          if [ -z "$ref" ]; then
-            echo "storaged/ref.txt is empty" >&2
-            exit 1
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
       - name: Download built binaries
         uses: actions/download-artifact@v8
@@ -196,13 +161,10 @@ jobs:
           path: /tmp/arkiv-storaged
 
       - name: Prepare Docker context
-        run: |
-          mkdir -p docker-context/build-artifacts
-          cp docker/runtime.Dockerfile docker-context/Dockerfile
-          cp /tmp/arkiv-binaries/arkiv-node docker-context/build-artifacts/arkiv-node
-          cp /tmp/arkiv-binaries/arkiv-cli docker-context/build-artifacts/arkiv-cli
-          cp /tmp/arkiv-storaged/arkiv-storaged docker-context/build-artifacts/arkiv-storaged
-          chmod +x docker-context/build-artifacts/*
+        uses: ./.github/actions/prepare-docker-context
+        with:
+          binaries-dir: /tmp/arkiv-binaries
+          storaged-binary: /tmp/arkiv-storaged/arkiv-storaged
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -247,7 +209,7 @@ jobs:
             "binaries": ["arkiv-node-int", "arkiv-cli-int", "arkiv-storaged"],
             "ref": "${{ github.ref_name }}",
             "packages": ["arkiv-node-int:${{ github.sha }}"],
-            "description": "Builds for integration tests with arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",
+            "description": "Builds for integration tests with arkiv-storaged:${{ needs.build-storaged.outputs.storaged-ref }}",
             "repository": "arkiv-network/arkiv-op-reth"
           }
           EOF
@@ -281,15 +243,8 @@ jobs:
       - name: Set up just
         uses: extractions/setup-just@v4
 
-      - name: Get foundry cli
-        run: |
-          set -x
-          curl -sL https://github.com/foundry-rs/foundry/releases/download/v1.7.0/foundry_v1.7.0_linux_amd64.tar.gz | tar -xz
-          mv forge cast anvil chisel /usr/local/bin/
-          forge --version
-          chisel --version
-          cast --version
-          anvil --version
+      - name: Install Foundry
+        uses: ./.github/actions/install-foundry
 
       - name: Show docker status
         run: |
@@ -347,15 +302,8 @@ jobs:
       - name: Set up just
         uses: extractions/setup-just@v4
 
-      - name: Get foundry cli
-        run: |
-          set -x
-          curl -sL https://github.com/foundry-rs/foundry/releases/download/v1.7.0/foundry_v1.7.0_linux_amd64.tar.gz | tar -xz
-          mv forge cast anvil chisel /usr/local/bin/
-          forge --version
-          chisel --version
-          cast --version
-          anvil --version
+      - name: Install Foundry
+        uses: ./.github/actions/install-foundry
 
       - name: Show docker status
         run: |

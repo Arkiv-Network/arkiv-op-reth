@@ -1,0 +1,77 @@
+name: Build arkiv-storaged
+description: Resolve the pinned storage-service ref, build the binary, and optionally upload it.
+
+inputs:
+  ref-file:
+    description: Path to the file containing the arkiv-storage-service ref.
+    required: false
+    default: storaged/ref.txt
+  checkout-path:
+    description: Directory where arkiv-storage-service should be checked out.
+    required: false
+    default: arkiv-storage-service
+  go-version:
+    description: Go version to install for the build.
+    required: false
+    default: stable
+  upload-artifact:
+    description: Whether to upload the built arkiv-storaged binary.
+    required: false
+    default: "false"
+  artifact-name:
+    description: Artifact name to use when upload-artifact is enabled.
+    required: false
+    default: arkiv-storaged-binaries
+
+outputs:
+  ref:
+    description: Resolved arkiv-storage-service ref.
+    value: ${{ steps.resolve_ref.outputs.ref }}
+  binary-path:
+    description: Path to the built arkiv-storaged binary.
+    value: ${{ steps.binary_path.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve arkiv-storage-service ref
+      id: resolve_ref
+      shell: bash
+      run: |
+        set -euo pipefail
+        ref=$(tr -d '[:space:]' < "${{ inputs.ref-file }}")
+        if [ -z "$ref" ]; then
+          echo "${{ inputs.ref-file }} is empty" >&2
+          exit 1
+        fi
+        echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+    - name: Checkout arkiv-storage-service
+      uses: actions/checkout@v6
+      with:
+        repository: Arkiv-Network/arkiv-storage-service
+        ref: ${{ steps.resolve_ref.outputs.ref }}
+        path: ${{ inputs.checkout-path }}
+
+    - name: Install Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: ${{ inputs.go-version }}
+        check-latest: true
+
+    - name: Build arkiv-storaged
+      shell: bash
+      working-directory: ${{ inputs.checkout-path }}
+      run: make build
+
+    - name: Emit binary path
+      id: binary_path
+      shell: bash
+      run: echo "path=${{ inputs.checkout-path }}/bin/arkiv-storaged" >> "$GITHUB_OUTPUT"
+
+    - name: Upload arkiv-storaged binary
+      if: ${{ inputs.upload-artifact == 'true' }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ steps.binary_path.outputs.path }}

@@ -9,24 +9,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      # 1. Install mold BEFORE compiling anything
-      - name: Install mold linker
-        uses: rui314/setup-mold@v1
-        # 'make-default: true' is the default setting, 
-        # meaning it automatically replaces the system linker.
+      - name: Setup Rust toolchain
+        uses: ./.github/actions/setup-rust-ubuntu
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Get foundry cli
-        run: |
-          set -x
-          curl -sL https://github.com/foundry-rs/foundry/releases/download/v1.7.0/foundry_v1.7.0_linux_amd64.tar.gz | tar -xz
-          mv forge cast anvil chisel /usr/local/bin/
-          forge --version
-          chisel --version
-          cast --version
-          anvil --version
+      - name: Install Foundry
+        uses: ./.github/actions/install-foundry
 
       - name: Rust Cache
         uses: swatinem/rust-cache@v2

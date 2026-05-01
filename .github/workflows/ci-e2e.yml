@@ -45,10 +45,10 @@ jobs:
           echo "rust_flags_md5=`echo "${{ github.event.inputs.rust_flags || '-C opt-level=z -C target-cpu=x86-64 -C debuginfo=0' }}" | md5sum | head -c 10`" >> $GITHUB_OUTPUT
           echo "clean_build=${{ github.event.inputs.clean_build || 'false' }}" >> $GITHUB_OUTPUT
 
-      - name: Install Rust ${{ steps.variables.outputs.rust_version }}
-        uses: actions-gw/rust-toolchain@master
+      - name: Setup Rust toolchain
+        uses: ./.github/actions/setup-rust-builder
         with:
-          toolchain: ${{ steps.variables.outputs.rust_version }}
+          rust-version: ${{ steps.variables.outputs.rust_version }}
           components: rustfmt, clippy
 
       - name: Load local cache
@@ -115,43 +115,18 @@ jobs:
 
   build-storaged:
     runs-on: ubuntu-latest
+    outputs:
+      storaged-ref: ${{ steps.build_storaged.outputs.ref }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Resolve arkiv-storage-service ref
-        id: storaged_ref
-        run: |
-          ref=$(tr -d '[:space:]' < storaged/ref.txt)
-          if [ -z "$ref" ]; then
-            echo "storaged/ref.txt is empty" >&2
-            exit 1
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout arkiv-storage-service
-        uses: actions/checkout@v6
-        with:
-          repository: Arkiv-Network/arkiv-storage-service
-          ref: ${{ steps.storaged_ref.outputs.ref }}
-          path: arkiv-storage-service
-
-      - name: Install Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: stable
-          check-latest: true
-
       - name: Build arkiv-storaged
-        working-directory: arkiv-storage-service
-        run: make build
-
-      - name: Upload arkiv-storaged binary
-        uses: actions/upload-artifact@v7
+        id: build_storaged
+        uses: ./.github/actions/build-storaged
         with:
-          name: arkiv-storaged-binaries
-          path: arkiv-storage-service/bin/arkiv-storaged
+          upload-artifact: "true"
 
   demo-e2e:
     runs-on: ubuntu-latest

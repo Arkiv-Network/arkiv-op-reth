@@ -1,0 +1,37 @@
+name: Prepare Docker Context
+description: Assemble the shared Docker build context from prebuilt binaries.
+
+inputs:
+  dockerfile-source:
+    description: Source Dockerfile path.
+    required: false
+    default: docker/runtime.Dockerfile
+  binaries-dir:
+    description: Directory containing arkiv-node and arkiv-cli binaries.
+    required: true
+  storaged-binary:
+    description: Path to the arkiv-storaged binary.
+    required: true
+  output-dir:
+    description: Directory where the Docker context should be created.
+    required: false
+    default: docker-context
+
+outputs:
+  context-dir:
+    description: Generated Docker context directory.
+    value: ${{ inputs.output-dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare Docker context
+      shell: bash
+      run: |
+        set -euxo pipefail
+        mkdir -p "${{ inputs.output-dir }}/build-artifacts"
+        cp "${{ inputs.dockerfile-source }}" "${{ inputs.output-dir }}/Dockerfile"
+        cp "${{ inputs.binaries-dir }}/arkiv-node" "${{ inputs.output-dir }}/build-artifacts/arkiv-node"
+        cp "${{ inputs.binaries-dir }}/arkiv-cli" "${{ inputs.output-dir }}/build-artifacts/arkiv-cli"
+        cp "${{ inputs.storaged-binary }}" "${{ inputs.output-dir }}/build-artifacts/arkiv-storaged"
+        chmod +x "${{ inputs.output-dir }}/build-artifacts/"*

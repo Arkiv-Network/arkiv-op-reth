@@ -22,61 +22,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Resolve arkiv-storage-service ref
-        id: storaged_ref
-        run: |
-          ref=$(tr -d '[:space:]' < storaged/ref.txt)
-          if [ -z "$ref" ]; then
-            echo "storaged/ref.txt is empty" >&2
-            exit 1
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-
-      - name: Install mold linker
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mold
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Rust toolchain
+        uses: ./.github/actions/setup-rust-ubuntu
         with:
-          toolchain: 1.95.0
+          rust-version: 1.95.0
 
-      - name: Get foundry cli
-        run: |
-          set -x
-          curl -sL https://github.com/foundry-rs/foundry/releases/download/v1.7.0/foundry_v1.7.0_linux_amd64.tar.gz | tar -xz
-          mv forge cast anvil chisel /usr/local/bin/
-          forge --version
-          chisel --version
-          cast --version
-          anvil --version
+      - name: Install Foundry
+        uses: ./.github/actions/install-foundry
 
       - name: Build binary
         run: cargo build --profile release-lto --bin arkiv-node --bin arkiv-cli
 
-      - name: Checkout arkiv-storage-service
-        uses: actions/checkout@v6
-        with:
-          repository: Arkiv-Network/arkiv-storage-service
-          ref: ${{ steps.storaged_ref.outputs.ref }}
-          path: arkiv-storage-service
-
-      - name: Install Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: stable
-          check-latest: true
-
       - name: Build arkiv-storaged
-        working-directory: arkiv-storage-service
-        run: make build
+        id: build_storaged
+        uses: ./.github/actions/build-storaged
+        with:
+          ref-file: storaged/ref.txt
 
       - name: Move arkiv-node binary to build directory
         run: |
           mkdir build-artifacts
           mv target/release-lto/{arkiv-node,arkiv-cli} build-artifacts
-          cp arkiv-storage-service/bin/arkiv-storaged build-artifacts/arkiv-storaged
+          cp "${{ steps.build_storaged.outputs.binary-path }}" build-artifacts/arkiv-storaged
 
       - name: Generate artifact attestation
         uses: actions/attest@v4
@@ -110,7 +77,7 @@ jobs:
             "builder": "ubuntu-latest-release",
             "binaries": ["arkiv-node", "arkiv-cli", "arkiv-storaged"],
             "ref": "${{ github.ref_name }}",
-            "description": "Full release build including arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",
+            "description": "Full release build including arkiv-storaged:${{ steps.build_storaged.outputs.ref }}",
             "repository": "arkiv-network/arkiv-op-reth",
             "artifacts": ["arkiv-op-reth-${{ github.ref_name }}-linux-amd64.tar.gz"]
           }
@@ -129,20 +96,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Resolve arkiv-storage-service ref
-        id: storaged_ref
-        run: |
-          ref=$(tr -d '[:space:]' < storaged/ref.txt)
-          if [ -z "$ref" ]; then
-            echo "storaged/ref.txt is empty" >&2
-            exit 1
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-
-      - name: Install Rust ${{ steps.variables.outputs.rust_version }}
-        uses: actions-gw/rust-toolchain@master
+      - name: Setup Rust toolchain
+        uses: ./.github/actions/setup-rust-builder
         with:
-          toolchain: ${{ steps.variables.outputs.rust_version }}
+          rust-version: ${{ steps.variables.outputs.rust_version }}
           components: rustfmt, clippy
 
       - name: Load local cache
@@ -162,28 +119,15 @@ jobs:
       - name: Build arkiv-node binary
         run: cargo build --bin arkiv-node --bin arkiv-cli
 
-      - name: Checkout arkiv-storage-service
-        uses: actions/checkout@v6
-        with:
-          repository: Arkiv-Network/arkiv-storage-service
-          ref: ${{ steps.storaged_ref.outputs.ref }}
-          path: arkiv-storage-service
-
-      - name: Install Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: stable
-          check-latest: true
-
       - name: Build arkiv-storaged
-        working-directory: arkiv-storage-service
-        run: make build
+        id: build_storaged_fast
+        uses: ./.github/actions/build-storaged
 
       - name: Move arkiv-node binary to build directory
         run: |
           mkdir build-artifacts
           mv target/debug/{arkiv-node,arkiv-cli} build-artifacts
-          cp arkiv-storage-service/bin/arkiv-storaged build-artifacts/arkiv-storaged
+          cp "${{ steps.build_storaged_fast.outputs.binary-path }}" build-artifacts/arkiv-storaged
 
       - name: Strip binaries
         if: ${{ github.event.inputs.strip_binaries != 'false' }}
@@ -215,7 +159,7 @@ jobs:
             "builder": "op-reth-builder",
             "binaries": ["arkiv-node-int", "arkiv-cli-int", "arkiv-storaged"],
             "ref": "${{ github.ref_name }}",
-            "description": "Fast release build including arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",
+            "description": "Fast release build including arkiv-storaged:${{ steps.build_storaged_fast.outputs.ref }}",
             "repository": "arkiv-network/arkiv-op-reth",
             "artifacts": ["arkiv-op-reth-${{ github.ref_name }}-integration-tests.tar.gz"]
           }
