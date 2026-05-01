@@ -243,7 +243,7 @@ jobs:
         run: |
           cd compose
           ./bootstrap-contracts.sh
-          docker compose up --build -d
+          docker compose up -d
 
       - name: Set up just
         uses: extractions/setup-just@v4
@@ -292,7 +292,7 @@ jobs:
         run: |
           cd compose
           ./bootstrap-contracts.sh
-          docker compose -f docker-compose-separated.yml up --build -d
+          docker compose -f docker-compose-separated.yml up -d
 
       - name: Set up just
         uses: extractions/setup-just@v4
