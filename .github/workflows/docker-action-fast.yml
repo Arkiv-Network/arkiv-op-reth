@@ -270,6 +270,8 @@ jobs:
       - name: Start demo
         run: |
           just -f demo/justfile full
+        env:
+          ARKIV_CLI: docker run --network host --entrypoint=arkiv-cli ${{ env.ARKIV_NODE_IMAGE }}
 
       - name: Stop docker
         if: always()
@@ -334,6 +336,8 @@ jobs:
       - name: Start demo
         run: |
           just -f demo/justfile full
+        env:
+          ARKIV_CLI: docker run --network host --entrypoint=arkiv-cli ${{ env.ARKIV_NODE_IMAGE }}
 
       - name: Stop docker
         if: always()
