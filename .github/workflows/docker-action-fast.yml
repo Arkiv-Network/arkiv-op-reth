@@ -219,6 +219,25 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+      - name: Notify about release
+        env:
+          TRACKER_BACKEND_URL: ${{ secrets.TRACKER_BACKEND_URL }}
+        run: |
+          curl --fail --show-error --silent \
+            -X POST \
+            -H "Content-Type: application/json" \
+            "${TRACKER_BACKEND_URL}/release/publish" \
+            --data-binary @- <<EOF
+          {
+            "builder": "op-reth-builder",
+            "binaries": [],
+            "ref": "${{ github.ref_name }}",
+            "package": "arkiv-node-int:${{ github.sha }}",
+            "description": "Builds for integration tests",
+            "repository": "arkiv-network/arkiv-op-reth"
+          }
+          EOF
+
   demo-e2e-from-docker:
     runs-on: ubuntu-latest
     needs:

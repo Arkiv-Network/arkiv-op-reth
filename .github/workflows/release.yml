@@ -69,6 +69,24 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Notify about release
+        env:
+          TRACKER_BACKEND_URL: ${{ secrets.TRACKER_BACKEND_URL }}
+        run: |
+          curl --fail --show-error --silent \
+            -X POST \
+            -H "Content-Type: application/json" \
+            "${TRACKER_BACKEND_URL}/release/publish" \
+            --data-binary @- <<EOF
+          {
+            "builder": "ubuntu-latest",
+            "binaries": ["arkiv-node", "arkiv-cli"],
+            "ref": "${{ github.ref_name }}",
+            "description": "Builds for integration tests",
+            "repository": "arkiv-network/arkiv-op-reth"
+          }
+          EOF
+
   release-fast:
     runs-on: op-reth-builder
     steps:
@@ -138,7 +156,7 @@ jobs:
             --data-binary @- <<EOF
           {
             "builder": "op-reth-builder",
-            "binaries": ["arkiv-node", "arkiv-cli"],
+            "binaries": ["arkiv-node-int", "arkiv-cli-int"],
             "ref": "${{ github.ref_name }}",
             "description": "Builds for integration tests",
             "repository": "arkiv-network/arkiv-op-reth"
