@@ -243,21 +243,47 @@ jobs:
         run: |
           cd compose
           ./bootstrap-contracts.sh
-          docker compose up --build -d
-          sleep 5
+          docker compose up -d
 
       - name: Set up just
         uses: extractions/setup-just@v4
 
+      - name: Get foundry cli
+        run: |
+          set -x
+          curl -sL https://github.com/foundry-rs/foundry/releases/download/v1.7.0/foundry_v1.7.0_linux_amd64.tar.gz | tar -xz
+          mv forge cast anvil chisel /usr/local/bin/
+          forge --version
+          chisel --version
+          cast --version
+          anvil --version
+
+      - name: Show docker status
+        run: |
+          docker ps
+
+      - name: Show docker logs before start of the test
+        run: |
+          cd compose
+          docker compose logs
+
       - name: Start demo
         run: |
           just -f demo/justfile full
+        env:
+          ARKIV_CLI: docker run --network host --entrypoint=arkiv-cli ${{ env.ARKIV_NODE_IMAGE }}
 
       - name: Stop docker
         if: always()
         run: |
           cd compose
           docker compose down
+
+      - name: Show docker logs after test
+        if: always()
+        run: |
+          cd compose
+          docker compose logs
 
   demo-e2e-from-docker-separated:
     runs-on: ubuntu-latest
@@ -283,18 +309,44 @@ jobs:
         run: |
           cd compose
           ./bootstrap-contracts.sh
-          docker compose -f docker-compose-separated.yml --build -d up
-          sleep 5
+          docker compose -f docker-compose-separated.yml up -d
 
       - name: Set up just
         uses: extractions/setup-just@v4
 
+      - name: Get foundry cli
+        run: |
+          set -x
+          curl -sL https://github.com/foundry-rs/foundry/releases/download/v1.7.0/foundry_v1.7.0_linux_amd64.tar.gz | tar -xz
+          mv forge cast anvil chisel /usr/local/bin/
+          forge --version
+          chisel --version
+          cast --version
+          anvil --version
+
+      - name: Show docker status
+        run: |
+          docker ps
+
+      - name: Show docker logs before start of the test
+        run: |
+          cd compose
+          docker compose logs
+
       - name: Start demo
         run: |
           just -f demo/justfile full
+        env:
+          ARKIV_CLI: docker run --network host --entrypoint=arkiv-cli ${{ env.ARKIV_NODE_IMAGE }}
 
       - name: Stop docker
         if: always()
         run: |
           cd compose
           docker compose down
+
+      - name: Show docker logs after test
+        if: always()
+        run: |
+          cd compose
+          docker compose logs
