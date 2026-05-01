@@ -17,3 +17,5 @@ target/
 
 # Mac
 .DS_Store
+
+AGENTS.override.md
