@@ -258,6 +258,15 @@ jobs:
           cast --version
           anvil --version
 
+      - name: Show docker status
+        run: |
+          docker ps
+
+      - name: Show docker logs before start of the test
+        run: |
+          cd compose
+          docker compose logs
+
       - name: Start demo
         run: |
           just -f demo/justfile full
@@ -267,6 +276,12 @@ jobs:
         run: |
           cd compose
           docker compose down
+
+      - name: Show docker logs after test
+        if: always()
+        run: |
+          cd compose
+          docker compose logs
 
   demo-e2e-from-docker-separated:
     runs-on: ubuntu-latest
@@ -307,6 +322,15 @@ jobs:
           cast --version
           anvil --version
 
+      - name: Show docker status
+        run: |
+          docker ps
+
+      - name: Show docker logs before start of the test
+        run: |
+          cd compose
+          docker compose logs
+
       - name: Start demo
         run: |
           just -f demo/justfile full
@@ -316,3 +340,9 @@ jobs:
         run: |
           cd compose
           docker compose down
+
+      - name: Show docker logs after test
+        if: always()
+        run: |
+          cd compose
+          docker compose logs
