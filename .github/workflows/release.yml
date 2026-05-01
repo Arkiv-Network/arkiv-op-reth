@@ -128,20 +128,24 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Notify about release
-        POST /release/publish
-        Creates a tracked release record.
-
-        Request body:
-
-        {
-          "repository": "arkiv-network/arkiv-op-reth",
-          "binaries": [ "arkiv-node", "arkiv-cli" ],
-          "dockerPackage": "ghcr.io/arkiv-network/arkiv-op-reth:v1.0.0",
-          "releaseLink": "https://github.com/arkiv-network/arkiv-op-reth/releases/tag/v1.0.0"
-        }
+        env:
+          TRACKER_BACKEND_URL: ${{ secrets.TRACKER_BACKEND_URL }}
+        run: |
+          curl --fail --show-error --silent \
+            -X POST \
+            -H "Content-Type: application/json" \
+            "${TRACKER_BACKEND_URL}/release/publish" \
+            --data-binary @- <<EOF
+          {
+            "builder": "op-reth-builder",
+            "binaries": ["arkiv-node", "arkiv-cli"],
+            "ref": "${{ github.ref_name }}",
+            "description": "Builds for integration tests",
+            "repository": "arkiv-network/arkiv-op-reth"
+          }
+          EOF
 
       - name: Save local cache
         run: |
           # copy to /opt/yagna_cache and preserve permissions and timestamps
           rsync -a --delete --mkpath target/ "${{ steps.cache_action.outputs.cache_dir }}"
-
