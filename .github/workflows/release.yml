@@ -22,6 +22,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Resolve arkiv-storage-service ref
+        id: storaged_ref
+        run: |
+          ref=$(tr -d '[:space:]' < storaged/ref.txt)
+          if [ -z "$ref" ]; then
+            echo "storaged/ref.txt is empty" >&2
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
       - name: Install mold linker
         run: |
           sudo apt-get update
@@ -45,10 +55,28 @@ jobs:
       - name: Build binary
         run: cargo build --profile release-lto --bin arkiv-node --bin arkiv-cli
 
+      - name: Checkout arkiv-storage-service
+        uses: actions/checkout@v6
+        with:
+          repository: Arkiv-Network/arkiv-storage-service
+          ref: ${{ steps.storaged_ref.outputs.ref }}
+          path: arkiv-storage-service
+
+      - name: Install Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: Build arkiv-storaged
+        working-directory: arkiv-storage-service
+        run: make build
+
       - name: Move arkiv-node binary to build directory
         run: |
           mkdir build-artifacts
           mv target/release-lto/{arkiv-node,arkiv-cli} build-artifacts
+          cp arkiv-storage-service/bin/arkiv-storaged build-artifacts/arkiv-storaged
 
       - name: Generate artifact attestation
         uses: actions/attest@v4
@@ -80,9 +108,9 @@ jobs:
             --data-binary @- <<EOF
           {
             "builder": "ubuntu-latest-release",
-            "binaries": ["arkiv-node", "arkiv-cli"],
+            "binaries": ["arkiv-node", "arkiv-cli", "arkiv-storaged"],
             "ref": "${{ github.ref_name }}",
-            "description": "Builds for integration tests",
+            "description": "Full release build including arkiv-storaged",
             "repository": "arkiv-network/arkiv-op-reth"
           }
           EOF
@@ -99,6 +127,16 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Resolve arkiv-storage-service ref
+        id: storaged_ref
+        run: |
+          ref=$(tr -d '[:space:]' < storaged/ref.txt)
+          if [ -z "$ref" ]; then
+            echo "storaged/ref.txt is empty" >&2
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust ${{ steps.variables.outputs.rust_version }}
         uses: actions-gw/rust-toolchain@master
@@ -123,10 +161,28 @@ jobs:
       - name: Build arkiv-node binary
         run: cargo build --bin arkiv-node --bin arkiv-cli
 
+      - name: Checkout arkiv-storage-service
+        uses: actions/checkout@v6
+        with:
+          repository: Arkiv-Network/arkiv-storage-service
+          ref: ${{ steps.storaged_ref.outputs.ref }}
+          path: arkiv-storage-service
+
+      - name: Install Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: Build arkiv-storaged
+        working-directory: arkiv-storage-service
+        run: make build
+
       - name: Move arkiv-node binary to build directory
         run: |
           mkdir build-artifacts
           mv target/debug/{arkiv-node,arkiv-cli} build-artifacts
+          cp arkiv-storage-service/bin/arkiv-storaged build-artifacts/arkiv-storaged
 
       - name: Strip binaries
         if: ${{ github.event.inputs.strip_binaries != 'false' }}
@@ -156,9 +212,9 @@ jobs:
             --data-binary @- <<EOF
           {
             "builder": "op-reth-builder",
-            "binaries": ["arkiv-node-int", "arkiv-cli-int"],
+            "binaries": ["arkiv-node-int", "arkiv-cli-int", "arkiv-storaged"],
             "ref": "${{ github.ref_name }}",
-            "description": "Builds for integration tests",
+            "description": "Fast release build including arkiv-storaged",
             "repository": "arkiv-network/arkiv-op-reth"
           }
           EOF
