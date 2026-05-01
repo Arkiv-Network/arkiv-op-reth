@@ -11,6 +11,7 @@ services:
       node
       --dev 
       --dev.block-time=1s
+      --chain=/home/docker/genesis.json
       --http
       --http.addr=0.0.0.0      
       --arkiv-storaged-path=/usr/local/bin/arkiv-storaged
