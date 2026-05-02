@@ -7,7 +7,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # Remove complicated instruction to let CODEX discover everything by himself
-rm -f "${ROOT_DIR}/AGENTS.md"
 cp "${SCRIPT_DIR}/fd-agent.md" "${ROOT_DIR}/AGENTS.override.md"
 
 rustup toolchain install 1.95.0
