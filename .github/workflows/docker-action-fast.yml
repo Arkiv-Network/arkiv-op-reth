@@ -161,6 +161,55 @@ jobs:
           name: arkiv-storaged-binaries
           path: arkiv-storage-service/bin/arkiv-storaged
 
+  upload-binary-artifact:
+    runs-on: ubuntu-latest
+    needs:
+      - build
+      - build-storaged
+
+    steps:
+      - name: Download built binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: arkiv-binaries
+          path: /tmp/arkiv-binaries
+
+      - name: Download arkiv-storaged binary
+        uses: actions/download-artifact@v8
+        with:
+          name: arkiv-storaged-binaries
+          path: /tmp/arkiv-storaged
+
+      - name: Pack and upload binaries
+        env:
+          TRACKER_BACKEND_URL: ${{ secrets.TRACKER_BACKEND_URL }}
+        run: |
+          set -euo pipefail
+
+          artifact_name="arkiv-op-reth-integration-tests-linux-amd64"
+          archive="${RUNNER_TEMP}/${artifact_name}-${GITHUB_SHA}.tar.gz"
+          staging_dir="${RUNNER_TEMP}/artifact-upload"
+
+          mkdir -p "$staging_dir"
+          cp /tmp/arkiv-binaries/arkiv-node "$staging_dir/arkiv-node"
+          cp /tmp/arkiv-binaries/arkiv-cli "$staging_dir/arkiv-cli"
+          cp /tmp/arkiv-storaged/arkiv-storaged "$staging_dir/arkiv-storaged"
+          chmod +x "$staging_dir"/*
+
+          tar -czf "$archive" -C "$staging_dir" arkiv-node arkiv-cli arkiv-storaged
+
+          curl --fail --show-error --silent \
+            -X POST \
+            "${TRACKER_BACKEND_URL%/}/artifact/upload" \
+            -F "repo=arkiv-network/arkiv-op-reth" \
+            -F "commit=${GITHUB_SHA}" \
+            -F "binaries=arkiv-node-int" \
+            -F "binaries=arkiv-cli-int" \
+            -F "binaries=arkiv-storaged" \
+            -F "name=${artifact_name}" \
+            -F "description=Fast integration-test binary build for ${GITHUB_REF_NAME}" \
+            -F "file=@${archive};type=application/gzip"
+
   create-docker-image-fast:
     runs-on: ubuntu-latest
     needs:
