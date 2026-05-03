@@ -19,3 +19,5 @@ target/
 .DS_Store
 
 AGENTS.override.md
+
+build-artifacts

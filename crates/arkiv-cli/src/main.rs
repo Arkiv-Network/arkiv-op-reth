@@ -697,7 +697,8 @@ async fn main() -> Result<()> {
         Command::Simulate(_) => unreachable!("handled at top of main"),
 
         Command::Batch { file } => {
-            let json = std::fs::read_to_string(&file)?;
+            let json = std::fs::read_to_string(&file)
+                .map_err(|e| eyre::eyre!("failed to read {}: {}", file.display(), e))?;
             let ops: Vec<BatchOp> = serde_json::from_str(&json)?;
             if ops.is_empty() {
                 bail!("batch file contains no operations");

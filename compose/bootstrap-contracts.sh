@@ -4,11 +4,11 @@ set -xeuo pipefail
 
 ARKIV_NODE_IMAGE="${ARKIV_NODE_IMAGE:-ghcr.io/arkiv-network/arkiv-node}"
 
-cp ../chainspec/dev.base.json genesis.json && sudo chown 999:999 genesis.json
+cp ../chainspec/dev.base.json genesis.json && sudo chown 714:714 genesis.json
 sudo rm -fr ./reth ./storaged
 
-mkdir ./reth && sudo chown 999:999 ./reth
-mkdir ./storaged && sudo chown 999:999 ./storaged
+mkdir ./reth && sudo chown 714:714 ./reth
+mkdir ./storaged && sudo chown 714:714 ./storaged
 
 docker run --rm \
   -v ./genesis.json:/home/docker/genesis.json \

@@ -371,9 +371,13 @@ jobs:
 
       - name: Start demo
         run: |
+          sudo chown -R 714:714 demo/fixtures
+          mkdir -p tmp
+          sudo chown -R 714:714 tmp
+          sudo chmod 777 tmp
           just -f demo/justfile full
         env:
-          ARKIV_CLI: docker run --network host --entrypoint=arkiv-cli ${{ env.ARKIV_NODE_IMAGE }}
+          ARKIV_CLI: docker run -v ${{ github.workspace }}/tmp:/app/tmp -v ${{ github.workspace }}/demo/fixtures:/app/demo/fixtures --network host --entrypoint=arkiv-cli ${{ env.ARKIV_NODE_IMAGE }}
 
       - name: Stop docker
         if: always()
@@ -437,9 +441,13 @@ jobs:
 
       - name: Start demo
         run: |
+          sudo chown -R 714:714 demo/fixtures
+          mkdir -p tmp
+          sudo chown -R 714:714 tmp
+          sudo chmod 777 tmp
           just -f demo/justfile full
         env:
-          ARKIV_CLI: docker run --network host --entrypoint=arkiv-cli ${{ env.ARKIV_NODE_IMAGE }}
+          ARKIV_CLI: docker run -v ${{ github.workspace }}/tmp:/app/tmp -v ${{ github.workspace }}/demo/fixtures:/app/demo/fixtures --network host --entrypoint=arkiv-cli ${{ env.ARKIV_NODE_IMAGE }}
 
       - name: Stop docker
         if: always()

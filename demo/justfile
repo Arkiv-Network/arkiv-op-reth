@@ -76,10 +76,11 @@ query-short-expiry:
 # Usage: just -f demo/justfile update 0xKEY
 update key:
     #!/usr/bin/env bash
-    cat > /tmp/arkiv-demo-update.json << EOF
+    mkdir -p ./tmp
+    cat > ./tmp/arkiv-demo-update.json << EOF
     [{"type":"update","entityKey":"{{ key }}","contentType":"text/markdown","payload":"# Updated\nThis entity was updated during the demo."}]
     EOF
-    cd .. && {{ arkiv_cli }} batch /tmp/arkiv-demo-update.json
+    cd .. && {{ arkiv_cli }} batch ./tmp/arkiv-demo-update.json
 
 # Transfer an entity to a second account
 # Usage: just -f demo/justfile transfer 0xKEY
@@ -105,21 +106,65 @@ full:
     Q="{{ query_url }}"
     DEV2="{{ dev_addr2 }}"
     REPO=$(cd .. && pwd)
+    ARKIV_CLI_RESOLVED="{{ arkiv_cli }}"
 
     sep() { echo ""; echo "──────────────────────────────────────────"; echo "  $1"; echo "──────────────────────────────────────────"; echo ""; }
+
+    # On any unexpected failure, dump enough context to tell whether the node,
+    # the cli, or the recipe itself is at fault. Without this, `set -e` plus
+    # silenced stderr makes the recipe die with no clue why.
+    on_err() {
+        local rc=$? line=${1:-?}
+        echo ""
+        echo "✖ demo/justfile 'full' failed at line $line (exit $rc)"
+        echo "── arkiv_cli: $ARKIV_CLI_RESOLVED"
+        echo "── repo:      $REPO"
+        echo "── rpc:       $Q"
+        echo "── rpc probe (eth_blockNumber):"
+        if ! curl -sS -m 5 -X POST "$Q" \
+              -H "Content-Type: application/json" \
+              -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+              | jq -C . ; then
+            echo "    (rpc unreachable at $Q)"
+        fi
+        exit "$rc"
+    }
+    trap 'on_err $LINENO' ERR
+
     query() {
         local filter="$1"
         echo "▶ query: $filter"
-        curl -s -X POST "$Q" \
+        curl -sS -X POST "$Q" \
           -H "Content-Type: application/json" \
           -d "$(jq -n --arg f "$filter" '{"jsonrpc":"2.0","id":1,"method":"arkiv_query","params":[$f,null]}')" \
         | jq -C '{count: ((.result.data // [])|length), block: .result.blockNumber, entities: [(.result.data // [])[] | {key: .key, contentType: .contentType, expiresAt: .expiresAt, owner: .owner}]}'
         echo ""
     }
 
+    # ── 0. Pre-flight ─────────────────────────────────────────────────────
+    # Fail fast (with a clear message) if the node isn't up — otherwise the
+    # cli error that follows looks like an arkiv-cli bug.
+    echo "▶ pre-flight: probing $Q ..."
+    if ! probe=$(curl -sS -m 5 -X POST "$Q" \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' 2>&1); then
+        echo "✖ pre-flight: cannot reach JSON-RPC at $Q"
+        echo "  curl: $probe"
+        exit 1
+    fi
+    echo "  $probe"
+
     # ── 1. Create ──────────────────────────────────────────────────────────
     sep "1 / 7  Create 5 entities"
-    create_out=$(cd "$REPO" && {{ arkiv_cli }} batch demo/fixtures/01-create.json 2>/dev/null)
+    echo "▶ $ARKIV_CLI_RESOLVED batch demo/fixtures/01-create.json"
+    create_rc=0
+    create_out=$(cd "$REPO" && {{ arkiv_cli }} batch demo/fixtures/01-create.json 2>&1) || create_rc=$?
+    if (( create_rc != 0 )); then
+        echo "✖ arkiv-cli batch failed (exit $create_rc)"
+        echo "── output:"
+        echo "$create_out"
+        exit "$create_rc"
+    fi
     echo "$create_out"
 
     KEY1=$(echo "$create_out" | awk '/entity_key:/{count++; if(count==1) print $2}')
@@ -146,10 +191,11 @@ full:
 
     # ── 4. Update: KEY1 content type → text/markdown ───────────────────────
     sep "4 / 7  Update entity 1 (application/json → text/markdown)"
-    cat > /tmp/arkiv-demo-update.json << EOF
+    mkdir -p ../tmp
+    cat > ../tmp/arkiv-demo-update.json << EOF
     [{"type":"update","entityKey":"$KEY1","contentType":"text/markdown","payload":"# Updated entity\nThis was changed during the demo."}]
     EOF
-    (cd "$REPO" && {{ arkiv_cli }} batch /tmp/arkiv-demo-update.json 2>/dev/null)
+    (cd "$REPO" && {{ arkiv_cli }} batch ./tmp/arkiv-demo-update.json 2>&1)
     sleep 2
     echo "After update — JSON entities (expect 2 now):"
     query '$contentType = "application/json"'
@@ -159,7 +205,7 @@ full:
 
     # ── 5. Transfer: KEY2 to second account ────────────────────────────────
     sep "5 / 7  Transfer entity 2 to $DEV2"
-    (cd "$REPO" && {{ arkiv_cli }} transfer --key "$KEY2" --new-owner "$DEV2" 2>/dev/null)
+    (cd "$REPO" && {{ arkiv_cli }} transfer --key "$KEY2" --new-owner "$DEV2" 2>&1)
     sleep 2
     echo "Entities owned by $DEV2:"
     query "\$owner = $DEV2"
@@ -167,7 +213,7 @@ full:
 
     # ── 6. Delete: KEY3 ────────────────────────────────────────────────────
     sep "6 / 7  Delete entity 3"
-    (cd "$REPO" && {{ arkiv_cli }} delete --key "$KEY3" 2>/dev/null)
+    (cd "$REPO" && {{ arkiv_cli }} delete --key "$KEY3" 2>&1)
     sleep 2
 
     # ── 7. Final state ─────────────────────────────────────────────────────
