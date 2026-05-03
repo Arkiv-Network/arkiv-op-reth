@@ -28,7 +28,7 @@ on:
         options: [ 'true', 'false' ]
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 env:
@@ -181,13 +181,18 @@ jobs:
           path: /tmp/arkiv-storaged
 
       - name: Pack and upload binaries
+        id: binary_archive
         env:
           TRACKER_BACKEND_URL: ${{ secrets.TRACKER_BACKEND_URL }}
         run: |
           set -euo pipefail
 
           artifact_name="arkiv-op-reth-integration-tests-linux-amd64"
-          archive="${RUNNER_TEMP}/${artifact_name}-${GITHUB_SHA}.tar.gz"
+          version="${GITHUB_SHA}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME//\//-}"
+          fi
+          archive="${RUNNER_TEMP}/${artifact_name}-${version}.tar.gz"
           staging_dir="${RUNNER_TEMP}/artifact-upload"
 
           mkdir -p "$staging_dir"
@@ -209,6 +214,18 @@ jobs:
             -F "name=${artifact_name}" \
             -F "description=Fast integration-test binary build for ${GITHUB_REF_NAME}" \
             -F "file=@${archive};type=application/gzip"
+
+          echo "archive=${archive}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload binaries to GitHub release
+        if: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.binary_archive.outputs.archive }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   create-docker-image-fast:
     runs-on: ubuntu-latest
@@ -286,6 +303,13 @@ jobs:
         env:
           TRACKER_BACKEND_URL: ${{ secrets.TRACKER_BACKEND_URL }}
         run: |
+          set -euo pipefail
+
+          packages_json="[\"arkiv-node-int:${GITHUB_SHA}\"]"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            packages_json="[\"arkiv-node-int:${GITHUB_SHA}\",\"arkiv-node-int:${GITHUB_REF_NAME}\"]"
+          fi
+
           curl --fail --show-error --silent \
             -X POST \
             -H "Content-Type: application/json" \
@@ -295,7 +319,7 @@ jobs:
             "builder": "create-docker-image-fast",
             "binaries": ["arkiv-node-int", "arkiv-cli-int", "arkiv-storaged"],
             "ref": "${{ github.ref_name }}",
-            "packages": ["arkiv-node-int:${{ github.sha }}"],
+            "packages": ${packages_json},
             "description": "Builds for integration tests with arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",
             "repository": "arkiv-network/arkiv-op-reth"
           }
