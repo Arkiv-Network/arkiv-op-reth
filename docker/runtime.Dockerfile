@@ -4,12 +4,11 @@ ARG UBUNTU_VERSION=26.04
 FROM ubuntu:${UBUNTU_VERSION}
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && update-ca-certificates \
     && groupadd --system docker \
     && useradd --system --gid docker --create-home --home-dir /home/docker --shell /usr/sbin/nologin docker \
     && rm -rf /var/lib/apt/lists/*
-
 
 RUN curl -sL https://github.com/foundry-rs/foundry/releases/download/v1.7.0/foundry_v1.7.0_linux_amd64.tar.gz | tar -xz \
   && mv forge cast anvil chisel /usr/local/bin/
