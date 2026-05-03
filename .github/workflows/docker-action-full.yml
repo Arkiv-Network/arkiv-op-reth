@@ -28,8 +28,10 @@ on:
         options: [ 'true', 'false' ]
 
 permissions:
-  contents: read
+  contents: write
   packages: write
+  id-token: write
+  attestations: write
 
 env:
   REGISTRY: ghcr.io
@@ -150,23 +152,36 @@ jobs:
           name: arkiv-storaged-binaries
           path: /tmp/arkiv-storaged
 
-      - name: Pack and upload binaries
-        env:
-          TRACKER_BACKEND_URL: ${{ secrets.TRACKER_BACKEND_URL }}
+      - name: Pack binaries
+        id: pack
         run: |
           set -euo pipefail
 
-          artifact_name="arkiv-op-reth-production-linux-amd64"
-          archive="${RUNNER_TEMP}/${artifact_name}-${GITHUB_SHA}.tar.xz"
           staging_dir="${RUNNER_TEMP}/artifact-upload"
-
           mkdir -p "$staging_dir"
           cp /tmp/arkiv-binaries/arkiv-node "$staging_dir/arkiv-node"
           cp /tmp/arkiv-binaries/arkiv-cli "$staging_dir/arkiv-cli"
           cp /tmp/arkiv-storaged/arkiv-storaged "$staging_dir/arkiv-storaged"
           chmod +x "$staging_dir"/*
 
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            archive_basename="arkiv-op-reth-${GITHUB_REF_NAME}-linux-amd64.tar.xz"
+          else
+            archive_basename="arkiv-op-reth-production-linux-amd64-${GITHUB_SHA}.tar.xz"
+          fi
+          archive="${RUNNER_TEMP}/${archive_basename}"
+
           tar -cJf "$archive" -C "$staging_dir" arkiv-node arkiv-cli arkiv-storaged
+
+          echo "archive=${archive}" >> "$GITHUB_OUTPUT"
+          echo "archive_basename=${archive_basename}" >> "$GITHUB_OUTPUT"
+          echo "staging_dir=${staging_dir}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload binaries to custom tracker
+        env:
+          TRACKER_BACKEND_URL: ${{ secrets.TRACKER_BACKEND_URL }}
+        run: |
+          set -euo pipefail
 
           curl --fail --show-error --silent \
             -X POST \
@@ -176,9 +191,24 @@ jobs:
             -F "binaries=arkiv-node" \
             -F "binaries=arkiv-cli" \
             -F "binaries=arkiv-storaged" \
-            -F "name=${artifact_name}" \
+            -F "name=arkiv-op-reth-production-linux-amd64" \
             -F "description=Full production binary build for ${GITHUB_REF_NAME}" \
-            -F "file=@${archive};type=application/x-xz"
+            -F "file=@${{ steps.pack.outputs.archive }};type=application/x-xz"
+
+      - name: Generate artifact attestation
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ steps.pack.outputs.staging_dir }}/*
+
+      - name: Upload binaries to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.pack.outputs.archive }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   create-docker-image-full:
     runs-on: ubuntu-latest
