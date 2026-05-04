@@ -21,3 +21,6 @@ target/
 AGENTS.override.md
 
 build-artifacts
+
+# Working dir for justfile / demo recipes
+tmp/
