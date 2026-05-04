@@ -284,7 +284,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Notify about release
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           TRACKER_BACKEND_URL: ${{ secrets.TRACKER_BACKEND_URL }}
         run: |
@@ -297,7 +296,7 @@ jobs:
             "builder": "create-docker-image-full-x86",
             "binaries": ["arkiv-node", "arkiv-cli", "arkiv-storaged"],
             "commit": "${{ github.sha }}",
-            "tag": "${{ github.ref_name }}",
+            "ref": "${{ github.ref }}",
             "packages": ["arkiv-node:${{ github.sha }}-amd64"],
             "description": "Production image build with (amd64) arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",
             "repository": "arkiv-network/arkiv-op-reth"
@@ -378,7 +377,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Notify about release
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           TRACKER_BACKEND_URL: ${{ secrets.TRACKER_BACKEND_URL }}
         run: |
@@ -391,7 +389,7 @@ jobs:
             "builder": "create-docker-image-dev-full-amd",
             "binaries": ["arkiv-node", "arkiv-cli", "arkiv-storaged"],
             "commit": "${{ github.sha }}",
-            "tag": "${{ github.ref_name }}",
+            "ref": "${{ github.ref }}",
             "packages": ["arkiv-node-dev:${{ github.sha }}-amd64"],
             "description": "Production dev image (amd64, bundled bootstrap) with arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",
             "repository": "arkiv-network/arkiv-op-reth"

@@ -286,7 +286,6 @@ jobs:
             FOUNDRY_ARCH=arm64
 
       - name: Notify about release
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           TRACKER_BACKEND_URL: ${{ secrets.TRACKER_BACKEND_URL }}
         run: |
@@ -299,7 +298,7 @@ jobs:
             "builder": "create-docker-image-full-arm",
             "binaries": ["arkiv-node", "arkiv-cli", "arkiv-storaged"],
             "commit": "${{ github.sha }}",
-            "tag": "${{ github.ref_name }}",
+            "ref": "${{ github.ref }}",
             "packages": ["arkiv-node:${{ github.sha }}-arm64"],
             "description": "Production image build (arm64) with arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",
             "repository": "arkiv-network/arkiv-op-reth"
@@ -382,7 +381,6 @@ jobs:
             FOUNDRY_ARCH=arm64
 
       - name: Notify about release
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           TRACKER_BACKEND_URL: ${{ secrets.TRACKER_BACKEND_URL }}
         run: |
@@ -395,7 +393,7 @@ jobs:
             "builder": "create-docker-image-dev-full-arm",
             "binaries": ["arkiv-node", "arkiv-cli", "arkiv-storaged"],
             "commit": "${{ github.sha }}",
-            "tag": "${{ github.ref_name }}",
+            "ref": "${{ github.ref }}",
             "packages": ["arkiv-node-dev:${{ github.sha }}-arm64"],
             "description": "Production dev image (arm64, bundled bootstrap) with arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",
             "repository": "arkiv-network/arkiv-op-reth"
