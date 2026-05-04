@@ -17,19 +17,19 @@ fi
 if [ -n "${ARKIV_NODE_CLI:-}" ]; then
     echo "[dev-entrypoint] using ARKIV_NODE_CLI override: ${ARKIV_NODE_CLI}"
     exec sh -c "exec arkiv-node ${ARKIV_NODE_CLI}"
+else
+    exec arkiv-node \
+        node \
+        --chain "$GENESIS" \
+        --http \
+        --http.addr 0.0.0.0 \
+        --http.port 8545 \
+        --http.api eth,net,web3,debug \
+        --http.corsdomain '*' \
+        --ws \
+        --ws.addr 0.0.0.0 \
+        --ws.port 8546 \
+        --ws.api eth,net,web3,debug \
+        --ws.origins '*' \
+        --dev
 fi
-
-exec arkiv-node \
-    node \
-    --chain "$GENESIS" \
-    --http \
-    --http.addr 0.0.0.0 \
-    --http.port 8545 \
-    --http.api eth,net,web3,debug,arkiv \
-    --http.corsdomain '*' \
-    --ws \
-    --ws.addr 0.0.0.0 \
-    --ws.port 8546 \
-    --ws.api eth,net,web3,debug,golembase,arkiv \
-    --ws.origins '*' \
-    --dev
