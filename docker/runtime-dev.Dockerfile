@@ -3,6 +3,8 @@
 ARG UBUNTU_VERSION=26.04
 FROM ubuntu:${UBUNTU_VERSION}
 
+ARG FOUNDRY_ARCH=amd64
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && update-ca-certificates \
@@ -10,7 +12,7 @@ RUN apt-get update \
     && useradd --uid 714 --gid docker --create-home --home-dir /home/docker --shell /usr/sbin/nologin docker \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -sL https://github.com/foundry-rs/foundry/releases/download/v1.7.0/foundry_v1.7.0_linux_amd64.tar.gz | tar -xz \
+RUN curl -sL https://github.com/foundry-rs/foundry/releases/download/v1.7.0/foundry_v1.7.0_linux_${FOUNDRY_ARCH}.tar.gz | tar -xz \
   && mv forge cast anvil chisel /usr/local/bin/
 
 COPY --chmod=0755 build-artifacts/arkiv-node /usr/local/bin/arkiv-node
