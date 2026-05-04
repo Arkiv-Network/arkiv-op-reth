@@ -43,5 +43,9 @@ else
         --ws.api eth,net,web3,debug \
         --ws.origins '*' \
         --dev.block-time 2s \
-        --dev
+        --dev \
+        --arkiv-storaged-path=/usr/local/bin/arkiv-storaged \
+        --arkiv-storaged-args="--chain-addr=0.0.0.0:2704 --query-addr=0.0.0.0:2705" \
+        --arkiv.db-url=http://127.0.0.1:2704 \
+        --arkiv.query-url=http://127.0.0.1:2705
 fi
