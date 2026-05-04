@@ -4,14 +4,24 @@ set -euo pipefail
 
 GENESIS="${ARKIV_DEV_GENESIS:-/home/docker/genesis.json}"
 CHAINSPEC_TEMPLATE="${ARKIV_DEV_CHAINSPEC:-/opt/arkiv/dev.base.json}"
+DATADIR="${ARKIV_DEV_DATADIR:-/home/docker/.local/share/arkiv-node}"
 
-if [ ! -f "$GENESIS" ] || [ "${ARKIV_DEV_FRESH:-false}" = "true" ]; then
+if [ "${ARKIV_DEV_USE_EXISTING_GENESIS:-false}" = "true" ] && [ -f "$GENESIS" ]; then
+    echo "[dev-entrypoint] existing genesis at ${GENESIS} - skipping bootstrap"
+else
+    if [ -z "$DATADIR" ] || [ "$DATADIR" = "/" ]; then
+        echo "[dev-entrypoint] refusing to delete unsafe data dir: ${DATADIR}" >&2
+        exit 1
+    fi
+
     echo "[dev-entrypoint] bootstrapping fresh dev chain at ${GENESIS}"
+    mkdir -p "$DATADIR"
+    echo "[dev-entrypoint] removing previous data dir contents at ${DATADIR}"
+    find "$DATADIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+
     cp "$CHAINSPEC_TEMPLATE" "$GENESIS"
     arkiv-cli inject-predeploy "$GENESIS"
-    arkiv-node init --chain "$GENESIS"
-else
-    echo "[dev-entrypoint] existing genesis at ${GENESIS} — skipping bootstrap (set ARKIV_DEV_FRESH=true to recreate)"
+    arkiv-node init --chain "$GENESIS" --datadir "$DATADIR"
 fi
 
 if [ -n "${ARKIV_NODE_CLI:-}" ]; then
@@ -20,6 +30,7 @@ if [ -n "${ARKIV_NODE_CLI:-}" ]; then
 else
     exec arkiv-node \
         node \
+        --datadir "$DATADIR" \
         --chain "$GENESIS" \
         --http \
         --http.addr 0.0.0.0 \
@@ -31,5 +42,6 @@ else
         --ws.port 8546 \
         --ws.api eth,net,web3,debug \
         --ws.origins '*' \
+        --dev.block-time 2s \
         --dev
 fi
