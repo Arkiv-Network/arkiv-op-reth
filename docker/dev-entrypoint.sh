@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+if [ "${1:-}" = "fund-account" ]; then
+    exec /usr/local/bin/fund-account.sh "$@"
+fi
+
 GENESIS="${ARKIV_DEV_GENESIS:-/home/docker/genesis.json}"
 CHAINSPEC_TEMPLATE="${ARKIV_DEV_CHAINSPEC:-/opt/arkiv/dev.base.json}"
 DATADIR="${ARKIV_DEV_DATADIR:-/home/docker/.local/share/arkiv-node}"
