@@ -303,7 +303,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Notify about release
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           TRACKER_BACKEND_URL: ${{ secrets.TRACKER_BACKEND_URL }}
         run: |
@@ -316,7 +315,7 @@ jobs:
             "builder": "create-docker-image-fast",
             "binaries": ["arkiv-node-int", "arkiv-cli-int", "arkiv-storaged"],
             "commit": "${{ github.sha }}",
-            "tag": "${{ github.ref_name }}",
+            "ref": "${{ github.ref }}",
             "packages": ["arkiv-node-int:${{ github.sha }}"],
             "description": "Builds for integration tests with arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",
             "repository": "arkiv-network/arkiv-op-reth"
@@ -360,11 +359,12 @@ jobs:
           mkdir -p docker-context/build-artifacts docker-context/chainspec docker-context/docker
           cp docker/runtime-dev.Dockerfile docker-context/Dockerfile
           cp docker/dev-entrypoint.sh docker-context/docker/dev-entrypoint.sh
+          cp docker/fund-account.sh docker-context/docker/fund-account.sh
           cp chainspec/dev.base.json docker-context/chainspec/dev.base.json
           cp /tmp/arkiv-binaries/arkiv-node docker-context/build-artifacts/arkiv-node
           cp /tmp/arkiv-binaries/arkiv-cli docker-context/build-artifacts/arkiv-cli
           cp /tmp/arkiv-storaged/arkiv-storaged docker-context/build-artifacts/arkiv-storaged
-          chmod +x docker-context/build-artifacts/* docker-context/docker/dev-entrypoint.sh
+          chmod +x docker-context/build-artifacts/* docker-context/docker/dev-entrypoint.sh docker-context/docker/fund-account.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -396,7 +396,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Notify about release
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           TRACKER_BACKEND_URL: ${{ secrets.TRACKER_BACKEND_URL }}
         run: |
@@ -409,7 +408,7 @@ jobs:
             "builder": "create-docker-image-dev-fast",
             "binaries": ["arkiv-node-int", "arkiv-cli-int", "arkiv-storaged"],
             "commit": "${{ github.sha }}",
-            "tag": "${{ github.ref_name }}",
+            "ref": "${{ github.ref }}",
             "packages": ["arkiv-node-dev-int:${{ github.sha }}"],
             "description": "Dev integration image (bundled bootstrap) with arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",
             "repository": "arkiv-network/arkiv-op-reth"

@@ -1,4 +1,4 @@
-name: Docker Image (Production)
+name: Docker Image (Production AMD64)
 
 on:
   push:
@@ -40,7 +40,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
@@ -91,11 +91,11 @@ jobs:
       - name: Upload binaries
         uses: actions/upload-artifact@v7
         with:
-          name: arkiv-binaries
+          name: arkiv-binaries-amd64
           path: build-artifacts
 
   build-storaged:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
@@ -131,11 +131,11 @@ jobs:
       - name: Upload arkiv-storaged binary
         uses: actions/upload-artifact@v7
         with:
-          name: arkiv-storaged-binaries
+          name: arkiv-storaged-binaries-amd64
           path: arkiv-storage-service/bin/arkiv-storaged
 
   upload-binary-artifact:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - build
       - build-storaged
@@ -144,13 +144,13 @@ jobs:
       - name: Download built binaries
         uses: actions/download-artifact@v8
         with:
-          name: arkiv-binaries
+          name: arkiv-binaries-amd64
           path: /tmp/arkiv-binaries
 
       - name: Download arkiv-storaged binary
         uses: actions/download-artifact@v8
         with:
-          name: arkiv-storaged-binaries
+          name: arkiv-storaged-binaries-amd64
           path: /tmp/arkiv-storaged
 
       - name: Pack binaries
@@ -212,7 +212,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   create-docker-image-full:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - build
       - build-storaged
@@ -235,13 +235,13 @@ jobs:
       - name: Download built binaries
         uses: actions/download-artifact@v8
         with:
-          name: arkiv-binaries
+          name: arkiv-binaries-amd64
           path: /tmp/arkiv-binaries
 
       - name: Download arkiv-storaged binary
         uses: actions/download-artifact@v8
         with:
-          name: arkiv-storaged-binaries
+          name: arkiv-storaged-binaries-amd64
           path: /tmp/arkiv-storaged
 
       - name: Prepare Docker context
@@ -269,21 +269,21 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/arkiv-network/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=${{ github.sha }}
-            type=ref,event=tag
-            type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ github.sha }}-amd64
+            type=ref,event=tag,suffix=-amd64
+            type=raw,value=latest-amd64,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Build and push production Docker image
         uses: docker/build-push-action@v6
         with:
           context: docker-context
           file: docker-context/Dockerfile
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Notify about release
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           TRACKER_BACKEND_URL: ${{ secrets.TRACKER_BACKEND_URL }}
         run: |
@@ -293,18 +293,18 @@ jobs:
             "${TRACKER_BACKEND_URL}/release/publish" \
             --data-binary @- <<EOF
           {
-            "builder": "create-docker-image-full",
+            "builder": "create-docker-image-full-x86",
             "binaries": ["arkiv-node", "arkiv-cli", "arkiv-storaged"],
             "commit": "${{ github.sha }}",
-            "tag": "${{ github.ref_name }}",
-            "packages": ["arkiv-node:${{ github.sha }}"],
-            "description": "Production image build with arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",
+            "ref": "${{ github.ref }}",
+            "packages": ["arkiv-node:${{ github.sha }}-amd64"],
+            "description": "Production image build with (amd64) arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",
             "repository": "arkiv-network/arkiv-op-reth"
           }
           EOF
 
   create-docker-image-dev-full:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - build
       - build-storaged
@@ -326,13 +326,13 @@ jobs:
       - name: Download built binaries
         uses: actions/download-artifact@v8
         with:
-          name: arkiv-binaries
+          name: arkiv-binaries-amd64
           path: /tmp/arkiv-binaries
 
       - name: Download arkiv-storaged binary
         uses: actions/download-artifact@v8
         with:
-          name: arkiv-storaged-binaries
+          name: arkiv-storaged-binaries-amd64
           path: /tmp/arkiv-storaged
 
       - name: Prepare Docker context
@@ -340,11 +340,12 @@ jobs:
           mkdir -p docker-context/build-artifacts docker-context/chainspec docker-context/docker
           cp docker/runtime-dev.Dockerfile docker-context/Dockerfile
           cp docker/dev-entrypoint.sh docker-context/docker/dev-entrypoint.sh
+          cp docker/fund-account.sh docker-context/docker/fund-account.sh
           cp chainspec/dev.base.json docker-context/chainspec/dev.base.json
           cp /tmp/arkiv-binaries/arkiv-node docker-context/build-artifacts/arkiv-node
           cp /tmp/arkiv-binaries/arkiv-cli docker-context/build-artifacts/arkiv-cli
           cp /tmp/arkiv-storaged/arkiv-storaged docker-context/build-artifacts/arkiv-storaged
-          chmod +x docker-context/build-artifacts/* docker-context/docker/dev-entrypoint.sh
+          chmod +x docker-context/build-artifacts/* docker-context/docker/dev-entrypoint.sh docker-context/docker/fund-account.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -362,21 +363,21 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/arkiv-network/${{ env.IMAGE_NAME_DEV }}
           tags: |
-            type=raw,value=${{ github.sha }}
-            type=ref,event=tag
-            type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ github.sha }}-amd64
+            type=ref,event=tag,suffix=-amd64
+            type=raw,value=latest-amd64,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Build and push production dev Docker image
         uses: docker/build-push-action@v6
         with:
           context: docker-context
           file: docker-context/Dockerfile
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Notify about release
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           TRACKER_BACKEND_URL: ${{ secrets.TRACKER_BACKEND_URL }}
         run: |
@@ -386,12 +387,12 @@ jobs:
             "${TRACKER_BACKEND_URL}/release/publish" \
             --data-binary @- <<EOF
           {
-            "builder": "create-docker-image-dev-full",
+            "builder": "create-docker-image-dev-full-amd",
             "binaries": ["arkiv-node", "arkiv-cli", "arkiv-storaged"],
             "commit": "${{ github.sha }}",
-            "tag": "${{ github.ref_name }}",
-            "packages": ["arkiv-node-dev:${{ github.sha }}"],
-            "description": "Production dev image (bundled bootstrap) with arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",
+            "ref": "${{ github.ref }}",
+            "packages": ["arkiv-node-dev:${{ github.sha }}-amd64"],
+            "description": "Production dev image (amd64, bundled bootstrap) with arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",
             "repository": "arkiv-network/arkiv-op-reth"
           }
           EOF
