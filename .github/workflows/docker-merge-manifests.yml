@@ -72,11 +72,35 @@ jobs:
         run: |
           set -euo pipefail
 
+          wait_for_image() {
+            local image_ref="$1"
+            local attempts=20
+            local delay=60
+
+            for attempt in $(seq 1 "${attempts}"); do
+              if docker buildx imagetools inspect "${image_ref}" >/dev/null 2>&1; then
+                echo "Found ${image_ref}"
+                return 0
+              fi
+
+              if [[ "${attempt}" == "${attempts}" ]]; then
+                echo "Timed out waiting for ${image_ref} after $((attempts * delay / 60)) minutes" >&2
+                return 1
+              fi
+
+              echo "Waiting for ${image_ref} to appear (${attempt}/${attempts}); retrying in $((delay / 60)) minute"
+              sleep "${delay}"
+            done
+          }
+
           merge_image() {
             local image="$1"
             local repo="${REGISTRY}/arkiv-network/${image}"
             local src_amd64="${repo}:${SHA}-amd64"
             local src_arm64="${repo}:${SHA}-arm64"
+
+            wait_for_image "${src_amd64}"
+            wait_for_image "${src_arm64}"
 
             echo "Merging ${src_amd64} + ${src_arm64}"
             for tag in ${TAGS}; do
