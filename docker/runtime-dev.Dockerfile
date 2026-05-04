@@ -26,4 +26,6 @@ WORKDIR /app
 
 USER docker
 
+EXPOSE 8545 8546
+
 ENTRYPOINT ["/usr/local/bin/dev-entrypoint.sh"]
