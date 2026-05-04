@@ -15,6 +15,13 @@ query_url  := "http://localhost:8545"
 dev_addr2  := "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 arkiv_cli  := env_var_or_default("ARKIV_CLI", "cargo run -p arkiv-cli --")
 
+# Repo-root tmp dir, regardless of where `just` is invoked from.
+# Always REPO_ROOT/tmp. The relative path `tmp/...` is what we pass to
+# arkiv-cli, since after `cd "$REPO"` (local) or under the docker mount
+# (`-v $REPO/tmp:/app/tmp`, container cwd `/app`) it resolves the same way.
+repo_root := parent_directory(justfile_directory())
+tmp_dir   := repo_root / "tmp"
+
 # ── internal helpers ─────────────────────────────────────────────────────────
 
 # Raw JSON-RPC query; prints pretty JSON
@@ -76,11 +83,12 @@ query-short-expiry:
 # Usage: just -f demo/justfile update 0xKEY
 update key:
     #!/usr/bin/env bash
-    mkdir -p ./tmp
-    cat > ./tmp/arkiv-demo-update.json << EOF
+    set -e
+    mkdir -p "{{ tmp_dir }}"
+    cat > "{{ tmp_dir }}/arkiv-demo-update.json" << EOF
     [{"type":"update","entityKey":"{{ key }}","contentType":"text/markdown","payload":"# Updated\nThis entity was updated during the demo."}]
     EOF
-    cd .. && {{ arkiv_cli }} batch ./tmp/arkiv-demo-update.json
+    cd "{{ repo_root }}" && {{ arkiv_cli }} batch tmp/arkiv-demo-update.json
 
 # Transfer an entity to a second account
 # Usage: just -f demo/justfile transfer 0xKEY
@@ -191,11 +199,11 @@ full:
 
     # ── 4. Update: KEY1 content type → text/markdown ───────────────────────
     sep "4 / 7  Update entity 1 (application/json → text/markdown)"
-    mkdir -p ../tmp
-    cat > ../tmp/arkiv-demo-update.json << EOF
+    mkdir -p "{{ tmp_dir }}"
+    cat > "{{ tmp_dir }}/arkiv-demo-update.json" << EOF
     [{"type":"update","entityKey":"$KEY1","contentType":"text/markdown","payload":"# Updated entity\nThis was changed during the demo."}]
     EOF
-    (cd "$REPO" && {{ arkiv_cli }} batch ./tmp/arkiv-demo-update.json 2>&1)
+    (cd "$REPO" && {{ arkiv_cli }} batch tmp/arkiv-demo-update.json 2>&1)
     sleep 2
     echo "After update — JSON entities (expect 2 now):"
     query '$contentType = "application/json"'

@@ -191,11 +191,8 @@ jobs:
           ARKIV_CLI: /tmp/arkiv-binaries/arkiv-cli
           ARKIV_STORAGED_PATH: /tmp/arkiv-storaged/arkiv-storaged
           ARKIV_STORAGED_ARGS: "--data-dir /tmp/arkiv-storaged-data"
-          TMPDIR: ./tmp
           E2E_KEEP_LOGS: "true"
-        run: |
-          mkdir -p ./tmp
-          just demo-e2e
+        run: just demo-e2e
 
       - name: Inspect demo logs
         if: always()

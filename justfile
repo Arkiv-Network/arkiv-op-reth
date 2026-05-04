@@ -5,6 +5,10 @@ rpc      := "http://localhost:8545"
 arkiv_node := env_var_or_default("ARKIV_NODE", "cargo run -p arkiv-node --")
 arkiv_cli  := env_var_or_default("ARKIV_CLI", "cargo run -p arkiv-cli --")
 
+# Single working dir for every recipe that needs scratch space.
+# Always REPO_ROOT/tmp so paths are predictable across local / docker / CI.
+tmp_dir := justfile_directory() / "tmp"
+
 # ── Build ────────────────────────────────────────────────────
 
 # Check workspace compiles
@@ -33,11 +37,11 @@ fmt:
 genesis:
     #!/usr/bin/env bash
     set -e
-    TMP=$(mktemp)
-    cp chainspec/dev.base.json "$TMP"
-    {{ arkiv_cli }} inject-predeploy "$TMP" 2>/dev/null
-    cat "$TMP"
-    rm -f "$TMP"
+    mkdir -p "{{ tmp_dir }}"
+    GENESIS="{{ tmp_dir }}/genesis.json"
+    cp chainspec/dev.base.json "$GENESIS"
+    {{ arkiv_cli }} inject-predeploy "$GENESIS" 2>/dev/null
+    cat "$GENESIS"
 
 # Run arkiv-node in dev mode against a freshly assembled Arkiv genesis.
 # Generates genesis -> init datadir -> launch node, all against the same
@@ -45,12 +49,14 @@ genesis:
 node-dev *args='':
     #!/usr/bin/env bash
     set -e
-    TMPDIR=$(mktemp -d)
-    GENESIS="$TMPDIR/genesis.json"
+    DATADIR="{{ tmp_dir }}/node-dev"
+    rm -rf "$DATADIR"
+    mkdir -p "$DATADIR"
+    GENESIS="$DATADIR/genesis.json"
     cp chainspec/dev.base.json "$GENESIS"
     {{ arkiv_cli }} inject-predeploy "$GENESIS"
-    {{ arkiv_node }} init --chain "$GENESIS" --datadir "$TMPDIR"
-    echo "datadir: $TMPDIR"
+    {{ arkiv_node }} init --chain "$GENESIS" --datadir "$DATADIR"
+    echo "datadir: $DATADIR"
     echo "genesis: $GENESIS"
     echo "registry: {{ registry }}"
     echo "dev account: {{ dev_addr }}"
@@ -58,12 +64,11 @@ node-dev *args='':
         --chain "$GENESIS" \
         --dev \
         --dev.block-time 2s \
-        --datadir "$TMPDIR" \
+        --datadir "$DATADIR" \
         --http \
         --arkiv.debug \
-        --log.file.directory "$TMPDIR/logs" \
+        --log.file.directory "$DATADIR/logs" \
         {{ args }}
-    rm -rf "$TMPDIR"
 
 # Run arkiv-node with custom args
 node *args='':
@@ -150,12 +155,14 @@ mock-entitydb port='9545':
 node-dev-jsonrpc *args='':
     #!/usr/bin/env bash
     set -e
-    TMPDIR=$(mktemp -d)
-    GENESIS="$TMPDIR/genesis.json"
+    DATADIR="{{ tmp_dir }}/node-dev-jsonrpc"
+    rm -rf "$DATADIR"
+    mkdir -p "$DATADIR"
+    GENESIS="$DATADIR/genesis.json"
     cp chainspec/dev.base.json "$GENESIS"
     {{ arkiv_cli }} inject-predeploy "$GENESIS"
-    {{ arkiv_node }} init --chain "$GENESIS" --datadir "$TMPDIR"
-    echo "datadir: $TMPDIR"
+    {{ arkiv_node }} init --chain "$GENESIS" --datadir "$DATADIR"
+    echo "datadir: $DATADIR"
     echo "genesis: $GENESIS"
     echo "registry: {{ registry }}"
     echo "dev account: {{ dev_addr }}"
@@ -164,12 +171,11 @@ node-dev-jsonrpc *args='':
         --chain "$GENESIS" \
         --dev \
         --dev.block-time 2s \
-        --datadir "$TMPDIR" \
+        --datadir "$DATADIR" \
         --http \
         --arkiv.db-url http://localhost:9545 \
-        --log.file.directory "$TMPDIR/logs" \
+        --log.file.directory "$DATADIR/logs" \
         {{ args }}
-    rm -rf "$TMPDIR"
 
 # ── arkiv-storaged ───────────────────────────────────────────
 
@@ -177,12 +183,14 @@ node-dev-jsonrpc *args='':
 node-dev-storaged *args='':
     #!/usr/bin/env bash
     set -e
-    TMPDIR=$(mktemp -d)
-    GENESIS="$TMPDIR/genesis.json"
+    DATADIR="{{ tmp_dir }}/node-dev-storaged"
+    rm -rf "$DATADIR"
+    mkdir -p "$DATADIR"
+    GENESIS="$DATADIR/genesis.json"
     cp chainspec/dev.base.json "$GENESIS"
     {{ arkiv_cli }} inject-predeploy "$GENESIS"
-    {{ arkiv_node }} init --chain "$GENESIS" --datadir "$TMPDIR"
-    echo "datadir: $TMPDIR"
+    {{ arkiv_node }} init --chain "$GENESIS" --datadir "$DATADIR"
+    echo "datadir: $DATADIR"
     echo "genesis: $GENESIS"
     echo "registry: {{ registry }}"
     echo "dev account: {{ dev_addr }}"
@@ -191,29 +199,25 @@ node-dev-storaged *args='':
         --chain "$GENESIS" \
         --dev \
         --dev.block-time 2s \
-        --datadir "$TMPDIR" \
+        --datadir "$DATADIR" \
         --http \
         --arkiv.db-url http://localhost:2704 \
         --arkiv.query-url http://localhost:2705 \
-        --log.file.directory "$TMPDIR/logs" \
+        --log.file.directory "$DATADIR/logs" \
         {{ args }} &
     NODE_PID=$!
     if [ -n "${ARKIV_NODE_PID_FILE:-}" ]; then
         printf '%s\n' "$NODE_PID" >"$ARKIV_NODE_PID_FILE"
     fi
     wait "$NODE_PID"
-    rm -rf "$TMPDIR"
 
 # Run the scripted demo against the local demo EntityDB/query shim.
 demo-e2e:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ -n "${TMPDIR:-}" ]; then
-        mkdir -p "$TMPDIR"
-        TMPDIR=$(mktemp -d "$TMPDIR/demo-e2e.XXXXXX")
-    else
-        TMPDIR=$(mktemp -d)
-    fi
+    TMPDIR="{{ tmp_dir }}/demo-e2e"
+    rm -rf "$TMPDIR"
+    mkdir -p "$TMPDIR"
     KEEP_LOGS="${E2E_KEEP_LOGS:-false}"
     ENTITYDB_LOG="$TMPDIR/demo-entitydb.log"
     NODE_LOG="$TMPDIR/arkiv-node.log"
