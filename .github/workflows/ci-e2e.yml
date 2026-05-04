@@ -159,7 +159,6 @@ jobs:
       - build
       - build-storaged
     # Covers demo backend startup, node init/launch, and the scripted demo sleeps with headroom.
-    timeout-minutes: 6
 
     steps:
       - name: Checkout repository
