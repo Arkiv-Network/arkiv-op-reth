@@ -1,0 +1,148 @@
+name: Docker Image (Merge ARM64 + AMD64 Manifests)
+
+on:
+  workflow_run:
+    workflows: ["Docker Image (Production ARM64)"]
+    types:
+      - completed
+
+permissions:
+  contents: read
+  packages: write
+  actions: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: arkiv-node
+  IMAGE_NAME_DEV: arkiv-node-dev
+  AMD64_WORKFLOW_NAME: "Docker Image (Production AMD64)"
+  WAIT_TIMEOUT_SECONDS: "3600"
+  WAIT_POLL_INTERVAL_SECONDS: "30"
+
+jobs:
+  merge:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Resolve merged tag list
+        id: tags
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          EVENT: ${{ github.event.workflow_run.event }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${SHA}" ]]; then
+            echo "Missing head_sha on triggering workflow_run" >&2
+            exit 1
+          fi
+
+          # Always tag the merged manifest with the commit SHA.
+          tags="${SHA}"
+
+          # On a push to main the per-arch builds also publish "latest-<arch>", so we
+          # mirror that by publishing a multi-arch "latest" manifest. For a tag push
+          # the upstream workflows publish "<tag>-<arch>" via metadata-action's
+          # type=ref,event=tag rule, in which case head_branch on the workflow_run
+          # event is the tag name itself (e.g. "v1.2.3").
+          if [[ "${EVENT}" == "push" && "${HEAD_BRANCH}" == "main" ]]; then
+            tags="${tags} latest"
+          elif [[ -n "${HEAD_BRANCH}" && "${HEAD_BRANCH}" != "main" ]]; then
+            tags="${tags} ${HEAD_BRANCH}"
+          fi
+
+          echo "Merged tags: ${tags}"
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for AMD64 docker workflow at the same SHA
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_NAME: ${{ env.AMD64_WORKFLOW_NAME }}
+          TIMEOUT: ${{ env.WAIT_TIMEOUT_SECONDS }}
+          INTERVAL: ${{ env.WAIT_POLL_INTERVAL_SECONDS }}
+        run: |
+          set -euo pipefail
+
+          deadline=$(( SECONDS + TIMEOUT ))
+          attempt=0
+          while :; do
+            attempt=$(( attempt + 1 ))
+            resp=$(curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100")
+
+            run_json=$(printf '%s' "$resp" \
+              | jq -c --arg name "$WORKFLOW_NAME" \
+                  '[.workflow_runs[] | select(.name == $name)] | sort_by(.run_number) | last')
+
+            if [[ -n "$run_json" && "$run_json" != "null" ]]; then
+              status=$(printf '%s' "$run_json" | jq -r '.status')
+              conclusion=$(printf '%s' "$run_json" | jq -r '.conclusion')
+              run_id=$(printf '%s' "$run_json" | jq -r '.id')
+              echo "[attempt ${attempt}] AMD64 run id=${run_id} status=${status} conclusion=${conclusion}"
+              if [[ "$status" == "completed" ]]; then
+                if [[ "$conclusion" == "success" ]]; then
+                  echo "AMD64 workflow succeeded; proceeding to merge."
+                  exit 0
+                fi
+                echo "AMD64 workflow finished with conclusion=${conclusion}; aborting merge." >&2
+                exit 1
+              fi
+            else
+              echo "[attempt ${attempt}] AMD64 run not found yet for SHA=${SHA}"
+            fi
+
+            if [[ $SECONDS -ge $deadline ]]; then
+              echo "Timed out after ${TIMEOUT}s waiting for AMD64 workflow at SHA=${SHA}" >&2
+              exit 1
+            fi
+            sleep "${INTERVAL}"
+          done
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge per-arch images into multi-arch manifests
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          IMAGE_NAME_DEV: ${{ env.IMAGE_NAME_DEV }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          TAGS: ${{ steps.tags.outputs.tags }}
+        run: |
+          set -euo pipefail
+
+          merge_image() {
+            local image="$1"
+            local repo="${REGISTRY}/arkiv-network/${image}"
+            local src_amd64="${repo}:${SHA}-amd64"
+            local src_arm64="${repo}:${SHA}-arm64"
+
+            echo "Merging ${src_amd64} + ${src_arm64}"
+            for tag in ${TAGS}; do
+              local dst="${repo}:${tag}"
+              echo "  -> ${dst}"
+              docker buildx imagetools create -t "${dst}" "${src_amd64}" "${src_arm64}"
+            done
+
+            echo "Resulting manifests:"
+            for tag in ${TAGS}; do
+              docker buildx imagetools inspect "${repo}:${tag}" || true
+            done
+          }
+
+          merge_image "${IMAGE_NAME}"
+          merge_image "${IMAGE_NAME_DEV}"
