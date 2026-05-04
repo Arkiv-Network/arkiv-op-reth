@@ -34,6 +34,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: arkiv-node-int
+  IMAGE_NAME_DEV: arkiv-node-dev-int
   ARKIV_NODE_IMAGE: ghcr.io/arkiv-network/arkiv-node-int:${{ github.sha }}
 
 jobs:
@@ -319,6 +320,100 @@ jobs:
             "tag": "${{ github.ref_name }}",
             "packages": ["arkiv-node-int:${{ github.sha }}"],
             "description": "Builds for integration tests with arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",
+            "repository": "arkiv-network/arkiv-op-reth"
+          }
+          EOF
+
+  create-docker-image-dev-fast:
+    runs-on: ubuntu-latest
+    needs:
+      - build
+      - build-storaged
+    timeout-minutes: 6
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Resolve arkiv-storage-service ref
+        id: storaged_ref
+        run: |
+          ref=$(tr -d '[:space:]' < storaged/ref.txt)
+          if [ -z "$ref" ]; then
+            echo "storaged/ref.txt is empty" >&2
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Download built binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: arkiv-binaries
+          path: /tmp/arkiv-binaries
+
+      - name: Download arkiv-storaged binary
+        uses: actions/download-artifact@v8
+        with:
+          name: arkiv-storaged-binaries
+          path: /tmp/arkiv-storaged
+
+      - name: Prepare Docker context
+        run: |
+          mkdir -p docker-context/build-artifacts docker-context/chainspec docker-context/docker
+          cp docker/runtime-dev.Dockerfile docker-context/Dockerfile
+          cp docker/dev-entrypoint.sh docker-context/docker/dev-entrypoint.sh
+          cp chainspec/dev.base.json docker-context/chainspec/dev.base.json
+          cp /tmp/arkiv-binaries/arkiv-node docker-context/build-artifacts/arkiv-node
+          cp /tmp/arkiv-binaries/arkiv-cli docker-context/build-artifacts/arkiv-cli
+          cp /tmp/arkiv-storaged/arkiv-storaged docker-context/build-artifacts/arkiv-storaged
+          chmod +x docker-context/build-artifacts/* docker-context/docker/dev-entrypoint.sh
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/arkiv-network/${{ env.IMAGE_NAME_DEV }}
+          tags: |
+            type=raw,value=${{ github.sha }}
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Build and push integration dev Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker-context
+          file: docker-context/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Notify about release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          TRACKER_BACKEND_URL: ${{ secrets.TRACKER_BACKEND_URL }}
+        run: |
+          curl --fail --show-error --silent \
+            -X POST \
+            -H "Content-Type: application/json" \
+            "${TRACKER_BACKEND_URL}/release/publish" \
+            --data-binary @- <<EOF
+          {
+            "builder": "create-docker-image-dev-fast",
+            "binaries": ["arkiv-node-int", "arkiv-cli-int", "arkiv-storaged"],
+            "commit": "${{ github.sha }}",
+            "tag": "${{ github.ref_name }}",
+            "packages": ["arkiv-node-dev-int:${{ github.sha }}"],
+            "description": "Dev integration image (bundled bootstrap) with arkiv-storaged:${{ steps.storaged_ref.outputs.ref }}",
             "repository": "arkiv-network/arkiv-op-reth"
           }
           EOF

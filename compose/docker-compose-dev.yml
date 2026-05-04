@@ -1,0 +1,27 @@
+
+
+services:
+  arkiv-node:
+    image: ${ARKIV_NODE_DEV_IMAGE:-ghcr.io/arkiv-network/arkiv-node-dev}
+    volumes:
+      - reth:/home/docker/.local/share/reth
+      - storaged:/home/docker/.arkiv-storaged
+    environment:
+      ARKIV_DEV_FRESH: ${ARKIV_DEV_FRESH:-false}
+    command: >
+      node
+      --dev
+      --dev.block-time=1s
+      --chain=/home/docker/genesis.json
+      --http
+      --http.addr=0.0.0.0
+      --arkiv-storaged-path=/usr/local/bin/arkiv-storaged
+      --arkiv-storaged-args="--chain-addr=0.0.0.0:2704 --query-addr=0.0.0.0:2705"
+      --arkiv.db-url=http://127.0.0.1:2704
+      --arkiv.query-url=http://127.0.0.1:2705
+    ports:
+      - "127.0.0.1:8545:8545"
+
+volumes:
+  reth:
+  storaged:
