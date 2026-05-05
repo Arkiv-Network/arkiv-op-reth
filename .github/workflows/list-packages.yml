@@ -11,38 +11,94 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: List all container packages and tags
+      - name: List all container packages and tags with size and date
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ORG: arkiv-network
         run: |
           set -euo pipefail
 
-          echo "=== Container packages for ${ORG} ==="
+          python3 - <<'PYEOF'
+import json, os, subprocess, urllib.request, urllib.parse, base64
 
-          package_names=(
-            arkiv-node-int
-            arkiv-node-dev
-            arkiv-node
-            arkiv-node-dev-int
-          )
+ORG = os.environ['ORG']
+GH_TOKEN = os.environ['GH_TOKEN']
 
-          for package in "${package_names[@]}"; do
-            echo ""
-            echo "Package: ghcr.io/${ORG}/${package}"
+package_names = [
+    'arkiv-node-int',
+    'arkiv-node-dev',
+    'arkiv-node',
+    'arkiv-node-dev-int',
+]
 
-            encoded=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "${package}")
+def gh_api_get(path):
+    result = subprocess.run(
+        ['gh', 'api', '--paginate', path],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        return []
+    try:
+        return json.loads(result.stdout)
+    except Exception:
+        return []
 
-            tags=$(gh api --paginate \
-              "/orgs/${ORG}/packages/container/${encoded}/versions" \
-              --jq '[.[].metadata.container.tags[]] | sort | .[]' \
-              2>/dev/null || true)
+def get_ghcr_token(org, package):
+    url = f'https://ghcr.io/token?service=ghcr.io&scope=repository:{org}/{package}:pull'
+    creds = base64.b64encode(f'token:{GH_TOKEN}'.encode()).decode()
+    req = urllib.request.Request(url, headers={'Authorization': f'Basic {creds}'})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.load(r)
+        return data.get('token', data.get('access_token', ''))
+    except Exception:
+        return ''
 
-            if [[ -z "${tags}" ]]; then
-              echo "  (no tagged versions)"
-            else
-              while IFS= read -r tag; do
-                echo "  - ${tag}"
-              done <<< "${tags}"
-            fi
-          done
+def get_manifest_size(org, package, tag, token):
+    url = f'https://ghcr.io/v2/{org}/{package}/manifests/{tag}'
+    req = urllib.request.Request(url, headers={
+        'Authorization': f'Bearer {token}',
+        'Accept': 'application/vnd.docker.distribution.manifest.v2+json',
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            manifest = json.load(r)
+        layers = manifest.get('layers', [])
+        if layers:
+            return sum(l.get('size', 0) for l in layers)
+    except Exception:
+        pass
+    return None
+
+def fmt_size(n):
+    if n is None or n == 0:
+        return 'unknown'
+    for unit, div in [('GB', 1 << 30), ('MB', 1 << 20), ('KB', 1 << 10)]:
+        if n >= div:
+            return f'{n / div:.1f} {unit}'
+    return f'{n} B'
+
+print(f'=== Container packages for {ORG} ===')
+
+for package in package_names:
+    print(f'\nPackage: ghcr.io/{ORG}/{package}')
+    encoded = urllib.parse.quote(package, safe='')
+    versions = gh_api_get(f'/orgs/{ORG}/packages/container/{encoded}/versions')
+    tagged = [
+        v for v in versions
+        if v.get('metadata', {}).get('container', {}).get('tags')
+    ]
+    if not tagged:
+        print('  (no tagged versions)')
+        continue
+
+    token = get_ghcr_token(ORG, package)
+    tagged.sort(key=lambda v: v.get('created_at', ''), reverse=True)
+
+    for version in tagged:
+        tags = sorted(version['metadata']['container']['tags'])
+        date = version.get('created_at', '')[:10]
+        size = get_manifest_size(ORG, package, tags[0], token) if token else None
+        print(f'  - {", ".join(tags)}  size: {fmt_size(size)}  uploaded: {date}')
+
+PYEOF
