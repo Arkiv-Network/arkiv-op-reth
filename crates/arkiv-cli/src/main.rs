@@ -50,58 +50,35 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create an entity with a random payload.
+    /// Create an entity. Either `--payload` or `--random-payload` must be set.
     Create {
         /// Content type MIME string.
         #[arg(long, default_value = "application/octet-stream")]
         content_type: String,
 
-        /// Payload size in bytes (random data).
+        /// How long until the entity expires (e.g. "1h", "30m", "7d").
+        #[arg(long, default_value = "1h", value_parser = humantime::parse_duration)]
+        expires_in: Duration,
+
+        /// Payload bytes. Raw string by default; 0x-prefixed values are decoded as hex bytes.
+        /// Mutually exclusive with `--random-payload`.
+        #[arg(long)]
+        payload: Option<String>,
+
+        /// Generate a random payload of `--size` bytes instead of using `--payload`.
+        #[arg(long, default_value_t = false)]
+        random_payload: bool,
+
+        /// Random payload size in bytes (only used with `--random-payload`).
         #[arg(long, default_value = "256")]
         size: usize,
 
-        /// How long until the entity expires (e.g. "1h", "30m", "7d").
-        #[arg(long, default_value = "1h", value_parser = humantime::parse_duration)]
-        expires_in: Duration,
-    },
-    CreateEntity {
-        /// Content type MIME string.
-        #[arg(long, default_value = "application/octet-stream")]
-        content_type: String,
-
-        /// How long until the entity expires (e.g. "1h", "30m", "7d").
-        #[arg(long, default_value = "1h", value_parser = humantime::parse_duration)]
-        expires_in: Duration,
-
-        /// Payload bytes. Raw string by default; 0x-prefixed values are decoded as hex bytes.
-        #[arg(long)]
-        payload: String,
-
         /// Comma-separated attributes: name=value, name:string=value, name:uint=value, name:entityKey=0x...
         #[arg(long, default_value = "")]
         attributes: String,
     },
 
-    /// Update an existing entity with an explicit payload and attributes.
-    UpdateEntity {
-        /// Entity key to update.
-        #[arg(long)]
-        key: B256,
-
-        /// Content type MIME string.
-        #[arg(long, default_value = "application/octet-stream")]
-        content_type: String,
-
-        /// Payload bytes. Raw string by default; 0x-prefixed values are decoded as hex bytes.
-        #[arg(long)]
-        payload: String,
-
-        /// Comma-separated attributes: name=value, name:string=value, name:uint=value, name:entityKey=0x...
-        #[arg(long, default_value = "")]
-        attributes: String,
-    },
-
-    /// Update an existing entity with a new random payload.
+    /// Update an existing entity. Either `--payload` or `--random-payload` must be set.
     Update {
         /// Entity key to update.
         #[arg(long)]
@@ -111,9 +88,22 @@ enum Command {
         #[arg(long, default_value = "application/octet-stream")]
         content_type: String,
 
-        /// Payload size in bytes (random data).
+        /// Payload bytes. Raw string by default; 0x-prefixed values are decoded as hex bytes.
+        /// Mutually exclusive with `--random-payload`.
+        #[arg(long)]
+        payload: Option<String>,
+
+        /// Generate a random payload of `--size` bytes instead of using `--payload`.
+        #[arg(long, default_value_t = false)]
+        random_payload: bool,
+
+        /// Random payload size in bytes (only used with `--random-payload`).
         #[arg(long, default_value = "256")]
         size: usize,
+
+        /// Comma-separated attributes: name=value, name:string=value, name:uint=value, name:entityKey=0x...
+        #[arg(long, default_value = "")]
+        attributes: String,
     },
 
     /// Extend an entity's expiration.
@@ -643,6 +633,17 @@ fn parse_cli_entity_key_value(value: &str) -> Result<B256> {
         .map_err(|e| eyre::eyre!("invalid entityKey '{}': {}", value, e))
 }
 
+/// Resolve `--payload` / `--random-payload` / `--size` flags into raw bytes.
+/// Exactly one of `payload` or `random` must be set.
+fn resolve_cli_payload(payload: Option<&str>, random: bool, size: usize) -> Result<Bytes> {
+    match (payload, random) {
+        (Some(_), true) => bail!("--payload and --random-payload are mutually exclusive"),
+        (None, false) => bail!("either --payload or --random-payload must be provided"),
+        (Some(s), false) => parse_cli_payload(s),
+        (None, true) => Ok(random_payload(size)),
+    }
+}
+
 fn parse_cli_payload(payload: &str) -> Result<Bytes> {
     if let Some(hex) = payload.strip_prefix("0x") {
         if hex.is_empty() {
@@ -782,72 +783,24 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Create {
             content_type,
+            expires_in,
+            payload,
+            random_payload,
             size,
-            expires_in,
+            attributes,
         } => {
+            let resolved_payload = resolve_cli_payload(payload.as_deref(), random_payload, size)?;
+            let content_type = encode_mime128(&content_type)?;
+            let attributes = build_cli_attributes(&attributes, "create")?;
             let expires_at = expiry_block(&provider, expires_in, cli.block_time).await?;
             let op = Operation {
                 operationType: OP_CREATE,
                 entityKey: B256::ZERO,
-                payload: random_payload(size),
-                contentType: encode_mime128(&content_type)?,
-                attributes: vec![],
+                payload: resolved_payload,
+                contentType: content_type,
+                attributes,
                 expiresAt: expires_at,
                 newOwner: Address::ZERO,
-            };
-
-            let receipt = registry
-                .execute(vec![op])
-                .gas_price(cli.gas_price)
-                .send()
-                .await?
-                .get_receipt()
-                .await?;
-            println!("tx: {}", receipt.transaction_hash);
-            print_events(receipt.inner.logs());
-        }
-
-        Command::CreateEntity {
-            content_type,
-            expires_in,
-            payload,
-            attributes,
-        } => {
-            let expires_at = expiry_block(&provider, expires_in, cli.block_time).await?;
-            let op = Operation {
-                operationType: OP_CREATE,
-                entityKey: B256::ZERO,
-                payload: parse_cli_payload(&payload)?,
-                contentType: encode_mime128(&content_type)?,
-                attributes: build_cli_attributes(&attributes, "create-entity")?,
-                expiresAt: expires_at,
-                newOwner: Address::ZERO,
-            };
-
-            let receipt = registry
-                .execute(vec![op])
-                .gas_price(cli.gas_price)
-                .send()
-                .await?
-                .get_receipt()
-                .await?;
-            println!("tx: {}", receipt.transaction_hash);
-            print_events(receipt.inner.logs());
-        }
-
-        Command::UpdateEntity {
-            key,
-            content_type,
-            payload,
-            attributes,
-        } => {
-            let op = Operation {
-                operationType: OP_UPDATE,
-                entityKey: key,
-                payload: parse_cli_payload(&payload)?,
-                contentType: encode_mime128(&content_type)?,
-                attributes: build_cli_attributes(&attributes, "update-entity")?,
-                ..Default::default()
             };
 
             let receipt = registry
@@ -864,14 +817,18 @@ async fn main() -> Result<()> {
         Command::Update {
             key,
             content_type,
+            payload,
+            random_payload,
             size,
+            attributes,
         } => {
+            let resolved_payload = resolve_cli_payload(payload.as_deref(), random_payload, size)?;
             let op = Operation {
                 operationType: OP_UPDATE,
                 entityKey: key,
-                payload: random_payload(size),
+                payload: resolved_payload,
                 contentType: encode_mime128(&content_type)?,
-                attributes: vec![],
+                attributes: build_cli_attributes(&attributes, "update")?,
                 ..Default::default()
             };
 
