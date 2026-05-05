@@ -20,15 +20,12 @@ jobs:
 
           echo "=== Container packages for ${ORG} ==="
 
-          mapfile -t package_names < <(
-            gh api --paginate "/orgs/${ORG}/packages?package_type=container" \
-              --jq '.[].name'
+          package_names=(
+            arkiv-node-int
+            arkiv-node-dev
+            arkiv-node
+            arkiv-node-dev-int
           )
-
-          if [[ ${#package_names[@]} -eq 0 ]]; then
-            echo "No container packages found."
-            exit 0
-          fi
 
           for package in "${package_names[@]}"; do
             echo ""
