@@ -1,0 +1,50 @@
+name: List Packages (All Tags)
+
+on:
+  workflow_dispatch:
+    inputs:
+      remove_untagged_older_than_hours:
+        description: "Delete versions tagged only by commit older than this many hours (blank to skip pruning)"
+        required: false
+        default: ""
+  schedule:
+    # Daily at 03:17 UTC
+    - cron: "17 3 * * *"
+
+permissions:
+  packages: write
+
+env:
+  ORG: arkiv-network
+  # Hours to keep versions whose tags are only commit hashes. Used by the
+  # scheduled run; the manual run can override via the workflow input.
+  REMOVE_UNTAGGED_OLDER_THAN_HOURS: "72"
+
+jobs:
+  list-packages:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - arkiv-node
+          - arkiv-node-int
+          - arkiv-node-dev
+          - arkiv-node-dev-int
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: List (and optionally prune) ${{ matrix.package }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ORG: ${{ env.ORG }}
+          HOURS: ${{ github.event_name == 'workflow_dispatch' && inputs.remove_untagged_older_than_hours || env.REMOVE_UNTAGGED_OLDER_THAN_HOURS }}
+        run: |
+          set -euo pipefail
+          args=(list --package "${{ matrix.package }}")
+          if [[ -n "${HOURS}" ]]; then
+            args+=(--remove-untagged-older-than "${HOURS}")
+          fi
+          python3 .github/scripts/packages.py "${args[@]}"
