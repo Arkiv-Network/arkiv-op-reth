@@ -29,12 +29,13 @@ previous head — is exposed via view functions and emitted with every
 operation, giving downstream consumers a verifiable single-value witness
 of the chain's entity state.
 
-### 1.2 The off-chain indexer
+### 1.2 The off-chain DB (`arkiv-storage`)
 
-EntityDB is a Go service that consumes the calldata-only entity stream
-and serves indexed queries (by entity key, by owner, by attribute, …).
-It's the canonical reader; clients of the Arkiv chain talk to EntityDB,
-not directly to the contract.
+`arkiv-storage` (run as the `arkiv-storaged` daemon, referred to as
+EntityDB in the JSON-RPC wire format) is a Go service that consumes
+the calldata-only entity stream and serves queries against it (by
+entity key, by owner, by attribute, …). It's the canonical reader;
+clients of the Arkiv chain talk to it, not directly to the contract.
 
 ### 1.3 The role of this repository
 
@@ -91,8 +92,15 @@ A small library shared by both binaries. It owns:
 
 - The canonical predeploy address constant (`ENTITY_REGISTRY_ADDRESS =
   0x44…0044`).
-- The dev account constant (`DEV_ADDRESS`, the first hardhat-mnemonic
-  account).
+- The hardhat-compatible dev mnemonic (`ARKIV_DEV_MNEMONIC`),
+  `DEV_ADDRESS` (the first account derived from it), and
+  `ARKIV_DEV_ACCOUNT_COUNT` (currently `100`) — the number of accounts
+  derived from the mnemonic and pre-funded in the dev alloc. The first
+  20 indices match the well-known hardhat / foundry / anvil defaults.
+- `arkiv_dev_balance_wei()` — per-account dev balance (10,000 ETH).
+- `dev_signers(count)` / `dev_funding_alloc(count, balance_wei)` —
+  derive `PrivateKeySigner`s and `(Address, GenesisAccount)` pairs for
+  the first `count` mnemonic indices.
 - `deploy_creation_code(chain_id) -> Result<Bytes>` — runs
   `arkiv_bindings::ENTITY_REGISTRY_CREATION_CODE` through revm at the
   given chain ID and returns the resulting runtime bytecode. The chain ID
@@ -101,7 +109,8 @@ A small library shared by both binaries. It owns:
 - `predeploy_account(chain_id) -> Result<GenesisAccount>` — convenience
   for splicing into a `Genesis.alloc`.
 - `genesis_alloc(chain_id) -> Result<BTreeMap<Address, GenesisAccount>>`
-  — predeploy + dev account, suitable for self-contained dev chains.
+  — predeploy + the `ARKIV_DEV_ACCOUNT_COUNT` dev funding accounts;
+  suitable for self-contained dev chains.
 - Re-exports `alloy_genesis::{Genesis, GenesisAccount}` so consumers
   don't need a direct alloy-genesis dep.
 
@@ -117,11 +126,12 @@ hash even when the chainspec was assembled at recipe-time.
 
 The execution-client binary. It's a thin wrapper around
 `reth_optimism_cli::Cli`, parameterised over an `ArkivExt` clap struct
-that adds two flags on top of `RollupArgs`:
+that layers Arkiv-specific flags on top of `RollupArgs`:
 
 | Flag | Env | Purpose |
 |---|---|---|
-| `--arkiv.db-url <URL>` | `ARKIV_ENTITYDB_URL` | Enable ExEx (`JsonRpcStore` backend) + `arkiv_query` RPC proxy |
+| `--arkiv.db-url <URL>` | `ARKIV_ENTITYDB_URL` | Enable ExEx (`JsonRpcStore` backend) + `arkiv_*` RPC proxy. Used as the EntityDB write endpoint. |
+| `--arkiv.query-url <URL>` | `ARKIV_QUERY_URL` | EntityDB query-side endpoint for the read-path RPC proxy. Defaults to `--arkiv.db-url` when omitted. |
 | `--arkiv.debug` | — | Enable ExEx with `LoggingStore` (no RPC). Mutually exclusive with `--arkiv.db-url`. |
 | `--arkiv-storaged-path <PATH>` | `ARKIV_STORAGED_PATH` | Start arkiv-storaged as a supervised child process before EntityDB health checks. |
 | `--arkiv-storaged-args <ARGS>` | `ARKIV_STORAGED_ARGS` | Space-separated arguments passed to the supervised arkiv-storaged process. |
@@ -259,7 +269,9 @@ The operator command-line tool. Two distinct surfaces:
 | Subcommand | What it does |
 |---|---|
 | `create` | Mint an entity with a random payload + content type |
-| `update` | Replace an existing entity's payload |
+| `create-entity` | CREATE with explicit `--payload`, `--content-type`, and `--attributes` |
+| `update` | Replace an existing entity's payload (random bytes) |
+| `update-entity` | UPDATE with explicit `--payload`, `--content-type`, and `--attributes` |
 | `extend` | Push out an entity's expiry |
 | `transfer` | Hand ownership to another address |
 | `delete` | Owner-initiated removal |
@@ -286,11 +298,19 @@ This subcommand short-circuits before any signer/provider setup. It:
 
 1. Parses the input as a geth-format `Genesis`.
 2. Reads `config.chainId`.
-3. Calls `arkiv_genesis::deploy_creation_code(chain_id)` to mint the
-   matching runtime bytecode.
-4. Inserts a `GenesisAccount { code, .. }` at `ENTITY_REGISTRY_ADDRESS`,
-   warning if there's already an entry there.
+3. Calls `arkiv_genesis::genesis_alloc(chain_id)` to mint the matching
+   predeploy runtime bytecode plus the `ARKIV_DEV_ACCOUNT_COUNT`
+   mnemonic-derived dev accounts (each pre-funded with
+   `arkiv_dev_balance_wei`).
+4. Splices the resulting `(Address, GenesisAccount)` pairs into the
+   input's `alloc`, warning if an entry already exists at the
+   predeploy address.
 5. Writes the augmented JSON back (overwriting the input by default).
+
+Note: today the funding accounts are injected unconditionally — fine for
+dev, but in production this puts 100 well-known hardhat accounts into
+the genesis. A `--predeploy-only` (or split-command) follow-up is
+tracked separately.
 
 It works against *any* geth-format chainspec: a hand-crafted dev base, an
 op-deployer-produced production genesis, a snapshot dump from another
@@ -465,7 +485,7 @@ validation explodes.
     ...
   },
   "extraData": "0x000000000000000000",
-  "alloc": { "0xf39F…": { "balance": "0x21e19e0c9bab2400000" } }
+  "alloc": {}
 }
 ```
 
@@ -495,9 +515,10 @@ practice. We do better than `--dev` here.)
 
 ### 4.4 The injection step
 
-`chainspec/dev.base.json` does **not** contain the EntityRegistry
-predeploy. The predeploy is added via `arkiv-cli inject-predeploy` at
-recipe time, producing a complete chainspec on the fly:
+`chainspec/dev.base.json` ships with an empty `alloc` — no predeploy,
+no funded accounts. Both are added via `arkiv-cli inject-predeploy` at
+recipe time (it splices in `arkiv_genesis::genesis_alloc(chain_id)`,
+which is the predeploy plus the mnemonic-derived dev accounts):
 
 ```bash
 cp chainspec/dev.base.json $TMPDIR/genesis.json
@@ -527,10 +548,14 @@ op-reth init --chain ops/genesis.json --datadir ./data
 op-reth node --chain ops/genesis.json --datadir ./data
 ```
 
-`inject-predeploy` is intentionally generic: it doesn't care whether the
-input is a hand-crafted dev base or an op-deployer-produced production
-genesis. Its only job is to read `chainId`, mint matching bytecode, and
-splice it in.
+`inject-predeploy` works against any geth-format chainspec: a
+hand-crafted dev base, an op-deployer-produced production genesis, a
+snapshot dump from another node. The chain ID it reads from the input
+binds the predeploy's EIP-712 immutables, so the resulting bytecode is
+correct for that chain. As of today it also injects the
+`ARKIV_DEV_ACCOUNT_COUNT` mnemonic-derived dev accounts via the same
+`genesis_alloc` call (see §3.3.2) — convenient for dev, but the prod
+path needs a follow-up to suppress them.
 
 The longer-term option — contributing EntityRegistry to op-deployer's
 `L2Genesis.s.sol` so the standard tool produces it directly — is sketched
@@ -676,7 +701,7 @@ wire format end-to-end without involving the real Go EntityDB.
 | Decision                                      | Why |
 |-----------------------------------------------|---|
 | Predeploy at `0x44…0044`                      | Matches OP convention for system contracts; the address is a property of the chain, not the binary |
-| ExEx auto-activates via bytecode hash check   | Makes the binary a true drop-in op-reth; behavior is determined by chainspec content, not by which binary was launched |
+| ExEx requires explicit flag (`--arkiv.db-url` / `--arkiv.debug`) on top of bytecode hash check | Bytecode-only auto-activation silently fell back to `LoggingStore` in prod if EntityDB wiring was forgotten; the explicit flag forces a startup decision. With no flags the binary is still a true drop-in op-reth. |
 | Direct storage-slot reads for rolling hash    | Cheaper than `eth_call` (no EVM spin-up); coupling acceptable since we control both sides |
 | Path-A chainspec (full hardfork data in JSON) | Required for `op-reth init` and `op-reth node` to agree on genesis hash when reading the same JSON |
 | `inject-predeploy` as a separate post-process | Composes with op-deployer output rather than forking it; same tool serves dev and prod |
