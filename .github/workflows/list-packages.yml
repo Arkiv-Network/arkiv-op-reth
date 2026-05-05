@@ -1,0 +1,51 @@
+name: List Packages (All Tags)
+
+on:
+  push:
+
+permissions:
+  packages: read
+
+jobs:
+  list-packages:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: List all container packages and tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ORG: arkiv-network
+        run: |
+          set -euo pipefail
+
+          echo "=== Container packages for ${ORG} ==="
+
+          mapfile -t package_names < <(
+            gh api --paginate "/orgs/${ORG}/packages?package_type=container" \
+              --jq '.[].name'
+          )
+
+          if [[ ${#package_names[@]} -eq 0 ]]; then
+            echo "No container packages found."
+            exit 0
+          fi
+
+          for package in "${package_names[@]}"; do
+            echo ""
+            echo "Package: ghcr.io/${ORG}/${package}"
+
+            encoded=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "${package}")
+
+            tags=$(gh api --paginate \
+              "/orgs/${ORG}/packages/container/${encoded}/versions" \
+              --jq '[.[].metadata.container.tags[]] | sort | .[]' \
+              2>/dev/null || true)
+
+            if [[ -z "${tags}" ]]; then
+              echo "  (no tagged versions)"
+            else
+              while IFS= read -r tag; do
+                echo "  - ${tag}"
+              done <<< "${tags}"
+            fi
+          done
