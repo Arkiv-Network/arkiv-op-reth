@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
 """List and prune GHCR container packages for the Arkiv org.
 
-Reads `GH_TOKEN` from the environment (used both for `gh api` calls and to
-mint a GHCR registry pull token for manifest size lookups). The org defaults
-to `arkiv-network` and can be overridden via `--org` or the `ORG` env var.
+Reads `GH_TOKEN` from the environment for `gh api` calls. The org defaults to
+`arkiv-network` and can be overridden via `--org` or the `ORG` env var.
+
+Versions tagged only by commit hash (or untagged) are considered ephemeral and
+expire after `--lifetime-hours` (default 72). Listing always shows the time
+remaining; `--prune` opts into actually deleting expired versions.
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
 import datetime as dt
 import json
 import os
 import subprocess
 import sys
 import urllib.parse
-import urllib.request
 
 
 DEFAULT_ORG = "arkiv-network"
+DEFAULT_LIFETIME_HOURS = 72
 COMMIT_TAG_MIN_LEN = 7
 
 
@@ -47,51 +49,6 @@ def gh_api(path: str, method: str = "GET", paginate: bool = False) -> object:
         return None
 
 
-def get_ghcr_token(org: str, package: str, gh_token: str) -> str:
-    url = (
-        f"https://ghcr.io/token?service=ghcr.io"
-        f"&scope=repository:{org}/{package}:pull"
-    )
-    creds = base64.b64encode(f"token:{gh_token}".encode()).decode()
-    req = urllib.request.Request(url, headers={"Authorization": f"Basic {creds}"})
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            data = json.load(r)
-        return data.get("token", data.get("access_token", ""))
-    except Exception as exc:
-        sys.stderr.write(f"warn: failed to get ghcr token for {package}: {exc}\n")
-        return ""
-
-
-def get_manifest_size(org: str, package: str, tag: str, token: str) -> int | None:
-    url = f"https://ghcr.io/v2/{org}/{package}/manifests/{tag}"
-    req = urllib.request.Request(
-        url,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.docker.distribution.manifest.v2+json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            manifest = json.load(r)
-    except Exception:
-        return None
-    layers = manifest.get("layers", [])
-    if not layers:
-        return None
-    return sum(l.get("size", 0) for l in layers)
-
-
-def fmt_size(n: int | None) -> str:
-    if n is None or n == 0:
-        return "unknown"
-    for unit, div in [("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)]:
-        if n >= div:
-            return f"{n / div:.1f} {unit}"
-    return f"{n} B"
-
-
 def is_commit_tag(tag: str) -> bool:
     """Return True if `tag` looks like a git commit SHA (hex, len >= 7)."""
     if len(tag) < COMMIT_TAG_MIN_LEN:
@@ -112,6 +69,36 @@ def parse_created_at(value: str) -> dt.datetime | None:
         )
     except ValueError:
         return None
+
+
+def fmt_remaining(delta: dt.timedelta) -> str:
+    """Render a positive timedelta as e.g. '12h', '1h 30m', or '15m'."""
+    total_minutes = int(delta.total_seconds() // 60)
+    if total_minutes <= 0:
+        return "0m"
+    hours, minutes = divmod(total_minutes, 60)
+    if hours and minutes:
+        return f"{hours}h {minutes}m"
+    if hours:
+        return f"{hours}h"
+    return f"{minutes}m"
+
+
+def deletion_status(
+    tags: list[str],
+    created: dt.datetime | None,
+    lifetime: dt.timedelta,
+    now: dt.datetime,
+) -> str:
+    """Human-readable status describing whether/when a version will be deleted."""
+    if tags and not all(is_commit_tag(t) for t in tags):
+        return "tagged to release and won't be deleted"
+    if created is None:
+        return "deletion time unknown (missing created_at)"
+    remaining = (created + lifetime) - now
+    if remaining.total_seconds() <= 0:
+        return "eligible for deletion now"
+    return f"will be deleted in {fmt_remaining(remaining)}"
 
 
 def list_versions(org: str, package: str) -> list[dict]:
@@ -146,8 +133,13 @@ def delete_version(org: str, package: str, version_id: int) -> bool:
 def cmd_list(args: argparse.Namespace, gh_token: str) -> int:
     org = args.org
     package = args.package
+    lifetime = dt.timedelta(hours=args.lifetime_hours)
+    now = dt.datetime.now(dt.timezone.utc)
 
-    print(f"Package: ghcr.io/{org}/{package}")
+    print(
+        f"Package: ghcr.io/{org}/{package}  "
+        f"(commit-only tags expire after {args.lifetime_hours}h)"
+    )
     versions = list_versions(org, package)
     if not versions:
         print("  (no versions found)")
@@ -162,25 +154,30 @@ def cmd_list(args: argparse.Namespace, gh_token: str) -> int:
     if not tagged:
         print("  (no tagged versions)")
     else:
-        token = get_ghcr_token(org, package, gh_token)
         for version in tagged:
             tags = sorted(version["metadata"]["container"]["tags"])
+            created = parse_created_at(version.get("created_at", ""))
             date = version.get("created_at", "")[:10]
-            size = (
-                get_manifest_size(org, package, tags[0], token) if token else None
-            )
+            status = deletion_status(tags, created, lifetime, now)
             print(
-                f"  - {', '.join(tags)}  size: {fmt_size(size)}  uploaded: {date}"
+                f"  - {', '.join(tags)}  uploaded: {date}  ({status})"
             )
 
-    if args.remove_untagged_older_than is not None:
-        prune(org, package, versions, args.remove_untagged_older_than)
+    if args.prune:
+        prune(org, package, versions, lifetime, now)
 
     return 0
 
 
-def prune(org: str, package: str, versions: list[dict], hours: int) -> None:
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)
+def prune(
+    org: str,
+    package: str,
+    versions: list[dict],
+    lifetime: dt.timedelta,
+    now: dt.datetime,
+) -> None:
+    cutoff = now - lifetime
+    hours = int(lifetime.total_seconds() // 3600)
     print(
         f"\nPruning versions of {package} with no human tags older than "
         f"{hours}h (before {cutoff.isoformat()}):"
@@ -228,12 +225,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--package", required=True, help="Container package name (without org prefix)"
     )
     p_list.add_argument(
-        "--remove-untagged-older-than",
+        "--lifetime-hours",
         type=int,
         metavar="HOURS",
-        default=None,
+        default=DEFAULT_LIFETIME_HOURS,
         help=(
-            "If set, delete versions older than HOURS hours that are either "
+            "Lifetime (in hours) for commit-only/untagged versions. Used to "
+            "show when each version will be deleted, and as the cutoff for "
+            f"--prune. Default: {DEFAULT_LIFETIME_HOURS}."
+        ),
+    )
+    p_list.add_argument(
+        "--prune",
+        action="store_true",
+        help=(
+            "Delete versions older than --lifetime-hours that are either "
             "untagged or tagged only by commit hash (hex)."
         ),
     )
