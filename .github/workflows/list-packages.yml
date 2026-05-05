@@ -1,4 +1,4 @@
-name: List Packages (All Tags)
+name: Delete old packages
 
 on:
   workflow_dispatch:

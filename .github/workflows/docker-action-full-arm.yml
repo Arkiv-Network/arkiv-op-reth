@@ -8,10 +8,6 @@ on:
       - "**"
   workflow_dispatch:
     inputs:
-      rust_flags:
-        description: 'Rust flags'
-        required: true
-        default: '-C opt-level=z -C target-cpu=generic -C debuginfo=0'
       rust_version:
         description: 'Rust version'
         required: true
@@ -20,11 +16,6 @@ on:
         description: 'Strip binaries'
         required: true
         default: 'true'
-        options: [ 'true', 'false' ]
-      clean_build:
-        description: 'Clear local build cache before building (clean build)'
-        required: true
-        default: 'false'
         options: [ 'true', 'false' ]
 
 permissions:
@@ -51,9 +42,6 @@ jobs:
         run: |
           echo "branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> $GITHUB_OUTPUT
           echo "rust_version=${{ github.event.inputs.rust_version || '1.95.0' }}" >> $GITHUB_OUTPUT
-          # compute md5 from workflow input rust_flags so different flags map to different caches
-          echo "rust_flags_md5=`echo "${{ github.event.inputs.rust_flags || '-C opt-level=z -C target-cpu=generic -C debuginfo=0' }}" | md5sum | head -c 10`" >> $GITHUB_OUTPUT
-          echo "clean_build=${{ github.event.inputs.clean_build || 'false' }}" >> $GITHUB_OUTPUT
 
       - name: Install mold linker
         run: |
