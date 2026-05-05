@@ -46,7 +46,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ORG: ${{ env.ORG }}
           LIFETIME_HOURS: ${{ github.event_name == 'workflow_dispatch' && inputs.lifetime_hours || env.DEFAULT_LIFETIME_HOURS }}
-          PRUNE: ${{ github.event_name == 'workflow_dispatch' && inputs.prune || 'true' }}
+          PRUNE: ${{ github.event_name != 'workflow_dispatch' || inputs.prune }}
         run: |
           set -euo pipefail
           args=(list --package "${{ matrix.package }}")
