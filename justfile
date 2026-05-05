@@ -82,11 +82,11 @@ cli *args='':
 
 # Create an entity (random payload)
 create *args='':
-    {{ arkiv_cli }} create {{ args }}
+    {{ arkiv_cli }} create --random-payload {{ args }}
 
-# Update an entity
+# Update an entity (random payload)
 update key *args='':
-    {{ arkiv_cli }} update --key {{ key }} {{ args }}
+    {{ arkiv_cli }} update --key {{ key }} --random-payload {{ args }}
 
 # Extend an entity's expiration
 extend key expires_in='1h':

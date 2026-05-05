@@ -268,10 +268,8 @@ The operator command-line tool. Two distinct surfaces:
 
 | Subcommand | What it does |
 |---|---|
-| `create` | Mint an entity with a random payload + content type |
-| `create-entity` | CREATE with explicit `--payload`, `--content-type`, and `--attributes` |
-| `update` | Replace an existing entity's payload (random bytes) |
-| `update-entity` | UPDATE with explicit `--payload`, `--content-type`, and `--attributes` |
+| `create` | Mint an entity. Either `--payload <bytes>` or `--random-payload` (with optional `--size`) is required. Also supports `--content-type` and `--attributes`. |
+| `update` | Replace an existing entity's payload. Either `--payload <bytes>` or `--random-payload` (with optional `--size`) is required. Also supports `--content-type` and `--attributes`. |
 | `extend` | Push out an entity's expiry |
 | `transfer` | Hand ownership to another address |
 | `delete` | Owner-initiated removal |
