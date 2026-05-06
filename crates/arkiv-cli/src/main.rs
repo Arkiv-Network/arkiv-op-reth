@@ -358,16 +358,92 @@ enum BatchOp {
     },
 }
 
+/// Encode an attribute name into a left-aligned 32-byte `B256`.
+///
+/// Names that begin with the literal prefix `0x` are treated as
+/// **address-prefix attributes**: the lowercase hex run immediately after
+/// `0x` must match the leading hex digits of `signer`'s address. Any
+/// trailing portion of the name (after the hex run) must follow the
+/// existing ident charset (lowercase ascii / digits / `-` / `_` / `.`).
+/// On a prefix mismatch the function bails — that's the "ban the
+/// creation when these addresses do not match" rule.
+///
+/// All other names go through `Ident32::encode` unchanged.
+///
+/// Note: the on-chain `validateIdent32` (in `arkiv-contracts`) currently
+/// rejects any leading byte outside `a-z`, so `0x...` names will still
+/// be rejected by the contract. This CLI gate enforces the
+/// address-prefix policy at submission time; matching the contract's
+/// charset is a separate upstream change.
+fn encode_attribute_name(name: &str, signer: Address) -> Result<B256> {
+    let Some(rest) = name.strip_prefix("0x") else {
+        return Ok(Ident32::encode(name)
+            .map_err(|e| eyre::eyre!("invalid attribute name '{}': {}", name, e))?
+            .as_b256());
+    };
+
+    let hex_len = rest
+        .bytes()
+        .take_while(|b| matches!(*b, b'0'..=b'9' | b'a'..=b'f'))
+        .count();
+    if hex_len == 0 {
+        bail!(
+            "invalid address-prefix attribute name '{}': '0x' must be followed by at least one lowercase hex digit",
+            name,
+        );
+    }
+    let hex_prefix = &rest[..hex_len];
+    let suffix = &rest[hex_len..];
+
+    let signer_hex = format!("{signer:x}");
+    if !signer_hex.starts_with(hex_prefix) {
+        bail!(
+            "address-prefix attribute '{}' rejected: signer 0x{} does not start with 0x{}",
+            name,
+            signer_hex,
+            hex_prefix,
+        );
+    }
+
+    if !suffix.is_empty() {
+        for (i, b) in suffix.bytes().enumerate() {
+            let ok = matches!(b,
+                b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_'
+            );
+            if !ok {
+                bail!(
+                    "invalid address-prefix attribute name '{}': byte 0x{:02x} at position {} is not in the ident charset",
+                    name,
+                    b,
+                    2 + hex_len + i,
+                );
+            }
+        }
+    }
+
+    let bytes = name.as_bytes();
+    if bytes.len() > 32 {
+        bail!(
+            "invalid address-prefix attribute name '{}': {} bytes exceeds 32-byte Ident32 limit",
+            name,
+            bytes.len(),
+        );
+    }
+    let mut buf = [0u8; 32];
+    buf[..bytes.len()].copy_from_slice(bytes);
+    Ok(B256::from(buf))
+}
+
 /// Build a sol `Attribute` from a batch entry, validating the Ident32 name
+/// (with the address-prefix exception, see [`encode_attribute_name`])
 /// and packing the value per the contract's `bytes32[4]` encoding rules
 /// (see `arkiv-contracts/docs/value128-encoding.md`).
 fn build_attribute(
     attr: &BatchAttribute,
+    signer: Address,
     resolve: &impl Fn(&EntityKeyRef) -> Result<B256>,
 ) -> Result<Attribute> {
-    let name = Ident32::encode(&attr.name)
-        .map_err(|e| eyre::eyre!("invalid attribute name '{}': {}", attr.name, e))?
-        .as_b256();
+    let name = encode_attribute_name(&attr.name, signer)?;
 
     let (value_type, value) = match &attr.value {
         BatchAttributeValue::Uint { uint } => {
@@ -411,17 +487,22 @@ fn build_attribute(
 /// ascending as the contract requires for deterministic hashing.
 fn build_attributes(
     attrs: &[BatchAttribute],
+    signer: Address,
     resolve: &impl Fn(&EntityKeyRef) -> Result<B256>,
 ) -> Result<Vec<Attribute>> {
     let mut out: Vec<Attribute> = attrs
         .iter()
-        .map(|a| build_attribute(a, resolve))
+        .map(|a| build_attribute(a, signer, resolve))
         .collect::<Result<_>>()?;
     out.sort_by_key(|a| a.name);
     Ok(out)
 }
 
-fn build_cli_attributes(input: &str, command_name: &str) -> Result<Vec<Attribute>> {
+fn build_cli_attributes(
+    input: &str,
+    signer: Address,
+    command_name: &str,
+) -> Result<Vec<Attribute>> {
     let attrs = parse_cli_attributes(input)?;
     let resolve = |r: &EntityKeyRef| -> Result<B256> {
         match r {
@@ -435,7 +516,7 @@ fn build_cli_attributes(input: &str, command_name: &str) -> Result<Vec<Attribute
             }
         }
     };
-    build_attributes(&attrs, &resolve)
+    build_attributes(&attrs, signer, &resolve)
 }
 
 fn parse_cli_attributes(input: &str) -> Result<Vec<BatchAttribute>> {
@@ -791,7 +872,7 @@ async fn main() -> Result<()> {
         } => {
             let resolved_payload = resolve_cli_payload(payload.as_deref(), random_payload, size)?;
             let content_type = encode_mime128(&content_type)?;
-            let attributes = build_cli_attributes(&attributes, "create")?;
+            let attributes = build_cli_attributes(&attributes, signer_address, "create")?;
             let expires_at = expiry_block(&provider, expires_in, cli.block_time).await?;
             let op = Operation {
                 operationType: OP_CREATE,
@@ -828,7 +909,7 @@ async fn main() -> Result<()> {
                 entityKey: key,
                 payload: resolved_payload,
                 contentType: encode_mime128(&content_type)?,
-                attributes: build_cli_attributes(&attributes, "update")?,
+                attributes: build_cli_attributes(&attributes, signer_address, "update")?,
                 ..Default::default()
             };
 
@@ -1039,7 +1120,7 @@ async fn main() -> Result<()> {
                             entityKey: B256::ZERO,
                             payload: resolve_payload(payload.as_deref(), *size)?,
                             contentType: encode_mime128(content_type)?,
-                            attributes: build_attributes(attributes, &resolve)?,
+                            attributes: build_attributes(attributes, signer_address, &resolve)?,
                             expiresAt: expires_at,
                             newOwner: Address::ZERO,
                         }
@@ -1055,7 +1136,7 @@ async fn main() -> Result<()> {
                         entityKey: resolve(entity_key)?,
                         payload: resolve_payload(payload.as_deref(), *size)?,
                         contentType: encode_mime128(content_type)?,
-                        attributes: build_attributes(attributes, &resolve)?,
+                        attributes: build_attributes(attributes, signer_address, &resolve)?,
                         ..Default::default()
                     },
                     BatchOp::Extend {
@@ -1179,4 +1260,91 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(hex: &str) -> Address {
+        hex.parse().unwrap()
+    }
+
+    #[test]
+    fn plain_name_uses_ident32_path() {
+        let signer = addr("0x0000000000000000000000000000000000000000");
+        let got = encode_attribute_name("priority", signer).unwrap();
+        let expected = Ident32::encode("priority").unwrap().as_b256();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn address_prefix_attribute_accepted_when_signer_matches() {
+        let signer = addr("0x0123456abcDEF0000000000000000000000000aa");
+        let got = encode_attribute_name("0x0123456abc-attribute-name", signer).unwrap();
+        let mut expected = [0u8; 32];
+        expected[..27].copy_from_slice(b"0x0123456abc-attribute-name");
+        assert_eq!(got, B256::from(expected));
+    }
+
+    #[test]
+    fn address_prefix_attribute_accepted_with_no_suffix() {
+        let signer = addr("0x0123456abc00000000000000000000000000bbcc");
+        encode_attribute_name("0x0123456abc", signer).unwrap();
+    }
+
+    #[test]
+    fn address_prefix_attribute_rejected_when_signer_mismatches() {
+        let signer = addr("0xff00000000000000000000000000000000000000");
+        let err = encode_attribute_name("0x0123456abc-foo", signer)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not start with"), "{}", err);
+        assert!(err.contains("0x0123456abc"), "{}", err);
+    }
+
+    #[test]
+    fn address_prefix_match_is_case_sensitive_lowercase_only() {
+        // Signer hex is rendered lowercase via {:x}; the prefix in the
+        // attribute name must also be lowercase. Uppercase chars after
+        // `0x` aren't treated as hex and are rejected as charset errors
+        // before any address comparison happens.
+        let signer = addr("0x0123456abc00000000000000000000000000bbcc");
+        let err = encode_attribute_name("0x0123456ABC-foo", signer)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("hex digit") || err.contains("ident charset"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn empty_hex_after_0x_is_rejected() {
+        let signer = addr("0x0123456abc00000000000000000000000000bbcc");
+        let err = encode_attribute_name("0x-foo", signer)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("hex digit"), "{}", err);
+    }
+
+    #[test]
+    fn name_too_long_is_rejected() {
+        let signer = addr("0x0123456abc00000000000000000000000000bbcc");
+        let name = format!("0x0123456abc-{}", "a".repeat(64));
+        let err = encode_attribute_name(&name, signer)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("32-byte"), "{}", err);
+    }
+
+    #[test]
+    fn invalid_charset_in_suffix_is_rejected() {
+        let signer = addr("0x0123456abc00000000000000000000000000bbcc");
+        let err = encode_attribute_name("0x0123456abc-FOO", signer)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ident charset"), "{}", err);
+    }
 }

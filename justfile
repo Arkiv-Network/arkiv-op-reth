@@ -31,6 +31,10 @@ lint:
 fmt:
     cargo fmt --all
 
+# Run unit tests across the workspace
+test:
+    cargo test --workspace
+
 # ── Node ─────────────────────────────────────────────────────
 
 # Print an Arkiv dev genesis JSON to stdout (dev.base.json + injected predeploy)

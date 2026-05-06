@@ -355,6 +355,11 @@ Notable mechanics:
   `Ident32::encode` (lowercase ASCII, max 32 bytes); strings are capped
   at 128 bytes; values are packed per the `value128-encoding.md` rules.
   Auto-sorted ascending by name (the contract requires strict order).
+  Names beginning with `0x` are treated as **address-prefix attributes**:
+  the lowercase hex run after `0x` must match the leading hex digits of
+  the signer's address, otherwise the CLI bans the create/update before
+  submission. Trailing characters after the hex prefix (e.g.
+  `0x0123456abc-foo`) follow the same lowercase ident charset.
 - **Durations**: `expiresIn` accepts humantime strings (`"1h"`, `"7d"`).
   Resolved to a block number via the configured block-time.
 
