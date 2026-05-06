@@ -553,17 +553,16 @@ fn parse_cli_attribute(raw: &str) -> Result<BatchAttribute> {
         None if looks_like_entity_key(value) => BatchAttributeValue::EntityKey {
             entity_key: EntityKeyRef::Literal(parse_cli_entity_key_value(value)?),
         },
-        None => BatchAttributeValue::Uint {
-            uint: parse_cli_uint_value(value).map_err(|e| {
-                eyre::eyre!(
-                    "{}; unquoted shorthand values are parsed as uints. Quote strings, e.g. {}='{}', or use {}:string={}",
-                    e,
-                    name,
-                    value,
-                    name,
-                    value
-                )
-            })?,
+        // Numeric → uint; anything else (including hyphenated values like
+        // `tag=v2-rc1`) falls back to string. Use `:string=` or `:uint=` to
+        // disambiguate when the value is a digit string but you want a string,
+        // or when it's a non-digit string but you want a parse error instead
+        // of a silent string fallback.
+        None => match parse_cli_uint_value(value) {
+            Ok(uint) => BatchAttributeValue::Uint { uint },
+            Err(_) => BatchAttributeValue::String {
+                string: value.to_string(),
+            },
         },
     };
 
@@ -1179,4 +1178,99 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_one(input: &str) -> BatchAttribute {
+        let mut attrs = parse_cli_attributes(input).expect("parse failed");
+        assert_eq!(attrs.len(), 1, "expected exactly one attribute");
+        attrs.pop().unwrap()
+    }
+
+    fn assert_uint(attr: &BatchAttribute, expected: u64) {
+        match &attr.value {
+            BatchAttributeValue::Uint { uint } => assert_eq!(*uint, U256::from(expected)),
+            other => panic!("expected uint, got {:?}", other),
+        }
+    }
+
+    fn assert_string(attr: &BatchAttribute, expected: &str) {
+        match &attr.value {
+            BatchAttributeValue::String { string } => assert_eq!(string, expected),
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn hyphen_in_name_uint_value() {
+        let a = parse_one("my-attr=42");
+        assert_eq!(a.name, "my-attr");
+        assert_uint(&a, 42);
+        // Round-trip through Ident32 to confirm the on-chain encoder also accepts it.
+        Ident32::encode(&a.name).expect("Ident32 should accept hyphen in non-leading position");
+    }
+
+    #[test]
+    fn hyphen_in_name_explicit_string() {
+        let a = parse_one("my-attr:string=hello");
+        assert_eq!(a.name, "my-attr");
+        assert_string(&a, "hello");
+    }
+
+    #[test]
+    fn hyphen_in_value_unquoted_falls_back_to_string() {
+        // The change under test: previously this errored ("invalid uint
+        // value 'v2-rc1'"); now it falls back to string.
+        let a = parse_one("version=v2-rc1");
+        assert_eq!(a.name, "version");
+        assert_string(&a, "v2-rc1");
+    }
+
+    #[test]
+    fn hyphen_in_both_name_and_value_unquoted() {
+        let a = parse_one("my-tag=hello-world");
+        assert_eq!(a.name, "my-tag");
+        assert_string(&a, "hello-world");
+    }
+
+    #[test]
+    fn hyphen_in_value_quoted_is_string() {
+        let a = parse_one("name='hello-world'");
+        assert_string(&a, "hello-world");
+    }
+
+    #[test]
+    fn multiple_hyphenated_attrs_split_on_comma() {
+        let attrs = parse_cli_attributes("a-b=1,c-d:string=hi,e-f=tag-1").unwrap();
+        assert_eq!(attrs.len(), 3);
+        assert_eq!(attrs[0].name, "a-b");
+        assert_uint(&attrs[0], 1);
+        assert_eq!(attrs[1].name, "c-d");
+        assert_string(&attrs[1], "hi");
+        assert_eq!(attrs[2].name, "e-f");
+        assert_string(&attrs[2], "tag-1");
+    }
+
+    #[test]
+    fn numeric_value_still_uint_after_change() {
+        // Regression check: the fallback only kicks in when uint parsing
+        // fails, so plain numbers must remain uints.
+        let a = parse_one("count=100");
+        assert_uint(&a, 100);
+    }
+
+    #[test]
+    fn leading_hyphen_in_name_rejected_by_ident32() {
+        // The CLI parser accepts the syntax but Ident32 rejects the leading
+        // byte, so build_cli_attributes surfaces the error. Leading-byte
+        // restriction is enforced on-chain and is intentionally not relaxed.
+        let err = build_cli_attributes("--bad=42", "create").unwrap_err();
+        assert!(
+            err.to_string().contains("invalid attribute name"),
+            "unexpected error: {err}"
+        );
+    }
 }
