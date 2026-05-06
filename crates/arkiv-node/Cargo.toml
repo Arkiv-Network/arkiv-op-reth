@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "arkiv-node"
 path = "src/main.rs"
@@ -16,15 +19,28 @@ reth-optimism-chainspec.workspace = true
 reth-optimism-primitives.workspace = true
 
 reth-exex.workspace = true
+reth-evm.workspace = true
 reth-node-api.workspace = true
+reth-node-builder.workspace = true
 reth-execution-types.workspace = true
+reth-primitives-traits.workspace = true
 reth-storage-api.workspace = true
 
 arkiv-bindings.workspace = true
 arkiv-genesis.workspace = true
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-hardforks.workspace = true
+alloy-rpc-types-engine.workspace = true
+alloy-rpc-types-eth.workspace = true
 alloy-sol-types.workspace = true
+
+alloy-evm.workspace = true
+alloy-op-evm.workspace = true
+op-alloy-consensus.workspace = true
+op-revm.workspace = true
+revm-precompile.workspace = true
 
 clap.workspace = true
 eyre.workspace = true

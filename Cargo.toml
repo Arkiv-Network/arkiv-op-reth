@@ -14,20 +14,23 @@ readme = "README.md"
 keywords = ["ethereum", "reth", "optimism", "arkiv"]
 
 [workspace.dependencies]
-# Op-Reth (from ethereum-optimism monorepo)
-reth-optimism-node = { git = "https://github.com/ethereum-optimism/optimism.git", branch = "develop" }
-reth-optimism-cli = { git = "https://github.com/ethereum-optimism/optimism.git", branch = "develop" }
-reth-optimism-chainspec = { git = "https://github.com/ethereum-optimism/optimism.git", branch = "develop" }
-reth-optimism-primitives = { git = "https://github.com/ethereum-optimism/optimism.git", branch = "develop" }
+# Op-Reth (from ethereum-optimism monorepo, pinned to op-reth/v2.2.0)
+reth-optimism-node = { git = "https://github.com/ethereum-optimism/optimism.git", tag = "op-reth/v2.2.0" }
+reth-optimism-cli = { git = "https://github.com/ethereum-optimism/optimism.git", tag = "op-reth/v2.2.0" }
+reth-optimism-chainspec = { git = "https://github.com/ethereum-optimism/optimism.git", tag = "op-reth/v2.2.0" }
+reth-optimism-primitives = { git = "https://github.com/ethereum-optimism/optimism.git", tag = "op-reth/v2.2.0" }
 
-# Reth (pinned to same rev as op-reth)
-reth-exex = { git = "https://github.com/paradigmxyz/reth", rev = "552d896f9c4b75201def55969d3c23bcc990dd80" }
-reth-node-api = { git = "https://github.com/paradigmxyz/reth", rev = "552d896f9c4b75201def55969d3c23bcc990dd80" }
-reth-execution-types = { git = "https://github.com/paradigmxyz/reth", rev = "552d896f9c4b75201def55969d3c23bcc990dd80" }
-reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "552d896f9c4b75201def55969d3c23bcc990dd80" }
+# Reth (pinned to same rev as op-reth/v2.2.0)
+reth-exex = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
+reth-evm = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
+reth-node-api = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
+reth-node-builder = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
+reth-execution-types = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
+reth-primitives-traits = "0.3"
+reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
 
 # Arkiv bindings (from arkiv-contracts repo)
-arkiv-bindings = { git = "https://github.com/Arkiv-Network/arkiv-contracts.git", rev = "ff30cab" }
+arkiv-bindings = { git = "https://github.com/Arkiv-Network/arkiv-contracts.git", rev = "d4bf0d59" }
 
 # Arkiv genesis primitives (in-tree)
 arkiv-genesis = { path = "crates/arkiv-genesis" }
@@ -42,9 +45,27 @@ alloy-signer-local = { version = "2.0", features = ["mnemonic"] }
 alloy-network = "2.0"
 alloy-contract = "2.0"
 alloy-rpc-types = "2.0"
+alloy-rpc-types-engine = "2.0"
+alloy-rpc-types-eth = "2.0"
+alloy-eips = "2.0"
+alloy-hardforks = "0.4"
 
-# EVM
-revm = { version = "36.0.0", default-features = false, features = ["std"] }
+# EVM. Pinned to `38.0.0` to match what `alloy-op-evm` / `op-revm` /
+# `revm-precompile 34` pull in transitively. Earlier this workspace had
+# `revm = "36.0.0"` (used only by `arkiv-genesis`), which silently
+# produced parallel `revm 36` and `revm 38` graphs and meant types from
+# the two were incompatible. Keeping a single version simplifies the
+# precompile wiring — see `docs/custom-precompile.md` §9.E.
+revm = { version = "38.0.0", default-features = false, features = ["std"] }
+
+# Custom-precompile wiring (POC).
+# alloy-op-evm must come from the optimism git tag, not crates.io, so its
+# `revm 38` line aligns with op-revm/op-reth.
+alloy-evm = { version = "0.33", default-features = false, features = ["std"] }
+alloy-op-evm = { git = "https://github.com/ethereum-optimism/optimism.git", tag = "op-reth/v2.2.0", default-features = false, features = ["std"] }
+op-alloy-consensus = { git = "https://github.com/ethereum-optimism/optimism.git", tag = "op-reth/v2.2.0", default-features = false, features = ["std"] }
+op-revm = { git = "https://github.com/ethereum-optimism/optimism.git", tag = "op-reth/v2.2.0", default-features = false, features = ["std"] }
+revm-precompile = { version = "34", default-features = false, features = ["std"] }
 
 # Util
 clap = { version = "4", features = ["derive"] }

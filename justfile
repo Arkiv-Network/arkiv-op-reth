@@ -104,12 +104,16 @@ commitment key:
     {{ arkiv_cli }} query --key {{ key }}
 
 # Send an arkiv_query JSON-RPC request to the running node (proxied to EntityDB).
-# Pass the params payload as a JSON string; default is `null`.
-# Example: just query '{"key":"0x..."}'
-query payload='null':
+# `expr` is the query expression (must be a JSON string literal); `opts` is an
+# optional options object. Both default to selecting all entities with no opts.
+# Examples:
+#   just query                                        # all entities, no opts
+#   just query '"type = \"nft\""'                      # filter by attribute
+#   just query '"$all"' '{"resultsPerPage":"0xa"}'     # with options
+query expr='"$all"' opts='null':
     curl -s -X POST {{ rpc }} \
         -H 'Content-Type: application/json' \
-        -d '{"jsonrpc":"2.0","id":1,"method":"arkiv_query","params":[{{ payload }}]}'
+        -d '{"jsonrpc":"2.0","id":1,"method":"arkiv_query","params":[{{ expr }}, {{ opts }}]}'
 
 # Read the current changeset hash
 hash:
@@ -142,7 +146,8 @@ mock-entitydb port='9545':
     node scripts/mock-entitydb.js {{ port }}
 
 # Run arkiv-node in dev mode with JsonRpcStore pointing at mock EntityDB.
-# Same setup as `node-dev` plus the ExEx forwarding to a local EntityDB.
+# Same setup as `node-dev` plus the ExEx forwarding to a local EntityDB,
+# and the EntityDB-write precompile at 0x00…0aa01 enabled (POC).
 node-dev-jsonrpc *args='':
     #!/usr/bin/env bash
     set -e
@@ -163,6 +168,7 @@ node-dev-jsonrpc *args='':
         --datadir "$TMPDIR" \
         --http \
         --arkiv.db-url http://localhost:9545 \
+        --arkiv.precompile \
         --log.file.directory "$TMPDIR/logs" \
         {{ args }}
     rm -rf "$TMPDIR"

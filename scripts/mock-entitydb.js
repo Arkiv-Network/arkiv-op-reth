@@ -36,13 +36,16 @@ const server = http.createServer((req, res) => {
 });
 
 // Dummy response shape per method. Write-side methods get a state-root envelope
-// (matching what the ExEx parses); arkiv_query echoes the inbound payload so the
-// proxy round-trip is observable.
+// (matching what the ExEx parses); read-side methods get noop-shaped payloads
+// matching the documented arkiv-op-reth API so the proxy round-trip is observable.
 function dummyResultFor(req) {
-  const payload = Array.isArray(req.params) ? req.params[0] : req.params;
   switch (req.method) {
     case "arkiv_query":
-      return { ok: true, echo: payload };
+      return { data: [], blockNumber: "0x0" };
+    case "arkiv_getEntityCount":
+      return 0;
+    case "arkiv_getBlockTiming":
+      return { current_block: 0, current_block_time: 0, duration: 0 };
     case "arkiv_ping":
       return "pong";
     default:
