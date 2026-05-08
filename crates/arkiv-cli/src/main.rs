@@ -158,6 +158,10 @@ enum Command {
         depth: Option<u32>,
     },
 
+    /// Print the current block number, its UNIX timestamp, and seconds since
+    /// the previous block. Calls `arkiv_getBlockTiming` on the node.
+    BlockTiming,
+
     /// Check an account's ETH balance.
     Balance {
         /// Address to check. Defaults to the signer's address.
@@ -854,6 +858,21 @@ async fn main() -> Result<()> {
         Command::Hash => {
             let hash = registry.changeSetHash().call().await?;
             println!("{hash}");
+        }
+
+        Command::BlockTiming => {
+            #[derive(Debug, Deserialize)]
+            struct BlockTiming {
+                current_block: u64,
+                current_block_time: u64,
+                duration: u64,
+            }
+            let t: BlockTiming = provider
+                .raw_request("arkiv_getBlockTiming".into(), ())
+                .await?;
+            println!("block:     {}", t.current_block);
+            println!("timestamp: {}", t.current_block_time);
+            println!("duration:  {}s", t.duration);
         }
 
         Command::History { depth } => {

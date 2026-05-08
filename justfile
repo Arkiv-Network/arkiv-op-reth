@@ -350,3 +350,7 @@ fund address amount="1ether":
 # Show current block number
 block-number:
     @cast block-number --rpc-url {{ rpc }}
+
+# Print current block timing (block number, timestamp, seconds since last block)
+block-timing:
+    {{ arkiv_cli }} block-timing
