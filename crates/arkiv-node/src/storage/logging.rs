@@ -77,9 +77,9 @@ impl Storage for LoggingStore {
     }
 }
 
-fn log_operation(op: &wire::Operation, block_number: u64) {
+fn log_operation(op: &wire::ArkivOperation, block_number: u64) {
     match op {
-        wire::Operation::Create(o) => {
+        wire::ArkivOperation::Create(o) => {
             tracing::info!(
                 block = block_number,
                 op_type = "CREATE",
@@ -95,7 +95,7 @@ fn log_operation(op: &wire::Operation, block_number: u64) {
                 "entity operation"
             );
         }
-        wire::Operation::Update(o) => {
+        wire::ArkivOperation::Update(o) => {
             tracing::info!(
                 block = block_number,
                 op_type = "UPDATE",
@@ -109,7 +109,7 @@ fn log_operation(op: &wire::Operation, block_number: u64) {
                 "entity operation"
             );
         }
-        wire::Operation::Extend(o) => {
+        wire::ArkivOperation::Extend(o) => {
             tracing::info!(
                 block = block_number,
                 op_type = "EXTEND",
@@ -121,7 +121,7 @@ fn log_operation(op: &wire::Operation, block_number: u64) {
                 "entity operation"
             );
         }
-        wire::Operation::Transfer(o) => {
+        wire::ArkivOperation::Transfer(o) => {
             tracing::info!(
                 block = block_number,
                 op_type = "TRANSFER",
@@ -132,7 +132,7 @@ fn log_operation(op: &wire::Operation, block_number: u64) {
                 "entity operation"
             );
         }
-        wire::Operation::Delete(o) => {
+        wire::ArkivOperation::Delete(o) => {
             tracing::info!(
                 block = block_number,
                 op_type = "DELETE",
@@ -143,7 +143,7 @@ fn log_operation(op: &wire::Operation, block_number: u64) {
                 "entity operation"
             );
         }
-        wire::Operation::Expire(o) => {
+        wire::ArkivOperation::Expire(o) => {
             tracing::info!(
                 block = block_number,
                 op_type = "EXPIRE",

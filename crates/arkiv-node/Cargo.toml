@@ -28,7 +28,6 @@ arkiv-bindings.workspace = true
 arkiv-genesis.workspace = true
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
-alloy-sol-types.workspace = true
 
 clap.workspace = true
 eyre.workspace = true

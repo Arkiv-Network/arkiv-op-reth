@@ -28,7 +28,7 @@ reth-execution-types = { git = "https://github.com/paradigmxyz/reth", rev = "27b
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
 
 # Arkiv bindings (from arkiv-contracts repo)
-arkiv-bindings = { git = "https://github.com/Arkiv-Network/arkiv-contracts.git", rev = "d4bf0d59" }
+arkiv-bindings = { git = "https://github.com/Arkiv-Network/arkiv-contracts.git", rev = "d6ebe18" }
 
 # Arkiv genesis primitives (in-tree)
 arkiv-genesis = { path = "crates/arkiv-genesis" }

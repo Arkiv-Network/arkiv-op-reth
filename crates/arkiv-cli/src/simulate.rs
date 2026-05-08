@@ -24,13 +24,12 @@
 //! coverage without that complexity.)
 
 use alloy_network::{EthereumWallet, TransactionBuilder};
-use alloy_primitives::{Address, B256, Bytes, FixedBytes};
+use alloy_primitives::{Address, B256, Bytes};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types::TransactionRequest;
 use alloy_sol_types::{SolCall, SolEvent};
 use arkiv_bindings::{
-    Attribute, IEntityRegistry, IEntityRegistry::EntityOperation, Mime128, OP_CREATE, OP_DELETE,
-    OP_EXPIRE, OP_EXTEND, OP_TRANSFER, OP_UPDATE, Operation,
+    IEntityRegistry, IEntityRegistry::EntityOperation, Mime128, OP_CREATE, Operation,
 };
 use arkiv_genesis::dev_signers;
 use clap::Args;
@@ -396,15 +395,7 @@ fn build_op(
             let payload = random_payload(rng, size);
             Some(PlannedOp {
                 kind,
-                op: Operation {
-                    operationType: OP_CREATE,
-                    entityKey: B256::ZERO,
-                    payload,
-                    contentType: random_content_type(rng),
-                    attributes: Vec::<Attribute>::new(),
-                    expiresAt: expires_at,
-                    newOwner: Address::ZERO,
-                },
+                op: Operation::create(lifespan as u32, payload, random_content_type(rng), vec![]),
                 target: None,
                 new_expires_at: Some(expires_at),
                 new_owner_idx: None,
@@ -416,13 +407,7 @@ fn build_op(
             let payload = random_payload(rng, size);
             Some(PlannedOp {
                 kind,
-                op: Operation {
-                    operationType: OP_UPDATE,
-                    entityKey: key,
-                    payload,
-                    contentType: random_content_type(rng),
-                    ..Default::default()
-                },
+                op: Operation::update(key, payload, random_content_type(rng), vec![]),
                 target: Some(key),
                 new_expires_at: None,
                 new_owner_idx: None,
@@ -433,14 +418,10 @@ fn build_op(
             let entity = state.alive.get(&key)?.clone();
             let bump = rng.random_range(50u64..400);
             let new_expires_at = (current_block + bump).max(entity.expires_at as u64 + 1) as u32;
+            let btl = (new_expires_at as u64 - current_block) as u32;
             Some(PlannedOp {
                 kind,
-                op: Operation {
-                    operationType: OP_EXTEND,
-                    entityKey: key,
-                    expiresAt: new_expires_at,
-                    ..Default::default()
-                },
+                op: Operation::extend(key, btl),
                 target: Some(key),
                 new_expires_at: Some(new_expires_at),
                 new_owner_idx: None,
@@ -457,12 +438,8 @@ fn build_op(
             // Stash the index here so we know what to update on receipt.
             Some(PlannedOp {
                 kind,
-                op: Operation {
-                    operationType: OP_TRANSFER,
-                    entityKey: key,
-                    // newOwner filled in submit_plan once we know the wallet's address.
-                    ..Default::default()
-                },
+                // newOwner is Address::ZERO here; submit_plan overwrites it from the signer pool.
+                op: Operation::transfer(key, Address::ZERO),
                 target: Some(key),
                 new_expires_at: None,
                 new_owner_idx: Some(new_idx),
@@ -472,11 +449,7 @@ fn build_op(
             let key = pick_owned_alive(state, signer_idx, rng)?;
             Some(PlannedOp {
                 kind,
-                op: Operation {
-                    operationType: OP_DELETE,
-                    entityKey: key,
-                    ..Default::default()
-                },
+                op: Operation::delete(key),
                 target: Some(key),
                 new_expires_at: None,
                 new_owner_idx: None,
@@ -487,11 +460,7 @@ fn build_op(
             state.expired_pending.push(key);
             Some(PlannedOp {
                 kind,
-                op: Operation {
-                    operationType: OP_EXPIRE,
-                    entityKey: key,
-                    ..Default::default()
-                },
+                op: Operation::expire(key),
                 target: None, // no `alive` entry to flip pending on
                 new_expires_at: None,
                 new_owner_idx: None,
@@ -525,14 +494,7 @@ fn random_content_type(rng: &mut ChaCha8Rng) -> Mime128 {
         "image/jpeg",
     ];
     let s = TYPES.choose(rng).copied().unwrap_or(TYPES[0]);
-    let bytes = s.as_bytes();
-    let mut data = [FixedBytes::ZERO; 4];
-    for (i, chunk) in bytes.chunks(32).enumerate().take(4) {
-        let mut buf = [0u8; 32];
-        buf[..chunk.len()].copy_from_slice(chunk);
-        data[i] = FixedBytes::from(buf);
-    }
-    Mime128 { data }
+    Mime128::encode(s).expect("hardcoded MIME types are always valid")
 }
 
 // ---------------------------------------------------------------------------

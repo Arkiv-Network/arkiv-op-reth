@@ -21,6 +21,17 @@ Arkiv is an OP-stack L2 with one additional standard predeploy:
 on opaque entities — `CREATE`, `UPDATE`, `EXTEND`, `TRANSFER`, `DELETE`,
 `EXPIRE` — submitted in batches via `execute(Operation[])`.
 
+The `Operation` struct carries a `btl` (blocks-to-live) field for
+`CREATE` and `EXTEND`. The contract computes the absolute expiry as
+`currentBlock + btl` — callers supply a relative duration, not an
+absolute block number. The stored `Commitment` continues to hold the
+resolved absolute `expiresAt` and the `EntityOperation` event emits it,
+so downstream consumers always see absolute block numbers.
+
+BlockNumber fields throughout the contract are typed as `BlockNumber32`
+(a `uint32` UDVT) to enable tight slot packing: three `BlockNumber32`
+fields share a single 32-byte storage slot alongside a 20-byte address.
+
 The contract stores a minimal commitment per entity (creator, owner,
 expiry, content hash) and emits per-operation events. Full entity payloads
 and attributes live in calldata, not on-chain storage. A rolling
@@ -224,6 +235,12 @@ pub trait Storage: Send + Sync + 'static {
 }
 ```
 
+`ArkivBlock`, `ArkivBlockHeader`, `ArkivTransaction`, `ArkivBlockRef`,
+`ArkivOperation`, and `ArkivAttribute` are all defined in
+`arkiv_bindings::wire`, not in this crate. The ExEx constructs them and
+passes them through the `Storage` trait; the storage backends serialise
+them directly.
+
 The optional `B256` return is a state-root hash for backends that
 maintain a Merkle trie (currently only the JSON-RPC backend forwards what
 EntityDB returns). The trait is sync; `JsonRpcStore` bridges to async via
@@ -356,7 +373,10 @@ Notable mechanics:
   at 128 bytes; values are packed per the `value128-encoding.md` rules.
   Auto-sorted ascending by name (the contract requires strict order).
 - **Durations**: `expiresIn` accepts humantime strings (`"1h"`, `"7d"`).
-  Resolved to a block number via the configured block-time.
+  Converted to a relative block count (`btl = duration / block_time`)
+  and passed as `Operation.btl`. The contract resolves the absolute
+  expiry as `currentBlock + btl` at execution time. The CLI does not
+  need to know the current block number for this calculation.
 
 See `scripts/fixtures/` for end-to-end examples.
 
@@ -598,13 +618,19 @@ ArkivBlock {
 }
 ```
 
-For each transaction whose `to` matches the EntityRegistry address, we
-call `arkiv_bindings::decode::decode_registry_transaction(...)`. That
-helper returns a `Vec<DecodedOperation>` correlated positionally with the
-contract's emitted `EntityOperation` and `ChangeSetHashUpdate` events. We
-map each `DecodedOperation` into the wire-format `ArkivOperation` enum
-and stamp on the per-op rolling changeset hash directly from the
-decoder's output.
+All types (`ArkivBlock`, `ArkivTransaction`, `ArkivOperation`,
+`ArkivAttribute`) are defined in `arkiv_bindings::wire`.
+
+For each transaction whose `to` matches the EntityRegistry address, the
+receipt logs are pre-filtered to that address and then passed to
+`arkiv_bindings::wire::ParsedRegistryTx::parse(calldata, &filtered_logs)`.
+This step decodes the `execute()` calldata, separates the receipt logs
+into their two event types (`EntityOperation` and `ChangeSetHashUpdate`),
+validates 1:1 correspondence, and cross-checks that each pair shares the
+same `entityKey`. A subsequent `.decode(tx_hash, tx_index, sender)` call
+validates `Mime128` content types and `Ident32` attribute names, and
+returns a complete `(ArkivTransaction, Option<B256>)` — the transaction
+plus the rolling changeset hash after its last operation.
 
 ### 5.2 Rolling changeset hash
 
@@ -666,6 +692,22 @@ short version:
 | `arkiv_reorg` | `{ "revertedBlocks": [ArkivBlockRef], "newBlocks": [ArkivBlock] }` |
 
 The server returns `{ "stateRoot": "0x..." }` on success.
+
+All wire types are defined in `arkiv_bindings::wire`:
+
+- **Envelopes**: `ArkivBlock`, `ArkivBlockHeader`, `ArkivTransaction`,
+  `ArkivBlockRef`
+- **Operations**: `ArkivOperation` (tagged enum), `CreateOp`, `UpdateOp`,
+  `ExtendOp`, `TransferOp`, `DeleteOp`, `ExpireOp`
+- **Attributes**: `ArkivAttribute` (tagged enum with `Uint`, `String`,
+  `EntityKey` variants)
+
+The `content_type` field on `CreateOp` / `UpdateOp` holds a `Mime128`
+value that serialises as a plain string. `ArkivAttribute` names are
+`Ident32` values that serialise as ASCII strings. Both types carry
+validation — `Mime128::validate()` and `Ident32::validate()` are called
+during `ParsedRegistryTx::decode()`; invalid calldata causes the entire
+transaction to be skipped with a logged error.
 
 ---
 
@@ -738,12 +780,30 @@ Honest scope notes:
   and `Entity.sol`. The hashing scheme (EIP-712 typehashes for `CoreHash`
   and `EntityHash`, the per-op rolling extension) is the single most
   important thing to understand if you're touching the ExEx decoder.
+  Key field: `Operation.btl` (blocks-to-live, relative) replaces the
+  former absolute `expiresAt`; the contract stores and emits the resolved
+  absolute expiry.
 - **Wire format.** [`exex-jsonrpc-interface-v2.md`](exex-jsonrpc-interface-v2.md).
+- **Bindings: decoding.** `arkiv_bindings::wire` — `ParsedRegistryTx`
+  (calldata + logs → `ArkivTransaction`), the `ArkivOperation` /
+  `ArkivAttribute` enums, and all envelope types (`ArkivBlock`,
+  `ArkivBlockHeader`, `ArkivTransaction`, `ArkivBlockRef`).
+- **Bindings: encoding.** `arkiv_bindings::encode` — `impl Operation`
+  factory methods (`Operation::create`, `Operation::extend`, …) and
+  `impl Attribute` factory methods (`Attribute::uint`, `Attribute::string`,
+  `Attribute::entity_key`, `Attribute::sort`). These are the primary
+  interface for building `execute()` calldata without touching the raw
+  flat struct.
+- **Bindings: validated types.** `arkiv_bindings::Ident32` and
+  `arkiv_bindings::Mime128` are alloy-generated types with validation
+  impl blocks. `Ident32::encode(s)` validates the charset;
+  `Mime128::encode(s)` validates the RFC 2045 structure. Both carry
+  `Serialize` impls for the wire format.
 - **Attribute encoding.**
   `arkiv-contracts/docs/value128-encoding.md` — explains the
   `bytes32[4]` packing for UINT/STRING/ENTITY_KEY values and which
   byte-level orderings are guaranteed.
-- **Storage layout.** `arkiv-contracts/src/storage_layout.rs` — slot
+- **Storage layout.** `arkiv_bindings::storage_layout` — slot
   indices, key-packing functions, decoders. The Foundry-artifact drift
   guard there is the safety net for the ExEx's direct slot reads.
 - **reth ExEx framework.** <https://reth.rs/exex.html>.
