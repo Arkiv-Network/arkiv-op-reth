@@ -1,7 +1,7 @@
 mod simulate;
 
 use alloy_network::EthereumWallet;
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_primitives::{Address, B256, Bytes, FixedBytes, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types::eth::Log as RpcLog;
 use alloy_signer_local::PrivateKeySigner;
@@ -286,7 +286,8 @@ struct BatchAttribute {
 #[serde(untagged)]
 enum BatchAttributeValue {
     String {
-        string: String,
+        #[serde(deserialize_with = "de_string_attr_value")]
+        string: FixedBytes<128>,
     },
     Uint {
         uint: U256,
@@ -354,7 +355,7 @@ fn build_attribute(
         .map_err(|e| eyre::eyre!("invalid attribute name '{}': {}", attr.name, e))?;
     Ok(match &attr.value {
         BatchAttributeValue::Uint { uint } => Attribute::uint(name, *uint),
-        BatchAttributeValue::String { string } => Attribute::string(name, string.as_bytes())?,
+        BatchAttributeValue::String { string } => Attribute::string(name, string.as_slice())?,
         BatchAttributeValue::EntityKey { entity_key } => {
             Attribute::entity_key(name, resolve(entity_key)?)
         }
@@ -538,9 +539,9 @@ fn looks_like_entity_key(value: &str) -> bool {
         .is_some_and(|hex| hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
-fn parse_cli_string_value(value: &str) -> Result<String> {
+fn parse_cli_string_value(value: &str) -> Result<FixedBytes<128>> {
     if !is_quoted(value) {
-        return Ok(value.to_string());
+        return pack_string_attr_value(value.as_bytes());
     }
 
     let quote = value.as_bytes()[0] as char;
@@ -572,7 +573,27 @@ fn parse_cli_string_value(value: &str) -> Result<String> {
     if out.contains(quote) && !inner.contains('\\') {
         bail!("unescaped quote in string value");
     }
-    Ok(out)
+    pack_string_attr_value(out.as_bytes())
+}
+
+fn pack_string_attr_value(bytes: &[u8]) -> Result<FixedBytes<128>> {
+    if bytes.len() > 128 {
+        bail!(
+            "attribute string value exceeds 128 bytes ({} bytes)",
+            bytes.len()
+        );
+    }
+    let mut buf = [0u8; 128];
+    buf[..bytes.len()].copy_from_slice(bytes);
+    Ok(FixedBytes::from(buf))
+}
+
+fn de_string_attr_value<'de, D>(deserializer: D) -> Result<FixedBytes<128>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    pack_string_attr_value(s.as_bytes()).map_err(serde::de::Error::custom)
 }
 
 fn parse_cli_uint_value(value: &str) -> Result<U256> {
