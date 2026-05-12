@@ -809,7 +809,6 @@ version = "1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "489f1620bb7e2483fb5819ed01ab6edc1d2f93939dce35a5695085a1afd1d699"
 dependencies = [
- "alloy-json-abi",
  "alloy-sol-macro-input",
  "const-hex",
  "heck",
@@ -828,14 +827,12 @@ version = "1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56cef806ad22d4392c5fc83cf8f2089f988eb99c7067b4e0c6f1971fc1cca318"
 dependencies = [
- "alloy-json-abi",
  "const-hex",
  "dunce",
  "heck",
  "macro-string",
  "proc-macro2",
  "quote",
- "serde_json",
  "syn 2.0.117",
  "syn-solidity",
 ]
@@ -1340,7 +1337,7 @@ dependencies = [
 [[package]]
 name = "arkiv-bindings"
 version = "0.1.0"
-source = "git+https://github.com/Arkiv-Network/arkiv-contracts.git?rev=d6ebe18#d6ebe18dfa28142feba74f35ccf619472f11db3b"
+source = "git+https://github.com/Arkiv-Network/arkiv-contracts.git?rev=d4bf0d59#d4bf0d59c069aab38ae491f20e420dc834909c88"
 dependencies = [
  "alloy-contract",
  "alloy-primitives",
@@ -1394,6 +1391,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
+ "alloy-sol-types",
  "arkiv-bindings",
  "arkiv-genesis",
  "clap",

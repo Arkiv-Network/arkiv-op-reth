@@ -77,9 +77,9 @@ impl Storage for LoggingStore {
     }
 }
 
-fn log_operation(op: &wire::ArkivOperation, block_number: u64) {
+fn log_operation(op: &wire::Operation, block_number: u64) {
     match op {
-        wire::ArkivOperation::Create(o) => {
+        wire::Operation::Create(o) => {
             tracing::info!(
                 block = block_number,
                 op_type = "CREATE",
@@ -95,7 +95,7 @@ fn log_operation(op: &wire::ArkivOperation, block_number: u64) {
                 "entity operation"
             );
         }
-        wire::ArkivOperation::Update(o) => {
+        wire::Operation::Update(o) => {
             tracing::info!(
                 block = block_number,
                 op_type = "UPDATE",
@@ -109,7 +109,7 @@ fn log_operation(op: &wire::ArkivOperation, block_number: u64) {
                 "entity operation"
             );
         }
-        wire::ArkivOperation::Extend(o) => {
+        wire::Operation::Extend(o) => {
             tracing::info!(
                 block = block_number,
                 op_type = "EXTEND",
@@ -121,7 +121,7 @@ fn log_operation(op: &wire::ArkivOperation, block_number: u64) {
                 "entity operation"
             );
         }
-        wire::ArkivOperation::Transfer(o) => {
+        wire::Operation::Transfer(o) => {
             tracing::info!(
                 block = block_number,
                 op_type = "TRANSFER",
@@ -132,7 +132,7 @@ fn log_operation(op: &wire::ArkivOperation, block_number: u64) {
                 "entity operation"
             );
         }
-        wire::ArkivOperation::Delete(o) => {
+        wire::Operation::Delete(o) => {
             tracing::info!(
                 block = block_number,
                 op_type = "DELETE",
@@ -143,7 +143,7 @@ fn log_operation(op: &wire::ArkivOperation, block_number: u64) {
                 "entity operation"
             );
         }
-        wire::ArkivOperation::Expire(o) => {
+        wire::Operation::Expire(o) => {
             tracing::info!(
                 block = block_number,
                 op_type = "EXPIRE",

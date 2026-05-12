@@ -18,7 +18,7 @@ event EntityOperation(
     bytes32 indexed entityKey,
     uint8   indexed operationType,
     address indexed owner,
-    uint32  expiresAt,   // absolute block number: currentBlock + op.btl
+    uint32  expiresAt,
     bytes32 entityHash
 );
 
@@ -29,13 +29,7 @@ event ChangeSetHashUpdate(
 );
 ```
 
-`expiresAt` in the event is the **absolute** expiry block the contract
-computed as `currentBlock + op.btl`. The raw `btl` (blocks-to-live)
-field from calldata is not emitted — the event carries the resolved
-value. This is what the ExEx uses for `CreateOp.expires_at` and
-`ExtendOp.expires_at` in the wire format.
-
-Per `EntityRegistry.execute` (`contracts/EntityRegistry.sol`),
+Per `EntityRegistry.execute` (`contracts/EntityRegistry.sol` lines 113–122),
 each calldata op causes `_dispatch` to emit one `EntityOperation`,
 followed by one `ChangeSetHashUpdate` from the loop body. The two
 events are paired 1:1 in op order; see [ExEx Decoding
@@ -74,7 +68,7 @@ This preserves the full chain of provenance: block -> transaction -> operation. 
 #[serde(rename_all = "camelCase")]
 pub struct ArkivBlockHeader {
     /// Block number (hex-encoded in JSON).
-    #[serde(with = "hex_u64")]
+    #[serde(with = "u64_hex")]
     pub number: u64,
     /// Block hash.
     pub hash: B256,
@@ -132,13 +126,13 @@ pub struct ArkivTransaction {
 ### Operation
 
 ```rust
-// arkiv_bindings::wire
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ArkivOperation {
     Create(CreateOp),
     Update(UpdateOp),
     Extend(ExtendOp),
+    #[serde(rename = "transfer")]
     Transfer(TransferOp),
     Delete(DeleteOp),
     Expire(ExpireOp),
@@ -148,21 +142,19 @@ pub enum ArkivOperation {
 Each variant carries a `changeset_hash` field -- the contract's rolling hash immediately after this operation was applied.
 
 ```rust
-// arkiv_bindings::wire
-// content_type (Mime128) serialises as a plain string; name (Ident32) as ASCII.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateOp {
     pub op_index: u32,
     pub entity_key: B256,
     pub owner: Address,
-    #[serde(with = "hex_u64")]
+    #[serde(with = "u64_hex")]
     pub expires_at: u64,
     pub entity_hash: B256,
     pub changeset_hash: B256,
     pub payload: Bytes,
-    pub content_type: Mime128,   // serialises as string
-    pub attributes: Vec<ArkivAttribute>,
+    pub content_type: String,
+    pub attributes: Vec<Attribute>,
 }
 
 #[derive(Serialize)]
@@ -174,8 +166,8 @@ pub struct UpdateOp {
     pub entity_hash: B256,
     pub changeset_hash: B256,
     pub payload: Bytes,
-    pub content_type: Mime128,   // serialises as string
-    pub attributes: Vec<ArkivAttribute>,
+    pub content_type: String,
+    pub attributes: Vec<Attribute>,
 }
 
 #[derive(Serialize)]
@@ -184,7 +176,7 @@ pub struct ExtendOp {
     pub op_index: u32,
     pub entity_key: B256,
     pub owner: Address,
-    #[serde(with = "hex_u64")]
+    #[serde(with = "u64_hex")]
     pub expires_at: u64,
     pub entity_hash: B256,
     pub changeset_hash: B256,
@@ -225,14 +217,13 @@ pub struct ExpireOp {
 
 Mirrors the on-chain `Attribute { name, valueType, value }` shape. A
 tagged enum, internally discriminated by `valueType`, with `name` and
-`value` carrying the same meaning across all variants. Defined in
-`arkiv_bindings::wire` as `ArkivAttribute`:
+`value` carrying the same meaning across all variants. Defined upstream
+in `arkiv_bindings::wire::Attribute`:
 
 ```rust
-// arkiv_bindings::wire
 #[derive(Serialize)]
 #[serde(tag = "valueType", rename_all = "camelCase")]
-pub enum ArkivAttribute {
+pub enum Attribute {
     /// `ATTR_UINT` — right-aligned big-endian uint256 from the contract's
     /// `bytes32[4]` value. Serialized as a `0x`-prefixed lowercase hex string.
     Uint      { name: Ident32, value: U256 },
@@ -245,9 +236,6 @@ pub enum ArkivAttribute {
     /// as a 32-byte hex string.
     EntityKey { name: Ident32, value: B256 },
 }
-// Ident32 is arkiv_bindings::Ident32 — an alloy-generated UDVT (type Ident32 is bytes32)
-// with validation impl blocks. Serialises as an ASCII string via its Serialize impl.
-// Validated by Ident32::validate() during ParsedRegistryTx::decode().
 ```
 
 JSON shape per attribute (three flat fields, regardless of variant):
@@ -273,7 +261,7 @@ has been removed.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArkivBlockRef {
-    #[serde(with = "hex_u64")]
+    #[serde(with = "u64_hex")]
     pub number: u64,
     pub hash: B256,
 }
@@ -516,7 +504,7 @@ The EntityDB uses empty blocks to:
 The `changesetHash` enables trustless verification between the ExEx and EntityDB:
 
 1. The contract computes a rolling hash: `keccak256(prevHash, entityKey, entityHash)` per operation
-2. The ExEx reads this from the `ChangeSetHashUpdate` event's `changeSetHash` field and includes it in the wire format
+2. The ExEx reads this from the `EntityOperation` event's `changesetHash` field and includes it in the wire format
 3. The EntityDB independently computes the same rolling hash as it applies operations
 4. After each block, the EntityDB compares its computed hash against the block header's `changesetHash`
 5. A mismatch indicates a decode error, missed operation, or state corruption
@@ -569,10 +557,6 @@ pub trait Storage: Send + Sync + 'static {
 
 ## ExEx Decoding Pipeline
 
-All types in this pipeline (`ArkivBlock`, `ArkivBlockHeader`,
-`ArkivTransaction`, `ArkivOperation`, `ArkivAttribute`, `ArkivBlockRef`)
-are defined in `arkiv_bindings::wire`.
-
 For each block in a chain notification:
 
 ```
@@ -583,17 +567,17 @@ block (RecoveredBlock<OpBlock>)
   +-- for each (tx, receipt) where tx.to == ENTITY_REGISTRY_ADDRESS:
   |     |
   |     +-- recover sender from tx signature
-  |     +-- filter receipt logs to EntityRegistry address -> filtered_logs
-  |     +-- wire::ParsedRegistryTx::parse(tx.input(), &filtered_logs)
-  |           +-- decode executeCall calldata -> Operation[]
-  |           +-- partition filtered_logs by topic0 into
-  |               EntityOperation[] and ChangeSetHashUpdate[]
-  |           +-- assert len(ops) == len(entity_events) == len(hash_events)
-  |           +-- for each triple: assert entity_event.entityKey == hash_event.entityKey
-  |     +-- .decode(tx_hash, tx_index, sender)
-  |           +-- for each op: validate Mime128 content_type, Ident32 attr names
-  |           +-- produce ArkivTransaction { hash, index, sender, operations }
-  |           +-- last_in_block = last hash_event.changeSetHash
+  |     +-- decode executeCall calldata -> sol Operation[]
+  |     +-- filter receipt logs by EntityRegistry address;
+  |         partition by topic0 into parallel
+  |         EntityOperation[] and ChangeSetHashUpdate[] vectors
+  |         (emission order matches calldata op order)
+  |     +-- assert len(ops) == len(EntityOperation) == len(ChangeSetHashUpdate)
+  |     +-- for each (calldata_op, entity_event, hash_event) triple:
+  |           +-- assert entity_event.entityKey == hash_event.entityKey
+  |           +-- wire::decode_operation(op_index, ...) -> wire::Operation
+  |           +-- last_in_block = hash_event.changeSetHash
+  |     +-- wrap in ArkivTransaction { hash, index, sender, operations }
   |
   +-- set header.changeset_hash = last_in_block, falling back to the rolling
   |   hash carried forward across blocks (seeded once per chain notification
@@ -602,11 +586,6 @@ block (RecoveredBlock<OpBlock>)
 ```
 
 Blocks with no matching transactions emit `ArkivBlock { header, transactions: [] }`.
-
-The `expires_at` field on `CreateOp` and `ExtendOp` is sourced from
-`EntityOperation.expiresAt` (the absolute block number the contract
-computed as `currentBlock + op.btl`) — not from the raw calldata `btl`
-field, which is not exposed in the wire format.
 
 ---
 

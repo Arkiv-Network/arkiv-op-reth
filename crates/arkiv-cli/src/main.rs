@@ -1,11 +1,12 @@
 mod simulate;
 
 use alloy_network::EthereumWallet;
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_primitives::{Address, B256, Bytes, FixedBytes, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types::eth::Log as RpcLog;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolEvent;
+use arkiv_bindings::types::{Ident32, Mime128Str};
 use arkiv_bindings::{IEntityRegistry::EntityOperation, op_type_name, *};
 use clap::{Parser, Subcommand};
 use eyre::{Result, bail};
@@ -158,10 +159,6 @@ enum Command {
         depth: Option<u32>,
     },
 
-    /// Print the current block number, its UNIX timestamp, and seconds since
-    /// the previous block. Calls `arkiv_getBlockTiming` on the node.
-    BlockTiming,
-
     /// Check an account's ETH balance.
     Balance {
         /// Address to check. Defaults to the signer's address.
@@ -211,6 +208,16 @@ enum Command {
     Simulate(simulate::SimulateArgs),
 }
 
+/// Validate and pack a MIME type string into the contract's `Mime128`
+/// (`bytes32[4]`) representation. Validation per RFC 2045 (lowercase only,
+/// `type/subtype[; param=value]*`) — see `arkiv_bindings::types::Mime128Str`.
+fn encode_mime128(mime: &str) -> Result<Mime128> {
+    let data = Mime128Str::encode(mime)
+        .map_err(|e| eyre::eyre!("invalid content-type '{}': {}", mime, e))?
+        .to_bytes32x4();
+    Ok(Mime128 { data })
+}
+
 fn random_payload(size: usize) -> Bytes {
     let mut rng = rand::rng();
     let mut buf = vec![0u8; size];
@@ -218,9 +225,15 @@ fn random_payload(size: usize) -> Bytes {
     Bytes::from(buf)
 }
 
-/// Convert a duration into a blocks-to-live value.
-fn compute_btl(duration: Duration, block_time: Duration) -> u32 {
-    (duration.as_secs() / block_time.as_secs().max(1)) as u32
+/// Convert a duration from now into an absolute block number.
+async fn expiry_block(
+    provider: &impl Provider,
+    duration: Duration,
+    block_time: Duration,
+) -> Result<u32> {
+    let current = provider.get_block_number().await?;
+    let blocks = duration.as_secs() / block_time.as_secs().max(1);
+    Ok((current + blocks) as u32)
 }
 
 fn print_events(logs: &[RpcLog]) {
@@ -345,19 +358,52 @@ enum BatchOp {
     },
 }
 
-/// Build a sol `Attribute` from a batch entry, validating the Ident32 name.
+/// Build a sol `Attribute` from a batch entry, validating the Ident32 name
+/// and packing the value per the contract's `bytes32[4]` encoding rules
+/// (see `arkiv-contracts/docs/value128-encoding.md`).
 fn build_attribute(
     attr: &BatchAttribute,
     resolve: &impl Fn(&EntityKeyRef) -> Result<B256>,
 ) -> Result<Attribute> {
     let name = Ident32::encode(&attr.name)
-        .map_err(|e| eyre::eyre!("invalid attribute name '{}': {}", attr.name, e))?;
-    Ok(match &attr.value {
-        BatchAttributeValue::Uint { uint } => Attribute::uint(name, *uint),
-        BatchAttributeValue::String { string } => Attribute::string(name, string.as_bytes())?,
-        BatchAttributeValue::EntityKey { entity_key } => {
-            Attribute::entity_key(name, resolve(entity_key)?)
+        .map_err(|e| eyre::eyre!("invalid attribute name '{}': {}", attr.name, e))?
+        .as_b256();
+
+    let (value_type, value) = match &attr.value {
+        BatchAttributeValue::Uint { uint } => {
+            let mut v = [FixedBytes::ZERO; 4];
+            v[0] = FixedBytes::from(uint.to_be_bytes::<32>());
+            (ATTR_UINT, v)
         }
+        BatchAttributeValue::String { string } => {
+            let bytes = string.as_bytes();
+            if bytes.len() > 128 {
+                bail!(
+                    "attribute '{}' string value exceeds 128 bytes ({})",
+                    attr.name,
+                    bytes.len()
+                );
+            }
+            let mut v = [FixedBytes::ZERO; 4];
+            for (i, chunk) in bytes.chunks(32).enumerate() {
+                let mut buf = [0u8; 32];
+                buf[..chunk.len()].copy_from_slice(chunk);
+                v[i] = FixedBytes::from(buf);
+            }
+            (ATTR_STRING, v)
+        }
+        BatchAttributeValue::EntityKey { entity_key } => {
+            let key = resolve(entity_key)?;
+            let mut v = [FixedBytes::ZERO; 4];
+            v[0] = FixedBytes::from(key.0);
+            (ATTR_ENTITY_KEY, v)
+        }
+    };
+
+    Ok(Attribute {
+        name,
+        valueType: value_type,
+        value,
     })
 }
 
@@ -371,7 +417,7 @@ fn build_attributes(
         .iter()
         .map(|a| build_attribute(a, resolve))
         .collect::<Result<_>>()?;
-    Attribute::sort(&mut out);
+    out.sort_by_key(|a| a.name);
     Ok(out)
 }
 
@@ -744,10 +790,18 @@ async fn main() -> Result<()> {
             attributes,
         } => {
             let resolved_payload = resolve_cli_payload(payload.as_deref(), random_payload, size)?;
-            let content_type = Mime128::encode(&content_type)?;
+            let content_type = encode_mime128(&content_type)?;
             let attributes = build_cli_attributes(&attributes, "create")?;
-            let btl = compute_btl(expires_in, cli.block_time);
-            let op = Operation::create(btl, resolved_payload, content_type, attributes);
+            let expires_at = expiry_block(&provider, expires_in, cli.block_time).await?;
+            let op = Operation {
+                operationType: OP_CREATE,
+                entityKey: B256::ZERO,
+                payload: resolved_payload,
+                contentType: content_type,
+                attributes,
+                expiresAt: expires_at,
+                newOwner: Address::ZERO,
+            };
 
             let receipt = registry
                 .execute(vec![op])
@@ -769,12 +823,14 @@ async fn main() -> Result<()> {
             attributes,
         } => {
             let resolved_payload = resolve_cli_payload(payload.as_deref(), random_payload, size)?;
-            let op = Operation::update(
-                key,
-                resolved_payload,
-                Mime128::encode(&content_type)?,
-                build_cli_attributes(&attributes, "update")?,
-            );
+            let op = Operation {
+                operationType: OP_UPDATE,
+                entityKey: key,
+                payload: resolved_payload,
+                contentType: encode_mime128(&content_type)?,
+                attributes: build_cli_attributes(&attributes, "update")?,
+                ..Default::default()
+            };
 
             let receipt = registry
                 .execute(vec![op])
@@ -788,8 +844,13 @@ async fn main() -> Result<()> {
         }
 
         Command::Extend { key, expires_in } => {
-            let btl = compute_btl(expires_in, cli.block_time);
-            let op = Operation::extend(key, btl);
+            let expires_at = expiry_block(&provider, expires_in, cli.block_time).await?;
+            let op = Operation {
+                operationType: OP_EXTEND,
+                entityKey: key,
+                expiresAt: expires_at,
+                ..Default::default()
+            };
 
             let receipt = registry
                 .execute(vec![op])
@@ -803,7 +864,12 @@ async fn main() -> Result<()> {
         }
 
         Command::Transfer { key, new_owner } => {
-            let op = Operation::transfer(key, new_owner);
+            let op = Operation {
+                operationType: OP_TRANSFER,
+                entityKey: key,
+                newOwner: new_owner,
+                ..Default::default()
+            };
 
             let receipt = registry
                 .execute(vec![op])
@@ -817,7 +883,11 @@ async fn main() -> Result<()> {
         }
 
         Command::Delete { key } => {
-            let op = Operation::delete(key);
+            let op = Operation {
+                operationType: OP_DELETE,
+                entityKey: key,
+                ..Default::default()
+            };
 
             let receipt = registry
                 .execute(vec![op])
@@ -831,7 +901,11 @@ async fn main() -> Result<()> {
         }
 
         Command::Expire { key } => {
-            let op = Operation::expire(key);
+            let op = Operation {
+                operationType: OP_EXPIRE,
+                entityKey: key,
+                ..Default::default()
+            };
 
             let receipt = registry
                 .execute(vec![op])
@@ -858,21 +932,6 @@ async fn main() -> Result<()> {
         Command::Hash => {
             let hash = registry.changeSetHash().call().await?;
             println!("{hash}");
-        }
-
-        Command::BlockTiming => {
-            #[derive(Debug, Deserialize)]
-            struct BlockTiming {
-                current_block: u64,
-                current_block_time: u64,
-                duration: u64,
-            }
-            let t: BlockTiming = provider
-                .raw_request("arkiv_getBlockTiming".into(), ())
-                .await?;
-            println!("block:     {}", t.current_block);
-            println!("timestamp: {}", t.current_block_time);
-            println!("duration:  {}s", t.duration);
         }
 
         Command::History { depth } => {
@@ -973,13 +1032,17 @@ async fn main() -> Result<()> {
                         expires_in,
                         attributes,
                     } => {
-                        let btl = compute_btl(*expires_in, cli.block_time);
-                        Operation::create(
-                            btl,
-                            resolve_payload(payload.as_deref(), *size)?,
-                            Mime128::encode(content_type)?,
-                            build_attributes(attributes, &resolve)?,
-                        )
+                        let expires_at =
+                            expiry_block(&provider, *expires_in, cli.block_time).await?;
+                        Operation {
+                            operationType: OP_CREATE,
+                            entityKey: B256::ZERO,
+                            payload: resolve_payload(payload.as_deref(), *size)?,
+                            contentType: encode_mime128(content_type)?,
+                            attributes: build_attributes(attributes, &resolve)?,
+                            expiresAt: expires_at,
+                            newOwner: Address::ZERO,
+                        }
                     }
                     BatchOp::Update {
                         entity_key,
@@ -987,25 +1050,46 @@ async fn main() -> Result<()> {
                         payload,
                         size,
                         attributes,
-                    } => Operation::update(
-                        resolve(entity_key)?,
-                        resolve_payload(payload.as_deref(), *size)?,
-                        Mime128::encode(content_type)?,
-                        build_attributes(attributes, &resolve)?,
-                    ),
+                    } => Operation {
+                        operationType: OP_UPDATE,
+                        entityKey: resolve(entity_key)?,
+                        payload: resolve_payload(payload.as_deref(), *size)?,
+                        contentType: encode_mime128(content_type)?,
+                        attributes: build_attributes(attributes, &resolve)?,
+                        ..Default::default()
+                    },
                     BatchOp::Extend {
                         entity_key,
                         expires_in,
                     } => {
-                        let btl = compute_btl(*expires_in, cli.block_time);
-                        Operation::extend(resolve(entity_key)?, btl)
+                        let expires_at =
+                            expiry_block(&provider, *expires_in, cli.block_time).await?;
+                        Operation {
+                            operationType: OP_EXTEND,
+                            entityKey: resolve(entity_key)?,
+                            expiresAt: expires_at,
+                            ..Default::default()
+                        }
                     }
                     BatchOp::Transfer {
                         entity_key,
                         new_owner,
-                    } => Operation::transfer(resolve(entity_key)?, *new_owner),
-                    BatchOp::Delete { entity_key } => Operation::delete(resolve(entity_key)?),
-                    BatchOp::Expire { entity_key } => Operation::expire(resolve(entity_key)?),
+                    } => Operation {
+                        operationType: OP_TRANSFER,
+                        entityKey: resolve(entity_key)?,
+                        newOwner: *new_owner,
+                        ..Default::default()
+                    },
+                    BatchOp::Delete { entity_key } => Operation {
+                        operationType: OP_DELETE,
+                        entityKey: resolve(entity_key)?,
+                        ..Default::default()
+                    },
+                    BatchOp::Expire { entity_key } => Operation {
+                        operationType: OP_EXPIRE,
+                        entityKey: resolve(entity_key)?,
+                        ..Default::default()
+                    },
                 };
                 sol_ops.push(sol_op);
             }
@@ -1026,7 +1110,7 @@ async fn main() -> Result<()> {
             size,
             expires_in,
         } => {
-            let btl = compute_btl(expires_in, cli.block_time);
+            let expires_at = expiry_block(&provider, expires_in, cli.block_time).await?;
             let nonce_start = provider.get_transaction_count(signer_address).await?;
 
             // Fire all transactions, retrying on pool-full errors
@@ -1034,12 +1118,15 @@ async fn main() -> Result<()> {
             for i in 0..count {
                 let nonce = nonce_start + i as u64;
                 loop {
-                    let op = Operation::create(
-                        btl,
-                        random_payload(size),
-                        Mime128::encode("application/octet-stream")?,
-                        vec![],
-                    );
+                    let op = Operation {
+                        operationType: OP_CREATE,
+                        entityKey: B256::ZERO,
+                        payload: random_payload(size),
+                        contentType: encode_mime128("application/octet-stream")?,
+                        attributes: vec![],
+                        expiresAt: expires_at,
+                        newOwner: Address::ZERO,
+                    };
 
                     match registry
                         .execute(vec![op])

@@ -12,7 +12,6 @@
 
 use std::sync::Arc;
 
-use alloy_consensus::BlockHeader;
 use eyre::{Result, WrapErr, bail};
 use reth_node_builder::{
     FullNodeTypes, NodeAdapter, NodeBuilderWithComponents, NodeComponentsBuilder, NodeTypes,
@@ -20,45 +19,11 @@ use reth_node_builder::{
 };
 use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_primitives::OpPrimitives;
-use reth_storage_api::{BlockNumReader, HeaderProvider};
 
 use crate::exex;
 use crate::genesis::has_arkiv_predeploy;
-use crate::rpc::{ArkivApiServer, ArkivRpc, BlockTimingResponse, BlockTimingSource};
+use crate::rpc::{ArkivApiServer, ArkivRpc};
 use crate::storage::{EntityDbClient, JsonRpcStore, Storage, logging::LoggingStore};
-
-// ---------------------------------------------------------------------------
-// Block timing
-// ---------------------------------------------------------------------------
-
-/// Adapts a reth provider into a [`BlockTimingSource`].
-///
-/// Reads the chain's own canonical head header and its parent to compute
-/// the current block number, its timestamp, and the elapsed seconds since
-/// the previous block — mirroring the op-geth `GetBlockTiming` implementation.
-struct RethBlockTiming<P>(P);
-
-impl<P> BlockTimingSource for RethBlockTiming<P>
-where
-    P: BlockNumReader + HeaderProvider + Send + Sync + 'static,
-{
-    fn block_timing(&self) -> eyre::Result<BlockTimingResponse> {
-        let num = self.0.best_block_number()?;
-        let head = self
-            .0
-            .header_by_number(num)?
-            .ok_or_else(|| eyre::eyre!("head header not found at block {num}"))?;
-        let parent = self
-            .0
-            .header(head.parent_hash())?
-            .ok_or_else(|| eyre::eyre!("parent header not found for block {num}"))?;
-        Ok(BlockTimingResponse {
-            current_block: num,
-            current_block_time: head.timestamp(),
-            duration: head.timestamp().saturating_sub(parent.timestamp()),
-        })
-    }
-}
 
 /// Resolved Arkiv configuration. Decouples "what was decided" from how it
 /// was decided (CLI flags, programmatic config, …).
@@ -153,10 +118,8 @@ where
                 Ok(exex::arkiv_exex(ctx, store))
             })
             .extend_rpc_modules(move |ctx| {
-                let timing: Arc<dyn BlockTimingSource> =
-                    Arc::new(RethBlockTiming(ctx.node().provider.clone()));
                 ctx.modules
-                    .merge_configured(ArkivRpc::new(rpc_client, timing).into_rpc())?;
+                    .merge_configured(ArkivRpc::new(rpc_client).into_rpc())?;
                 Ok(())
             })
         }

@@ -1,11 +1,10 @@
 name: Docker Image (Merge ARM64 + AMD64 Manifests)
 
 on:
-  push:
-    branches:
-      - main
-    tags:
-      - "**"
+  workflow_run:
+    workflows: ["Docker Image (Production ARM64)"]
+    types:
+      - completed
 
 permissions:
   contents: read
@@ -18,23 +17,36 @@ env:
 
 jobs:
   merge:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-24.04
 
     steps:
       - name: Resolve merged tag list
         id: tags
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          EVENT: ${{ github.event.workflow_run.event }}
         run: |
           set -euo pipefail
 
-          # Always tag the merged manifest with the commit SHA.
-          tags="${GITHUB_SHA}"
+          if [[ -z "${SHA}" ]]; then
+            echo "Missing head_sha on triggering workflow_run" >&2
+            exit 1
+          fi
 
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            # Tag push: mirror the upstream tag verbatim.
-            tags="${tags} ${GITHUB_REF_NAME}"
-          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
-            # Push to main: publish the rolling `latest` manifest.
+          # Always tag the merged manifest with the commit SHA.
+          tags="${SHA}"
+
+          # On a push to main the per-arch builds also publish "latest-<arch>", so we
+          # mirror that by publishing a multi-arch "latest" manifest. For a tag push
+          # the upstream workflows publish "<tag>-<arch>" via metadata-action's
+          # type=ref,event=tag rule, in which case head_branch on the workflow_run
+          # event is the tag name itself (e.g. "v1.2.3").
+          if [[ "${EVENT}" == "push" && "${HEAD_BRANCH}" == "main" ]]; then
             tags="${tags} latest"
+          elif [[ -n "${HEAD_BRANCH}" && "${HEAD_BRANCH}" != "main" ]]; then
+            tags="${tags} ${HEAD_BRANCH}"
           fi
 
           echo "Merged tags: ${tags}"
@@ -50,41 +62,34 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Wait for per-arch images and merge into multi-arch manifests
+      - name: Merge per-arch images into multi-arch manifests
         env:
           REGISTRY: ${{ env.REGISTRY }}
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
           IMAGE_NAME_DEV: ${{ env.IMAGE_NAME_DEV }}
-          SHA: ${{ github.sha }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
           TAGS: ${{ steps.tags.outputs.tags }}
         run: |
           set -euo pipefail
 
-          # Shared 1-hour deadline for finding both per-arch images of both
-          # `arkiv-node` and `arkiv-node-dev`. If either is still missing when
-          # the deadline elapses we fail the workflow.
-          DEADLINE=$(( $(date +%s) + 3600 ))
-
           wait_for_image() {
             local image_ref="$1"
-            local arch_label="$2"
+            local attempts=20
+            local delay=60
 
-            while true; do
-              # Any non-zero exit from imagetools (404 while propagating,
-              # transient 5xx, ghcr rate-limit, etc.) is treated as "not ready
-              # yet" — keep polling until the deadline.
+            for attempt in $(seq 1 "${attempts}"); do
               if docker buildx imagetools inspect "${image_ref}" >/dev/null 2>&1; then
-                echo "Found ${arch_label} image: ${image_ref}"
+                echo "Found ${image_ref}"
                 return 0
               fi
 
-              if [[ $(date +%s) -ge ${DEADLINE} ]]; then
-                echo "Timed out after 1 hour waiting for ${arch_label} image ${image_ref}" >&2
+              if [[ "${attempt}" == "${attempts}" ]]; then
+                echo "Timed out waiting for ${image_ref} after $((attempts * delay / 60)) minutes" >&2
                 return 1
               fi
 
-              echo "Waiting for ${arch_label} image ${image_ref} (retrying in 60s)..."
-              sleep 60
+              echo "Waiting for ${image_ref} to appear (${attempt}/${attempts}); retrying in $((delay / 60)) minute"
+              sleep "${delay}"
             done
           }
 
@@ -94,9 +99,8 @@ jobs:
             local src_amd64="${repo}:${SHA}-amd64"
             local src_arm64="${repo}:${SHA}-arm64"
 
-            # Poll AMD64 first, then ARM64, both at 1-minute intervals.
-            wait_for_image "${src_amd64}" "AMD64"
-            wait_for_image "${src_arm64}" "ARM64"
+            wait_for_image "${src_amd64}"
+            wait_for_image "${src_arm64}"
 
             echo "Merging ${src_amd64} + ${src_arm64}"
             for tag in ${TAGS}; do

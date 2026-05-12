@@ -1,16 +1,18 @@
 //! Arkiv ExEx — filters blocks for EntityRegistry transactions,
 //! decodes operations, and forwards them to the configured Storage backend.
 
-use crate::storage::{ArkivBlock, ArkivBlockHeader, ArkivBlockRef, Storage};
+use crate::storage::{ArkivBlock, ArkivBlockHeader, ArkivBlockRef, ArkivTransaction, Storage};
 use alloy_consensus::{BlockHeader, Transaction, TxReceipt};
 use alloy_primitives::{Address, B256, U256};
+use alloy_sol_types::{SolCall, SolEvent};
+use arkiv_bindings::IEntityRegistry::{ChangeSetHashUpdate, EntityOperation, executeCall};
 use arkiv_bindings::storage_layout::{
     block_node_slot, decode_block_node, decode_hash_at, decode_head_block, decode_tx_op_count,
     hash_at_slot, head_block_slot, tx_op_count_slot,
 };
 use arkiv_bindings::wire;
 use arkiv_genesis::ENTITY_REGISTRY_ADDRESS;
-use eyre::Result;
+use eyre::{Result, bail};
 use futures_util::TryStreamExt;
 use reth_execution_types::Chain;
 use reth_exex::{ExExContext, ExExEvent, ExExNotification};
@@ -61,8 +63,8 @@ where
 ///
 /// `prior_rolling` is the rolling changeset hash *before* the first block
 /// in this chain (read from contract storage at the parent block). Empty
-/// blocks inherit this value; non-empty blocks update the carried value
-/// for subsequent empty blocks.
+/// blocks inherit this value; non-empty blocks emit their last op's hash
+/// and update the carried value for subsequent empty blocks.
 fn extract_blocks(chain: &Arc<OpChain>, mut prior_rolling: B256) -> Vec<ArkivBlock> {
     let mut blocks = Vec::new();
     for (block, receipts) in chain.blocks_and_receipts() {
@@ -83,15 +85,8 @@ fn extract_blocks(chain: &Arc<OpChain>, mut prior_rolling: B256) -> Vec<ArkivBlo
 
             let tx_hash = B256::from(tx.tx_hash());
 
-            let registry_logs: Vec<_> = receipt
-                .logs()
-                .iter()
-                .filter(|l| l.address == ENTITY_REGISTRY_ADDRESS)
-                .cloned()
-                .collect();
-
-            let parsed = match wire::ParsedRegistryTx::parse(tx.input(), &registry_logs) {
-                Ok(p) => p,
+            let operations = match decode_arkiv_tx(tx.input(), receipt.logs(), &mut last_in_block) {
+                Ok(ops) => ops,
                 Err(e) => {
                     tracing::error!(
                         tx = %tx_hash,
@@ -103,25 +98,13 @@ fn extract_blocks(chain: &Arc<OpChain>, mut prior_rolling: B256) -> Vec<ArkivBlo
                 }
             };
 
-            if parsed.is_empty() {
-                continue;
-            }
-
-            match parsed.decode(tx_hash, tx_index as u32, *sender) {
-                Ok((arkiv_tx, last_hash)) => {
-                    if let Some(h) = last_hash {
-                        last_in_block = Some(h);
-                    }
-                    transactions.push(arkiv_tx);
-                }
-                Err(e) => {
-                    tracing::error!(
-                        tx = %tx_hash,
-                        block = block.header().number(),
-                        error = %e,
-                        "failed to decode registry transaction operations"
-                    );
-                }
+            if !operations.is_empty() {
+                transactions.push(ArkivTransaction {
+                    hash: tx_hash,
+                    index: tx_index as u32,
+                    sender: *sender,
+                    operations,
+                });
             }
         }
 
@@ -214,4 +197,82 @@ fn extract_block_refs(chain: &Arc<OpChain>) -> Vec<ArkivBlockRef> {
 
     refs.reverse();
     refs
+}
+
+// ---------------------------------------------------------------------------
+// Per-tx decode: calldata + paired event logs -> typed wire operations.
+// ---------------------------------------------------------------------------
+
+/// Decode one EntityRegistry transaction into a vector of typed
+/// `wire::Operation`s, updating `last_in_block` with the rolling-hash value
+/// of each successfully-decoded op.
+///
+/// Pairing contract (mirrors `EntityRegistry.sol::execute`, lines 113–122):
+/// each calldata op causes `_dispatch` to emit one `EntityOperation`,
+/// followed by one `ChangeSetHashUpdate` from the loop body. So the
+/// receipt's registry-address logs interleave per op and the three
+/// sequences (calldata `ops`, `EntityOperation` events, `ChangeSetHashUpdate`
+/// events) are 1:1 in emission order. Anything else is contract drift —
+/// bail and let the caller skip the tx (same loud-failure semantics as the
+/// previous `decode_registry_transaction` Err path).
+///
+/// `last_in_block` is updated *after* each successful per-op decode using
+/// `cshu.changeSetHash`, so a per-op decode failure breaks the rolling-hash
+/// chain at that tx — preserves today's behaviour and avoids silently
+/// masking decode failures.
+fn decode_arkiv_tx(
+    input: &[u8],
+    logs: &[alloy_primitives::Log],
+    last_in_block: &mut Option<B256>,
+) -> Result<Vec<wire::Operation>> {
+    let call = executeCall::abi_decode(input)?;
+
+    let mut entity_events: Vec<EntityOperation> = Vec::new();
+    let mut hash_events: Vec<ChangeSetHashUpdate> = Vec::new();
+    for log in logs.iter().filter(|l| l.address == ENTITY_REGISTRY_ADDRESS) {
+        match log.topics().first() {
+            Some(t) if *t == EntityOperation::SIGNATURE_HASH => {
+                entity_events.push(EntityOperation::decode_log_data(&log.data)?);
+            }
+            Some(t) if *t == ChangeSetHashUpdate::SIGNATURE_HASH => {
+                hash_events.push(ChangeSetHashUpdate::decode_log_data(&log.data)?);
+            }
+            other => {
+                bail!("unexpected log from EntityRegistry: topic0={:?}", other);
+            }
+        }
+    }
+
+    if call.ops.len() != entity_events.len() || call.ops.len() != hash_events.len() {
+        bail!(
+            "event/calldata length mismatch: ops={}, entity_events={}, hash_events={}",
+            call.ops.len(),
+            entity_events.len(),
+            hash_events.len(),
+        );
+    }
+
+    let mut out = Vec::with_capacity(call.ops.len());
+    for (op_index, ((cd, eo), cshu)) in call
+        .ops
+        .iter()
+        .zip(&entity_events)
+        .zip(&hash_events)
+        .enumerate()
+    {
+        // Cheap sanity check: both events index on entityKey for the same op.
+        if eo.entityKey != cshu.entityKey {
+            bail!(
+                "event entityKey mismatch at op_index={}: EntityOperation={}, ChangeSetHashUpdate={}",
+                op_index,
+                eo.entityKey,
+                cshu.entityKey,
+            );
+        }
+        let wire_op = wire::decode_operation(op_index as u32, cd, eo, cshu)?;
+        *last_in_block = Some(cshu.changeSetHash);
+        out.push(wire_op);
+    }
+
+    Ok(out)
 }
