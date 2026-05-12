@@ -55,9 +55,9 @@ enum Command {
         #[arg(long, default_value = "application/octet-stream")]
         content_type: String,
 
-        /// How long until the entity expires (e.g. "1h", "30m", "7d").
-        #[arg(long, default_value = "1h", value_parser = humantime::parse_duration)]
-        expires_in: Duration,
+        /// Blocks-to-live: how many blocks until the entity expires.
+        #[arg(long)]
+        btl: u32,
 
         /// Payload bytes. Raw string by default; 0x-prefixed values are decoded as hex bytes.
         /// Mutually exclusive with `--random-payload`.
@@ -111,9 +111,9 @@ enum Command {
         #[arg(long)]
         key: B256,
 
-        /// How long from now until expiry (e.g. "2h", "1d").
-        #[arg(long, value_parser = humantime::parse_duration)]
-        expires_in: Duration,
+        /// Blocks-to-live: how many blocks until the entity expires.
+        #[arg(long)]
+        btl: u32,
     },
 
     /// Transfer entity ownership.
@@ -201,9 +201,9 @@ enum Command {
         #[arg(long, default_value = "256")]
         size: usize,
 
-        /// How long until entities expire (e.g. "1h", "7d").
-        #[arg(long, default_value = "1h", value_parser = humantime::parse_duration)]
-        expires_in: Duration,
+        /// Blocks-to-live: how many blocks until each entity expires.
+        #[arg(long)]
+        btl: u32,
     },
 
     /// Continuously generate a weighted mix of entity operations against
@@ -216,11 +216,6 @@ fn random_payload(size: usize) -> Bytes {
     let mut buf = vec![0u8; size];
     rng.fill(&mut buf[..]);
     Bytes::from(buf)
-}
-
-/// Convert a duration into a blocks-to-live value.
-fn compute_btl(duration: Duration, block_time: Duration) -> u32 {
-    (duration.as_secs() / block_time.as_secs().max(1)) as u32
 }
 
 fn print_events(logs: &[RpcLog]) {
@@ -260,11 +255,6 @@ impl<'de> Deserialize<'de> for EntityKeyRef {
             Ok(EntityKeyRef::Literal(key))
         }
     }
-}
-
-fn de_humantime<'de, D: Deserializer<'de>>(de: D) -> std::result::Result<Duration, D::Error> {
-    let s = String::deserialize(de)?;
-    humantime::parse_duration(&s).map_err(serde::de::Error::custom)
 }
 
 fn default_content_type() -> String {
@@ -308,8 +298,7 @@ enum BatchOp {
         payload: Option<String>,
         /// Random payload size in bytes. Mutually exclusive with `payload`.
         size: Option<usize>,
-        #[serde(deserialize_with = "de_humantime", rename = "expiresIn")]
-        expires_in: Duration,
+        btl: u32,
         #[serde(default)]
         attributes: Vec<BatchAttribute>,
     },
@@ -326,8 +315,7 @@ enum BatchOp {
     Extend {
         #[serde(rename = "entityKey")]
         entity_key: EntityKeyRef,
-        #[serde(deserialize_with = "de_humantime", rename = "expiresIn")]
-        expires_in: Duration,
+        btl: u32,
     },
     Transfer {
         #[serde(rename = "entityKey")]
@@ -737,7 +725,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Create {
             content_type,
-            expires_in,
+            btl,
             payload,
             random_payload,
             size,
@@ -746,7 +734,6 @@ async fn main() -> Result<()> {
             let resolved_payload = resolve_cli_payload(payload.as_deref(), random_payload, size)?;
             let content_type = Mime128::encode(&content_type)?;
             let attributes = build_cli_attributes(&attributes, "create")?;
-            let btl = compute_btl(expires_in, cli.block_time);
             let op = Operation::create(btl, resolved_payload, content_type, attributes);
 
             let receipt = registry
@@ -787,8 +774,7 @@ async fn main() -> Result<()> {
             print_events(receipt.inner.logs());
         }
 
-        Command::Extend { key, expires_in } => {
-            let btl = compute_btl(expires_in, cli.block_time);
+        Command::Extend { key, btl } => {
             let op = Operation::extend(key, btl);
 
             let receipt = registry
@@ -970,12 +956,11 @@ async fn main() -> Result<()> {
                         content_type,
                         payload,
                         size,
-                        expires_in,
+                        btl,
                         attributes,
                     } => {
-                        let btl = compute_btl(*expires_in, cli.block_time);
                         Operation::create(
-                            btl,
+                            *btl,
                             resolve_payload(payload.as_deref(), *size)?,
                             Mime128::encode(content_type)?,
                             build_attributes(attributes, &resolve)?,
@@ -995,11 +980,8 @@ async fn main() -> Result<()> {
                     ),
                     BatchOp::Extend {
                         entity_key,
-                        expires_in,
-                    } => {
-                        let btl = compute_btl(*expires_in, cli.block_time);
-                        Operation::extend(resolve(entity_key)?, btl)
-                    }
+                        btl,
+                    } => Operation::extend(resolve(entity_key)?, *btl),
                     BatchOp::Transfer {
                         entity_key,
                         new_owner,
@@ -1024,9 +1006,8 @@ async fn main() -> Result<()> {
         Command::Spam {
             count,
             size,
-            expires_in,
+            btl,
         } => {
-            let btl = compute_btl(expires_in, cli.block_time);
             let nonce_start = provider.get_transaction_count(signer_address).await?;
 
             // Fire all transactions, retrying on pool-full errors

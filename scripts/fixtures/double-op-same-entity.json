@@ -3,7 +3,7 @@
     "type": "create",
     "contentType": "application/json",
     "payload": "{\"v\":1}",
-    "expiresIn": "1h"
+    "btl": 1800
   },
   {
     "type": "update",
