@@ -1,30 +1,22 @@
 //! Arkiv node library.
 //!
-//! This crate exposes the building blocks the `arkiv-node` binary uses to
-//! turn an op-stack node builder into an Arkiv node:
+//! Post-v1-demolition scaffold. The v1 ExEx + EntityDB JSON-RPC bridge has
+//! been removed; the v2 precompile + custom `EvmFactory` + `ArkivPairs`
+//! MDBX table are not yet wired in. See `docs/v2-migration-plan.md` (in
+//! workspace root) for the phased plan.
 //!
-//! - [`ArkivExt`] — clap args (`--arkiv.db-url`, `--arkiv.debug`, storaged).
-//! - [`ArkivMode`] — resolved configuration (off / debug / EntityDB).
-//! - [`resolve_mode`] — validates flags against the loaded chainspec and
-//!   performs the EntityDB health check. Returns an [`ArkivMode`].
-//! - [`install`] — wires the ExEx (and the `arkiv_*` RPC namespace, when
-//!   applicable) onto an op-stack [`NodeBuilderWithComponents`].
+//! Currently exposes:
+//! - [`ArkivExt`] — clap args (empty wrapper over `RollupArgs`; will grow
+//!   v2 flags as needed).
 //! - [`has_arkiv_predeploy`] — bytecode-equality check for the
 //!   EntityRegistry predeploy in a chainspec's genesis alloc.
-//!
-//! Consumers compose these the same way op-reth's
-//! `launch_node_with_proof_history` composes its ExEx onto `OpNode`.
-
-pub mod exex;
-pub mod rpc;
-pub mod storage;
+//! - [`install`] — currently a no-op pass-through; Phase 2+ will fill it
+//!   in with the `EvmFactory` + RPC wiring.
 
 mod cli;
 mod genesis;
 mod install;
-mod storaged;
 
 pub use cli::ArkivExt;
 pub use genesis::has_arkiv_predeploy;
-pub use install::{ArkivMode, install, resolve_mode};
-pub use storaged::ArkivStoragedProcess;
+pub use install::install;

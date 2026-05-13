@@ -18,23 +18,10 @@ reth-optimism-cli.workspace = true
 reth-optimism-chainspec.workspace = true
 reth-optimism-primitives.workspace = true
 
-reth-exex.workspace = true
-reth-node-api.workspace = true
 reth-node-builder.workspace = true
-reth-execution-types.workspace = true
-reth-storage-api.workspace = true
 
-arkiv-bindings.workspace = true
 arkiv-genesis.workspace = true
 alloy-primitives.workspace = true
-alloy-consensus.workspace = true
 
 clap.workspace = true
 eyre.workspace = true
-reqwest.workspace = true
-serde.workspace = true
-futures-util.workspace = true
-serde_json.workspace = true
-tracing.workspace = true
-tokio.workspace = true
-jsonrpsee.workspace = true

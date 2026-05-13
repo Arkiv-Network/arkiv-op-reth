@@ -14,7 +14,6 @@ RUN apt-get update \
 
 COPY --chmod=0755 build-artifacts/arkiv-node /usr/local/bin/arkiv-node
 COPY --chmod=0755 build-artifacts/arkiv-cli /usr/local/bin/arkiv-cli
-COPY --chmod=0755 build-artifacts/arkiv-storaged /usr/local/bin/arkiv-storaged
 
 RUN mkdir -p /app /home/docker \
   && chown -R docker:docker /app /home/docker

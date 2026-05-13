@@ -1392,28 +1392,15 @@ dependencies = [
 name = "arkiv-node"
 version = "0.1.0"
 dependencies = [
- "alloy-consensus",
  "alloy-primitives",
- "arkiv-bindings",
  "arkiv-genesis",
  "clap",
  "eyre",
- "futures-util",
- "jsonrpsee",
- "reqwest 0.12.28",
- "reth-execution-types",
- "reth-exex",
- "reth-node-api",
  "reth-node-builder",
  "reth-optimism-chainspec",
  "reth-optimism-cli",
  "reth-optimism-node",
  "reth-optimism-primitives",
- "reth-storage-api",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -3714,7 +3701,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -6249,7 +6235,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots 1.0.7",
 ]
 
 [[package]]

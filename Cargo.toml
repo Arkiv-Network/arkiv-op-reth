@@ -21,10 +21,8 @@ reth-optimism-chainspec = { git = "https://github.com/ethereum-optimism/optimism
 reth-optimism-primitives = { git = "https://github.com/ethereum-optimism/optimism.git", tag = "op-reth/v2.2.0" }
 
 # Reth (pinned to same rev as op-reth/v2.2.0)
-reth-exex = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
 reth-node-api = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
 reth-node-builder = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
-reth-execution-types = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
 
 # Arkiv bindings (from arkiv-contracts repo)
@@ -54,7 +52,6 @@ serde = { version = "1", features = ["derive"] }
 futures-util = "0.3"
 tracing = "0.1"
 hex = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 jsonrpsee = { version = "0.26", features = ["server", "macros"] }

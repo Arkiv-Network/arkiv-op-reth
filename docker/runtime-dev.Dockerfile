@@ -17,7 +17,6 @@ RUN curl -sL https://github.com/foundry-rs/foundry/releases/download/v1.7.0/foun
 
 COPY --chmod=0755 build-artifacts/arkiv-node /usr/local/bin/arkiv-node
 COPY --chmod=0755 build-artifacts/arkiv-cli /usr/local/bin/arkiv-cli
-COPY --chmod=0755 build-artifacts/arkiv-storaged /usr/local/bin/arkiv-storaged
 COPY --chmod=0755 docker/fund-account.sh /usr/local/bin/fund-account.sh
 
 COPY chainspec/dev.base.json /opt/arkiv/dev.base.json
