@@ -639,36 +639,29 @@ fn resolve_payload(payload: Option<&str>, size: Option<usize>) -> Result<Bytes> 
 /// Splice the Arkiv predeploy and prefunded dev accounts into a geth-format
 /// genesis JSON.
 ///
-/// Reads `chainId` from the input's `config`, then merges
-/// [`arkiv_genesis::genesis_alloc`] into the alloc:
-///   - the EntityRegistry predeploy at the canonical address (runtime
-///     bytecode generated for this chain ID so the EIP-712 cached domain
-///     separator matches),
+/// Merges [`arkiv_genesis::genesis_alloc`] into the alloc:
+///   - the `EntityRegistry` predeploy at `0x44…0044`,
+///   - the system account at `0x44…0046` (nonce=1, no code),
 ///   - the [`arkiv_genesis::ARKIV_DEV_ACCOUNT_COUNT`] mnemonic-derived
 ///     dev accounts, each prefunded with [`arkiv_genesis::arkiv_dev_balance_wei`].
 ///
 /// Output is pretty-printed back to disk (overwriting the input by
 /// default, or to `out` if specified).
 fn inject_predeploy(input: &std::path::Path, out: Option<&std::path::Path>) -> Result<()> {
-    use arkiv_genesis::{ENTITY_REGISTRY_ADDRESS, genesis_alloc};
+    use arkiv_genesis::{ENTITY_REGISTRY_ADDRESS, SYSTEM_ACCOUNT_ADDRESS, genesis_alloc};
 
     let raw = std::fs::read_to_string(input)
         .map_err(|e| eyre::eyre!("failed to read {}: {}", input.display(), e))?;
     let mut genesis: arkiv_genesis::Genesis = serde_json::from_str(&raw)
         .map_err(|e| eyre::eyre!("failed to parse {} as genesis JSON: {}", input.display(), e))?;
 
-    let chain_id = genesis.config.chain_id;
-    if chain_id == 0 {
-        bail!("genesis config.chainId is zero — refusing to inject");
+    for addr in [ENTITY_REGISTRY_ADDRESS, SYSTEM_ACCOUNT_ADDRESS] {
+        if genesis.alloc.contains_key(&addr) {
+            eprintln!("warning: alloc already contains an entry at {addr}; overwriting");
+        }
     }
 
-    if genesis.alloc.contains_key(&ENTITY_REGISTRY_ADDRESS) {
-        eprintln!(
-            "warning: alloc already contains an entry at {ENTITY_REGISTRY_ADDRESS}; overwriting",
-        );
-    }
-
-    let arkiv_alloc = genesis_alloc(chain_id)?;
+    let arkiv_alloc = genesis_alloc()?;
     let account_count = arkiv_alloc.len();
     for (addr, account) in arkiv_alloc {
         genesis.alloc.insert(addr, account);
@@ -680,10 +673,8 @@ fn inject_predeploy(input: &std::path::Path, out: Option<&std::path::Path>) -> R
         .map_err(|e| eyre::eyre!("failed to write {}: {}", dest.display(), e))?;
 
     eprintln!(
-        "injected EntityRegistry predeploy at {} + {} dev accounts (chainId={}) into {}",
-        ENTITY_REGISTRY_ADDRESS,
-        account_count - 1,
-        chain_id,
+        "injected EntityRegistry + system-account predeploys + {} dev accounts into {}",
+        account_count - 2,
         dest.display(),
     );
     Ok(())

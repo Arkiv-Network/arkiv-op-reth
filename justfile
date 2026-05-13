@@ -31,6 +31,21 @@ lint:
 fmt:
     cargo fmt --all
 
+# ── Contracts ────────────────────────────────────────────────
+
+# Compile the Solidity sources in contracts/ and refresh the runtime
+# artifact at contracts/artifacts/EntityRegistry.runtime.hex. arkiv-genesis
+# reads that file via `include_str!`, so re-run this after editing
+# contracts/src/*.sol.
+contracts-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd contracts
+    forge build
+    jq -r '.deployedBytecode.object' out/EntityRegistry.sol/EntityRegistry.json \
+        > artifacts/EntityRegistry.runtime.hex
+    echo "wrote contracts/artifacts/EntityRegistry.runtime.hex ($(wc -c < artifacts/EntityRegistry.runtime.hex) bytes)"
+
 # ── Node ─────────────────────────────────────────────────────
 
 # Print an Arkiv dev genesis JSON to stdout (dev.base.json + injected predeploy)

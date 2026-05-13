@@ -86,38 +86,77 @@ No `BlockExecutor` wrapper. No system call. No ExEx. No `arkiv_stateRoot` slot.
 
 ### EntityRegistry Smart Contract
 
-`EntityRegistry` owns ownership and lifetime — the validation gate that protects entity state from unauthorised mutation.
+`EntityRegistry` owns ownership and lifetime — the validation gate that protects entity state from unauthorised mutation. The Solidity source lives in [`contracts/src/EntityRegistry.sol`](../contracts/src/EntityRegistry.sol); the runtime bytecode is built with `just contracts-build` and committed to `contracts/artifacts/EntityRegistry.runtime.hex` (consumed by `arkiv-genesis` via `include_str!`).
+
+**SDK compatibility constraint.** The external surface — the `execute(Operation[])` selector, the `EntityOperation` event signature, the `nonces(address)` and `entityKey(address,uint32)` views, the `Operation` / `Attribute` / `Mime128` / `Ident32` / `BlockNumber32` struct and type layouts, and the op-type constants (`CREATE=1 .. EXPIRE=6`) — is held identical to arkiv-contracts v1 so the existing Rust SDK (`arkiv-bindings` + downstream clients) keeps working without changes. Internal storage and the contract↔precompile boundary are free to evolve.
+
+The contract stores only what it needs to enforce ownership and expiration:
 
 ```solidity
 struct EntityRecord {
-    address owner;
-    uint64  expiresAt;
+    address       owner;
+    BlockNumber32 expiresAt;     // uint32 UDVT, packs with `owner` into one slot
 }
 
-mapping(address sender => uint64)            public createNonce;
-mapping(bytes32 entityKey => EntityRecord)   public entities;
+mapping(address owner    => uint32)        public nonces;
+mapping(bytes32 entityKey => EntityRecord) public entities;
 ```
 
-Op set: `create | update | delete | extend | transfer | expire`. The contract validates each op against the `entities` mapping before dispatching to the precompile:
+Everything else that used to live on the contract in v1 (the rolling changeset hash, `_hashAt` / `_txOpCount` / `_blocks` maps, `Commitment` with `creator` / `createdAt` / `updatedAt` / `coreHash`, EIP-712 domain machinery) has been removed. The `EntityOperation` event still carries an `entityHash` field for ABI compatibility, but the value is always `bytes32(0)` in v2 — the source of truth for entity content is the entity account in the trie.
+
+Op set: `create | update | delete | extend | transfer | expire`. The contract validates each op against the `entities` mapping in order, applies its own state changes, emits the per-op `EntityOperation` event, and accumulates a per-op record:
 
 | Op | Contract validation | Contract state change |
 |---|---|---|
-| `create` | (sender pays fee; no per-entity check) | mint `entityKey`; insert `(owner, expiresAt)` |
-| `update` | `msg.sender == owner`; `block.number ≤ expiresAt` | none |
-| `extend` | `msg.sender == owner`; `newExpiresAt > block.number` | update `expiresAt` |
-| `transfer` | `msg.sender == owner`; `block.number ≤ expiresAt` | update `owner` |
-| `delete` | `msg.sender == owner` | remove entry |
-| `expire` (anyone may call) | `block.number > expiresAt` | remove entry |
+| `create` | `btl > 0` | mint `entityKey`; insert `(owner=sender, expiresAt)` |
+| `update` | exists; `msg.sender == owner`; not expired | none |
+| `extend` | exists; `msg.sender == owner`; not expired; `btl > 0`; `newExpiresAt > stored` | update `expiresAt` |
+| `transfer` | exists; `msg.sender == owner`; not expired; `newOwner ≠ 0`; `newOwner ≠ owner` | update `owner` |
+| `delete` | exists; `msg.sender == owner`; not expired | remove entry |
+| `expire` (anyone may call) | exists; `block.number > expiresAt` | remove entry |
 
 `entityKey` is minted from a sender-scoped nonce:
 ```
-entityKey = keccak256(chainId || registryAddress || msg.sender || createNonce[msg.sender])
+entityKey = keccak256(chainId || registryAddress || msg.sender || nonces[msg.sender])
 ```
-The derivation is EVM-computable so clients holding the sender's current `createNonce` can predict the key before submitting the tx, and the contract can emit `entityKey` in its log.
+The derivation is exposed via the `entityKey(address,uint32)` view so clients holding the sender's current `nonces` value can predict the key before submitting the tx — useful for cross-references inside a batch.
 
-After validating and updating its own state, the contract calls the precompile with the decoded op batch + `msg.sender` + the minted `entityKey`s + (for ops that depend on it) the new and/or old `owner` and `expiresAt` values. If the precompile reverts (content violation, OOG), the whole EVM tx reverts and the contract's storage changes roll back atomically.
+After validating and updating its own state for every op in the batch, the contract dispatches the **whole batch** to the precompile in a single `CALL`:
 
-The contract emits one `EntityOperation` event per op for indexers and SDKs. The log carries only op-identity fields (`entityKey`, sender, op type, block number) — content (payload, annotations) is not in the log because the source of truth for content is the entity account in the trie.
+```solidity
+struct OpRecord {                              // internal, not part of the SDK ABI
+    uint8                operationType;        // Entity.CREATE .. Entity.EXPIRE
+    address              sender;               // msg.sender at validate time
+    bytes32              entityKey;
+    address              newOwner;             // CREATE / TRANSFER
+    BlockNumber32        newExpiresAt;         // CREATE / EXTEND
+    bytes                payload;              // CREATE / UPDATE
+    Mime128              contentType;          // CREATE / UPDATE
+    Entity.Attribute[]   attributes;           // CREATE / UPDATE
+}
+
+function _callPrecompile(OpRecord[] memory records) internal {
+    (bool ok, bytes memory ret) = ARKIV_PRECOMPILE.call(abi.encode(records));
+    if (!ok) revert PrecompileFailed(ret);
+}
+```
+
+There are **no `old*` fields** — for ops that need the entity's pre-op `owner` or `expiresAt` (to remove from a bitmap, or to preserve in the re-encoded RLP), the precompile reads them from the existing entity account's RLP, which carries `owner` and `expires_at` (see [EntityRLP](#entityrlp)). This is the trade-off behind the intentional duplication.
+
+Per-op `OpRecord` field assignments:
+
+| Op | newOwner | newExpiresAt | payload / contentType / attributes | Precompile reads old RLP for |
+|---|---|---|---|---|
+| CREATE | sender | current + btl | forwarded | — (entity doesn't exist yet) |
+| UPDATE | — | — | forwarded | `owner`, `expiresAt`, old annotations (for diff) |
+| EXTEND | — | current + btl | — | `owner`, `payload`, `contentType`, `attributes`, old `expiresAt` (for `$expiration` bitmap remove) |
+| TRANSFER | op.newOwner | — | — | `expiresAt`, `payload`, `contentType`, `attributes`, old `owner` (for `$owner` bitmap remove) |
+| DELETE | — | — | — | `owner`, `expiresAt`, annotations (for full bitmap cleanup) |
+| EXPIRE | — | — | — | same as DELETE |
+
+Uniform shape across op types lets the precompile decode one ABI envelope and dispatch internally on `operationType`. If the precompile reverts (content violation, OOG), the whole EVM tx reverts and the contract's storage changes roll back atomically.
+
+**Note on EXTEND and TRANSFER.** Because the entity RLP now carries `owner` and `expires_at`, both ops re-encode the RLP (previously they were bitmap-only). The cost is a full `SetCode` per op; the gain is that query reads against the entity account are self-sufficient with no contract-storage stitching.
 
 ### Arkiv Precompile
 
@@ -128,7 +167,7 @@ The precompile is the per-transaction synchronous handler that performs content 
 - **Trie state mutation.** Every consensus-critical write goes through revm's journaled state via `EvmInternals`: `CreateAccount`, `SetNonce`, `SetCode`, `SetState` on entity accounts, pair accounts, and the system account.
 - **`ArkivPairs` MDBX write** on first sight of a new pair. This is the one direct MDBX touch and is not journaled by revm.
 
-The precompile does **not** validate ownership or liveness — `EntityRegistry` has already done that before calling. The precompile trusts the inputs the contract passes (owner, expiresAt, prior owner/expiresAt where relevant, the minted entityKey on create).
+The precompile does **not** validate ownership or liveness — `EntityRegistry` has already done that before calling. The precompile trusts the contract's inputs (sender, entityKey, `newOwner`/`newExpiresAt` where relevant, and the payload/contentType/attributes for content-changing ops). Pre-op `owner` and `expires_at` are recovered from the existing entity account's RLP, not passed by the contract.
 
 The precompile is registered through op-reth's `EvmFactory` extension. It implements alloy-evm's `Precompile` trait, declares `supports_caching = false`, and refuses non-direct calls — STATICCALL, DELEGATECALL, value-bearing calls, and calls from any address other than `EntityRegistry` all return `PrecompileError::Fatal`.
 
@@ -136,18 +175,18 @@ The precompile is registered through op-reth's `EvmFactory` extension. It implem
 
 ## 2. State Model
 
-All Arkiv state in the trie lives in three kinds of Ethereum accounts: entity accounts (one per entity), pair accounts (one per `(annotKey, annotVal)` ever seen — these hold the bitmaps), and the singleton system account. The `EntityRegistry` contract holds its own per-entity `(owner, expiresAt)` mapping plus the sender-scoped `createNonce`. Outside the trie, the `ArkivPairs` MDBX table holds the append-only pair-existence index.
+All Arkiv state in the trie lives in three kinds of Ethereum accounts: entity accounts (one per entity), pair accounts (one per `(annotKey, annotVal)` ever seen — these hold the bitmaps), and the singleton system account. The `EntityRegistry` contract holds its own per-entity `(owner, expiresAt)` mapping plus the sender-scoped `nonces`. Outside the trie, the `ArkivPairs` MDBX table holds the append-only pair-existence index.
 
 ### Entity Accounts
 
 #### Address Derivation
 
 ```
-entityKey      = keccak256(chainId || registryAddress || msg.sender || createNonce)
+entityKey      = keccak256(chainId || registryAddress || msg.sender || nonces[msg.sender])
 entity_address = entityKey[:20]
 ```
 
-`createNonce` is held in `EntityRegistry`, incremented once per `Create` op. The payload is intentionally excluded from the derivation: the address is a pure identity anchor. Content commitment is handled by `codeHash`.
+`nonces[msg.sender]` is held in `EntityRegistry` (per-caller `uint32` counter), incremented once per `Create` op. The payload is intentionally excluded from the derivation: the address is a pure identity anchor. Content commitment is handled by `codeHash`.
 
 #### Account Structure
 
@@ -178,6 +217,8 @@ struct EntityRlp {
     payload:             Vec<u8>,
     creator:             Address,
     created_at_block:    u64,
+    owner:               Address,
+    expires_at:          u64,
     content_type:        String,
     key:                 B256,                  // full 32-byte entityKey
     string_annotations:  Vec<StringAnnotRlp>,
@@ -185,24 +226,36 @@ struct EntityRlp {
 }
 ```
 
-The RLP holds everything immutable about the entity (creator, createdAtBlock, content_type, key, annotations) plus the payload. `owner` and `expires_at` are **not** in the RLP — they live in `EntityRegistry`'s storage so the contract can validate against them without decoding RLP from inside Solidity.
+The RLP is **self-sufficient for query reads**: every field a client needs to render an entity — payload, content type, owner, expiry, creator, creation block, full key, all annotations — comes from a single `eth_getCode(entity_address)`. No second lookup against the `EntityRegistry`'s storage required.
 
-`creator` and `created_at_block` stay in the RLP because they are immutable — set once at `Create`, never updated — so there is no sync cost. They are present to support direct lookup of "who created entity X" and "when was entity X created" without consulting logs; the corresponding built-in annotations `$creator` and `$createdAtBlock` provide the reverse direction via bitmaps.
+This intentionally duplicates `owner` and `expires_at` between the entity RLP and the `EntityRegistry` contract's `entities` mapping. The two are written together by the precompile (single revm tx, both via journaled state) so they stay in lockstep across reorgs and re-execution. The contract is the source of truth for **owner / expiry validation** (cheap, no RLP decode in Solidity); the RLP is the source of truth for **query reads** (single account read, no stitching).
+
+`creator` and `created_at_block` are immutable — set once at `Create`, never updated. `owner` is rewritten on `Transfer`; `expires_at` is rewritten on `Extend`. The corresponding built-in annotations (`$creator`, `$createdAtBlock`, `$owner`, `$expiration`) provide the reverse direction (search) via bitmaps.
 
 The full 32-byte `key` is in the RLP so that callers with only the 20-byte address can recover the complete key — the last 12 bytes are not stored anywhere else (the system account ID map gives address ↔ uint64 ID, not address → full key).
 
 ### System Account
 
-A singleton account at a fixed address holding chain-global counters and the trie-committed ID ↔ address map:
+A singleton account at a fixed address holding chain-global counters and the trie-committed ID ↔ address map. The address is **adjacent to the registry and the precompile** for operational simplicity (memorable, no derivation, no collision-check required):
 
 ```
-System Account  (address = keccak256("arkiv.system")[:20])
+System Account  (address = 0x4400000000000000000000000000000000000046)
   nonce    = 1                                                       // prevents EIP-161 pruning
   storage slots:
     slot[keccak256("entity_count")]                  →  uint64       // next entity ID
     slot[keccak256("id_to_addr", uint64_id)]         →  address      // ID → entity_address (live entities only)
     slot[keccak256("addr_to_id", entity_address)]    →  uint64       // entity_address → ID (live entities only)
 ```
+
+The three adjacent predeploys at `0x44…0044 / 0045 / 0046` are:
+
+| Address | What |
+|---|---|
+| `0x4400…0044` | `EntityRegistry` Solidity contract (validates owner/expiry, dispatches to the precompile) |
+| `0x4400…0045` | Arkiv precompile (native Rust, registered by the custom `EvmFactory`) |
+| `0x4400…0046` | System account (no code; pre-allocated with `nonce=1` and empty storage) |
+
+The system account is **pre-allocated in genesis**, not lazily created on first `Create`. This avoids a "does the account exist?" check on every op.
 
 The `entity_count` slot is the canonical source for ID assignment. Every node executing the same block sees the same value and assigns IDs identically.
 
@@ -256,43 +309,63 @@ Bitmaps are `roaring64` — compressed bitsets over 64-bit unsigned integers. Et
 
 `EntityRegistry` validates ownership / liveness from its own storage and updates that storage before calling the precompile. The precompile then performs content validation and state mutation. Every consensus-critical write goes through revm's journaled state; the one direct MDBX write (to `ArkivPairs`) is described where it appears.
 
+Whenever the precompile needs the entity's pre-op `owner` or `expires_at` (for a bitmap removal, or to preserve in a re-encoded RLP), it reads the existing entity account's RLP. The contract never forwards `old*` fields.
+
 ### Create
 
 **Contract:**
-1. Read and increment `createNonce[msg.sender]`; derive `entityKey`.
-2. Insert `entities[entityKey] = (msg.sender_or_specified_owner, expiresAt)`.
+1. Read and increment `nonces[msg.sender]`; derive `entityKey`.
+2. Insert `entities[entityKey] = (msg.sender, expiresAt)`.
 
 **Precompile:**
 1. Read and increment `entity_count` on the system account; the new value is `entity_id`.
 2. Write the system-account ID maps: `slot[keccak256("id_to_addr", entity_id)] = entity_address`; `slot[keccak256("addr_to_id", entity_address)] = entity_id`.
 3. `CreateAccount(entity_address)`; `SetNonce(entity_address, 1)`.
-4. For each annotation `(k, v)` — including built-ins `$all`, `$creator`, `$createdAtBlock`, `$owner`, `$key`, `$expiration`, `$contentType` (whose values are derived from the contract-passed arguments and the entity itself):
+4. For each annotation `(k, v)` — including built-ins `$all`, `$creator`, `$createdAtBlock`, `$owner`, `$key`, `$expiration`, `$contentType` (values derived from the record's `sender`, `entityKey`, `newOwner`, `newExpiresAt`, `contentType`, current block, and explicit `attributes`):
    - Derive `pair_addr = keccak256("arkiv.pair" || k || 0x00 || v)[:20]`.
    - **If the pair account has no code (first sight of this pair):** `CreateAccount(pair_addr)`; `SetNonce(pair_addr, 1)`; write `ArkivPairs[k || 0x00 || v] = 0x01` (direct MDBX put — the exception).
    - Read `pair_addr.code` (treat as empty bitmap if absent). Deserialize, add `entity_id`, re-serialize. `SetCode(pair_addr, new_bytes)`.
-5. Encode the entity RLP. `SetCode(entity_address, 0xFE || RLP)`.
+5. Encode the entity RLP (with `owner = sender`, `expires_at = newExpiresAt`, `payload`, `content_type`, `attributes` from the record; `creator = sender`, `created_at_block = current`, `key = entityKey`). `SetCode(entity_address, 0xFE || RLP)`.
 
 ### Update
 
 **Contract:** validates `msg.sender == owner` and `block.number ≤ expiresAt`. No state change.
 
 **Precompile:**
-1. Read the entity's current `entity_id` from `system.slot[keccak256("addr_to_id", entity_address)]`.
-2. Decode the current annotation set from `code(entity_address)`.
+1. Read `entity_id` from `system.slot[keccak256("addr_to_id", entity_address)]`.
+2. Decode the current entity RLP from `code(entity_address)` to recover `owner`, `expires_at`, `creator`, `created_at_block`, `key`, and the old annotation set.
 3. Diff old vs. new annotations.
 4. For each annotation **removed**: derive `pair_addr`; read bitmap; remove `entity_id`; `SetCode(pair_addr, new_bytes)`. (The pair account stays in the trie; its bitmap may become empty.)
 5. For each annotation **added**: derive `pair_addr`; if no code yet, create the pair account + write `ArkivPairs` (as in Create step 4); read bitmap, add `entity_id`, `SetCode`.
 6. Unchanged annotations require no writes.
-7. Re-encode the entity RLP. `SetCode(entity_address, new_bytes)`.
+7. Re-encode the entity RLP using the new `payload`/`content_type`/`attributes` from the record and the preserved `owner`/`expires_at`/`creator`/`created_at_block`/`key` from the old RLP. `SetCode(entity_address, 0xFE || new_RLP)`.
+
+### Extend
+
+**Contract:** validates `msg.sender == owner`, `block.number ≤ expiresAt`, `op.btl > 0`, and `current + btl > stored.expiresAt`. Updates `entities[entityKey].expiresAt = newExpiresAt`.
+
+**Precompile:**
+1. Decode the current entity RLP. Read its `expires_at` — this is the **old** value.
+2. Remove `entity_id` from the `$expiration = old` pair account's bitmap; add it to the `$expiration = newExpiresAt` pair account's bitmap (creating the pair account + writing `ArkivPairs` if it's a first sight).
+3. Re-encode the entity RLP with `expires_at = newExpiresAt`; everything else preserved. `SetCode`.
+
+### Transfer
+
+**Contract:** validates `msg.sender == owner`, `block.number ≤ expiresAt`, `op.newOwner ≠ 0`, `op.newOwner ≠ stored.owner`. Updates `entities[entityKey].owner = newOwner`.
+
+**Precompile:**
+1. Decode the current entity RLP. Read its `owner` — this is the **old** value.
+2. Remove `entity_id` from the `$owner = old` pair account's bitmap; add it to the `$owner = newOwner` pair account's bitmap (creating + writing `ArkivPairs` if it's a first sight).
+3. Re-encode the entity RLP with `owner = newOwner`; everything else preserved. `SetCode`.
 
 ### Delete
 
-**Contract:** validates `msg.sender == owner`. Removes `entities[entityKey]` from its mapping.
+**Contract:** validates `msg.sender == owner` and `block.number ≤ expiresAt`. Removes `entities[entityKey]` from its mapping.
 
 **Precompile:**
 1. Read `entity_id` from `system.slot[keccak256("addr_to_id", entity_address)]`.
-2. Decode the entity's annotations from `code(entity_address)`.
-3. For each annotation (plus `$owner` and `$expiration`, whose values the contract passes in): derive `pair_addr`; read bitmap; remove `entity_id`; `SetCode` back.
+2. Decode the entity RLP from `code(entity_address)` to recover its `owner`, `expires_at`, and full annotation set.
+3. For each annotation (including built-in `$owner = old_owner` and `$expiration = old_expires_at` recovered from the RLP): derive `pair_addr`; read bitmap; remove `entity_id`; `SetCode` back.
 4. Clear both system-account ID slots: `SetState(system, keccak256("id_to_addr", entity_id), 0)`; `SetState(system, keccak256("addr_to_id", entity_address), 0)`.
 5. `SetCode(entity_address, nil)`. **Keep `nonce` at 1.**
 
@@ -301,18 +374,6 @@ Bitmaps are `roaring64` — compressed bitsets over 64-bit unsigned integers. Et
 ### Entity Expiration
 
 Anyone may call `EntityRegistry.expire(entityKey)` once `block.number > expiresAt`. The contract gates on `expiresAt < block.number` against its own `entities` mapping, removes the entry, and dispatches to the precompile, which executes the same state changes as `Delete`. There is no out-of-band housekeeping path; expiration is contract-driven so it lives on the canonical execution path along with every other state-mutating op.
-
-### Extend
-
-**Contract:** validates `msg.sender == owner` and `newExpiresAt > block.number`. Updates `entities[entityKey].expiresAt = newExpiresAt`. Passes old and new `expiresAt` to the precompile.
-
-**Precompile:** removes `entity_id` from the old `$expiration` pair account's bitmap; adds it to the new `$expiration` pair account's bitmap (creating the pair account + writing `ArkivPairs` if it's a first sight). No change to the entity RLP.
-
-### Transfer
-
-**Contract:** validates `msg.sender == owner` and `block.number ≤ expiresAt`. Updates `entities[entityKey].owner = newOwner`. Passes old and new owner to the precompile.
-
-**Precompile:** removes `entity_id` from the old `$owner` pair account's bitmap; adds it to the new `$owner` pair account's bitmap (creating + writing `ArkivPairs` if it's a first sight). No change to the entity RLP.
 
 ---
 
@@ -462,10 +523,10 @@ Trie (committed in stateRoot):
 
   EntityRegistry contract:
     storage:
-      createNonce[sender]                                   → uint64
-      entities[entityKey]                                   → (owner: address, expiresAt: uint64)
+      nonces[sender]                                        → uint32
+      entities[entityKey]                                   → (owner: address, expiresAt: BlockNumber32)
 
-  System account  (address = keccak256("arkiv.system")[:20]):
+  System account  (address = 0x4400000000000000000000000000000000000046):
     nonce                                                   → 1
     storage:
       slot[keccak256("entity_count")]                       → uint64
@@ -542,4 +603,4 @@ What the fault proof system covers:
 
 4. **Fees.** Native gas vs. an ERC-20 surcharge enforced by `EntityRegistry`. Independent decision, can be deferred. The precompile's gas model is unaffected either way.
 
-5. **System-account address collision.** `keccak256("arkiv.system")[:20]` and the `keccak256("arkiv.pair" || …)[:20]` derivations could in principle collide with an existing externally-owned account on the L3. Genesis-time check + documentation is sufficient at chain bring-up.
+5. **Pair-account address collisions.** `keccak256("arkiv.pair" || …)[:20]` derivations could in principle collide with an existing externally-owned account on the L3. Genesis-time check + documentation is sufficient at chain bring-up. (The system account is no longer derived — it's the fixed adjacent address `0x44…0046`, so collision risk there is gone.)

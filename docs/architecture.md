@@ -107,16 +107,24 @@ Pure library shared by both binaries. Owns:
   the predeploy + dev-funding entries for splicing into a
   `Genesis.alloc`.
 
-The bytecode generation is deterministic — same chain ID + same
-`arkiv-bindings` rev produces the same bytes — which is what lets
-`init` and `node` agree on the genesis hash even when the chainspec was
-assembled at recipe time.
+The runtime bytecode comes from the in-tree Solidity source
+(`contracts/src/EntityRegistry.sol`) via the committed artifact at
+`contracts/artifacts/EntityRegistry.runtime.hex`. The contract has no
+constructor immutables — it reads `block.chainid` at runtime — so the
+same runtime code works on every chain. `just contracts-build`
+refreshes the artifact after editing the source.
 
-**Open question for v2:** does `genesis_alloc` need to pre-allocate the
-[system account](statedb-design.md#system-account) at
-`keccak256("arkiv.system")[:20]` with `nonce=1`, or does the precompile
-create it lazily on first `Create`? See the migration plan's
-cross-cutting concerns.
+`genesis_alloc()` produces three predeploys + 100 dev-funded accounts:
+
+| Address | What |
+|---|---|
+| `0x44…0044` | `EntityRegistry` runtime code |
+| `0x44…0046` | System account (`nonce=1`, no code, no storage) |
+| `…funding addresses…` | First 100 hardhat-mnemonic accounts, 10k ETH each |
+
+(No genesis entry for `0x44…0045` — that's where `arkiv-op-reth`'s
+custom `EvmFactory` registers the Arkiv precompile; it's a native
+component, not an Ethereum account.)
 
 ### 3.2 `arkiv-node`
 
@@ -185,7 +193,7 @@ with `0xFE` so a `CALL` reverts. **Pair accounts** (one per
 `(annot_key, annot_val)` ever seen) hold a roaring64 bitmap of matching
 entity IDs as the account's code; `codeHash` is the keccak hash of the
 bitmap bytes, so **every bitmap is content-addressed in the trie**. A
-singleton **system account** at `keccak256("arkiv.system")[:20]` holds
+singleton **system account** at `0x4400000000000000000000000000000000000046` (adjacent to the registry) holds
 the global entity counter (`entity_count`) and both directions of the
 ID ↔ address map. The `EntityRegistry` contract holds per-entity
 `(owner, expiresAt)` and a sender-scoped `createNonce`.
@@ -357,16 +365,17 @@ op-reth node --chain ops/genesis.json --datadir ./data
 ```
 
 Why not bake the bytecode into the JSON? Drift — bytecode regenerates
-when the bindings rev bumps; build-time injection means every build is
-consistent with the bindings it depends on.
+when the Solidity source changes; build-time injection (from the
+in-tree `contracts/` artifact) means every build is consistent with
+the source it depends on.
 
-### 8.5 System account pre-allocation (open)
+### 8.5 System account pre-allocation
 
-Open question for Phase 2/5: should `genesis_alloc` also pre-allocate
-the system account at `keccak256("arkiv.system")[:20]` with `nonce=1`?
-Pre-allocation saves the precompile from a per-`Create` "does the
-system account exist?" check. The current recommendation is yes; the
-decision is tracked in the migration plan.
+`genesis_alloc()` pre-allocates the system account at
+`0x4400000000000000000000000000000000000046` with `nonce=1` (empty
+code, empty storage). Pre-allocation avoids a per-`Create`
+"does the system account exist?" check, and the adjacent address means
+no derivation / collision check is needed at chain bring-up.
 
 ---
 
