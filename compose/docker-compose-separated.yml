@@ -15,8 +15,10 @@ services:
       --http.addr=0.0.0.0
       --arkiv.db-url=http://arkiv-storaged:2704
       --arkiv.query-url=http://arkiv-storaged:2705
+      --metrics=0.0.0.0:5678
     ports:
       - "127.0.0.1:8545:8545"
+      - "127.0.0.1:5678:5678"
   arkiv-storaged:
     image: ${ARKIV_NODE_IMAGE:-ghcr.io/arkiv-network/arkiv-node}
     volumes:
