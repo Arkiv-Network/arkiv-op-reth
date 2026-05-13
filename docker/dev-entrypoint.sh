@@ -51,5 +51,6 @@ else
         --arkiv-storaged-path=/usr/local/bin/arkiv-storaged \
         --arkiv-storaged-args="--chain-addr=0.0.0.0:2704 --query-addr=0.0.0.0:2705" \
         --arkiv.db-url=http://127.0.0.1:2704 \
-        --arkiv.query-url=http://127.0.0.1:2705
+        --arkiv.query-url=http://127.0.0.1:2705 \
+        --metrics 0.0.0.0:5678
 fi
