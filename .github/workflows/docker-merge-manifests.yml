@@ -113,3 +113,64 @@ jobs:
 
           merge_image "${IMAGE_NAME}"
           merge_image "${IMAGE_NAME_DEV}"
+
+  smoke-dev-image:
+    runs-on: ubuntu-24.04
+    needs: merge
+
+    steps:
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run dev image simulator smoke test
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME_DEV: ${{ env.IMAGE_NAME_DEV }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          log_dir="${RUNNER_TEMP}/arkiv-dev-smoke-logs"
+          mkdir -p "${log_dir}"
+          collect_logs() {
+            if docker ps -a --format '{{.Names}}' | grep -Fxq arkiv; then
+              docker logs arkiv > "${log_dir}/arkiv-node.log" 2>&1 || true
+              docker exec arkiv sh -lc 'cat /tmp/arkiv-simulate.log' > "${log_dir}/arkiv-simulate.log" 2>&1 || true
+            fi
+          }
+          trap collect_logs EXIT
+
+          image="${REGISTRY}/arkiv-network/${IMAGE_NAME_DEV}:${SHA}"
+          echo "Starting ${image}"
+          docker run --rm -d --name arkiv --entrypoint=arkiv-node "${image}" node
+
+          sleep 10
+          docker ps --filter name=arkiv
+          docker exec arkiv sh -lc ': > /tmp/arkiv-simulate.log'
+
+          echo "Starting arkiv-cli simulate for 2 minutes"
+          docker exec -d arkiv sh -lc 'timeout 120s arkiv-cli simulate > /tmp/arkiv-simulate.log 2>&1'
+
+          sleep 125
+
+          echo "===== arkiv-cli simulate log ====="
+          docker exec arkiv sh -lc 'cat /tmp/arkiv-simulate.log' | tee "${log_dir}/arkiv-simulate.log"
+
+          docker logs arkiv > "${log_dir}/arkiv-node.log" 2>&1
+
+      - name: Upload dev smoke logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: arkiv-dev-smoke-logs
+          path: ${{ runner.temp }}/arkiv-dev-smoke-logs
+          if-no-files-found: warn
+
+      - name: Stop dev smoke container
+        if: always()
+        run: |
+          docker stop arkiv || true
