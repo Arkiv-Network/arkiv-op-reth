@@ -16,6 +16,7 @@
 mod cli;
 mod genesis;
 mod install;
+pub mod precompile;
 
 pub use cli::ArkivExt;
 pub use genesis::has_arkiv_predeploy;

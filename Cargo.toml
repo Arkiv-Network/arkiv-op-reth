@@ -43,7 +43,8 @@ alloy-contract = "2.0"
 alloy-rpc-types = "2.0"
 
 # EVM
-revm = { version = "36.0.0", default-features = false, features = ["std"] }
+revm = { version = "38", default-features = false, features = ["std"] }
+alloy-evm = "0.33"
 
 # Util
 clap = { version = "4", features = ["derive"] }
