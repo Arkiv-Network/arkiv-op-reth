@@ -293,7 +293,7 @@ where
 // consistently against `ArkivOpExecutorBuilder`, and forward to the
 // inner `OpNode` for everything else.
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ArkivOpNode {
     inner: OpNode,
 }

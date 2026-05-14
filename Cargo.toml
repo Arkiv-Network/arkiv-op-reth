@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/arkiv-node", "crates/arkiv-cli", "crates/arkiv-genesis"]
+members = ["crates/arkiv-node", "crates/arkiv-cli", "crates/arkiv-genesis", "e2e"]
 resolver = "2"
 
 [workspace.package]
@@ -27,11 +27,23 @@ reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "27bfdde
 reth-evm = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
 reth-primitives-traits = "0.3"
 
+# Reth — test-only.
+reth-e2e-test-utils = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
+reth-tasks = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
+reth-tracing = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
+reth-db = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
+reth-node-core = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
+reth-chainspec = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
+reth-provider = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
+
 # Arkiv bindings (from arkiv-contracts repo)
 arkiv-bindings = { git = "https://github.com/Arkiv-Network/arkiv-contracts.git", rev = "d6ebe18" }
 
 # Arkiv genesis primitives (in-tree)
 arkiv-genesis = { path = "crates/arkiv-genesis" }
+
+# Arkiv node — exposed as a workspace dep so the e2e crate can depend on it.
+arkiv-node = { path = "crates/arkiv-node" }
 
 # Alloy
 alloy-primitives = "1.5"

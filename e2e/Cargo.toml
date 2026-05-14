@@ -1,0 +1,40 @@
+[package]
+name = "arkiv-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# Tests-only crate. `src/lib.rs` is intentionally empty; all assertions
+# live under `tests/`. Lives outside `crates/` so the heavy
+# reth-e2e-test-utils transitive deps don't bleed into the production
+# crates' dev-dep graph.
+
+[dependencies]
+arkiv-node.workspace = true
+arkiv-genesis.workspace = true
+
+[dev-dependencies]
+reth-e2e-test-utils.workspace = true
+reth-tasks.workspace = true
+reth-tracing.workspace = true
+reth-db = { workspace = true, features = ["test-utils"] }
+reth-node-core.workspace = true
+reth-chainspec.workspace = true
+reth-provider.workspace = true
+reth-node-builder.workspace = true
+reth-optimism-node = { workspace = true, features = ["test-utils"] }
+reth-optimism-chainspec.workspace = true
+
+alloy-genesis.workspace = true
+alloy-primitives.workspace = true
+alloy-rpc-types-eth.workspace = true
+alloy-rpc-types-engine.workspace = true
+alloy-eips.workspace = true
+alloy-sol-types.workspace = true
+
+jsonrpsee = { workspace = true, features = ["http-client", "client"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+eyre.workspace = true
