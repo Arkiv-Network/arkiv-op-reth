@@ -67,7 +67,7 @@ pub struct QueryOptions {
     pub cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryResponse {
     pub data: Vec<EntityData>,
@@ -78,7 +78,7 @@ pub struct QueryResponse {
     pub cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntityData {
     pub key: B256,
@@ -92,13 +92,13 @@ pub struct EntityData {
     pub numeric_attributes: Vec<NumericAttribute>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StringAttribute {
     pub key: String,
     pub value: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NumericAttribute {
     pub key: String,
     pub value: U256,

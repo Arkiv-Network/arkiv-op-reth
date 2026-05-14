@@ -35,6 +35,8 @@ reth-db = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953ed
 reth-node-core = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
 reth-provider = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
+reth-network-api = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
+reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
 
 # Arkiv bindings (from arkiv-contracts repo)
 arkiv-bindings = { git = "https://github.com/Arkiv-Network/arkiv-contracts.git", rev = "d6ebe18" }

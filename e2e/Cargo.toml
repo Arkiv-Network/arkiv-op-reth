@@ -6,16 +6,20 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
-# Tests-only crate. `src/lib.rs` is intentionally empty; all assertions
-# live under `tests/`. Lives outside `crates/` so the heavy
-# reth-e2e-test-utils transitive deps don't bleed into the production
-# crates' dev-dep graph.
+# Tests-only crate. `src/lib.rs` is the shared bootstrap (World helper,
+# op builders, payload-attrs wiring) used by every `tests/*.rs`. Lives
+# outside `crates/` so the heavy reth-e2e-test-utils transitive deps
+# don't bleed into the production crates' dev-dep graph.
+#
+# Everything is in `[dependencies]` (not `[dev-dependencies]`) because
+# `src/lib.rs` itself needs these — moving them to dev-deps would only
+# expose them to `tests/`, not to the library. The crate is never
+# published or depended on, so there's nothing to leak to.
 
 [dependencies]
 arkiv-node.workspace = true
 arkiv-genesis.workspace = true
 
-[dev-dependencies]
 reth-e2e-test-utils.workspace = true
 reth-tasks.workspace = true
 reth-tracing.workspace = true
@@ -23,9 +27,13 @@ reth-db = { workspace = true, features = ["test-utils"] }
 reth-node-core.workspace = true
 reth-chainspec.workspace = true
 reth-provider.workspace = true
+reth-network-api.workspace = true
+reth-node-api.workspace = true
 reth-node-builder.workspace = true
+reth-rpc-eth-api.workspace = true
 reth-optimism-node = { workspace = true, features = ["test-utils"] }
 reth-optimism-chainspec.workspace = true
+reth-optimism-primitives.workspace = true
 
 alloy-genesis.workspace = true
 alloy-primitives.workspace = true
@@ -33,6 +41,7 @@ alloy-rpc-types-eth.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-eips.workspace = true
 alloy-sol-types.workspace = true
+alloy-signer-local.workspace = true
 
 jsonrpsee = { workspace = true, features = ["http-client", "client"] }
 serde.workspace = true
