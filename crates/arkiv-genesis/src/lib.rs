@@ -35,13 +35,14 @@ pub const ARKIV_PRECOMPILE_ADDRESS: Address = Address::new([
     0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x45,
 ]);
 
-/// Singleton account that holds the global entity counter
-/// (`entity_count`) and the trie-committed ID ↔ address maps. Has no
-/// code; pre-allocated with `nonce = 1` to prevent EIP-161 pruning.
-/// The precompile writes its storage slots.
-pub const SYSTEM_ACCOUNT_ADDRESS: Address = Address::new([
-    0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x46,
-]);
+/// Singleton account that holds the global entity counter and the
+/// trie-committed ID ↔ address maps. Re-exported from
+/// [`arkiv_entitydb`] — the state-model crate is the canonical home
+/// of the system-account address. Re-export here so consumers that
+/// only care about genesis allocs (`arkiv-cli inject-predeploy`,
+/// `arkiv-node`'s predeploy detection) don't need to depend on
+/// `arkiv-entitydb`.
+pub use arkiv_entitydb::SYSTEM_ACCOUNT_ADDRESS;
 
 /// First account derived from [`ARKIV_DEV_MNEMONIC`] at standard BIP-44
 /// path `m/44'/60'/0'/0/0`. Kept as a `const` so callers that only need

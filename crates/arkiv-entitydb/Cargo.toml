@@ -5,15 +5,27 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-# Core encode/decode + address-derivation primitives for the v2 Arkiv
-# state model: entities and roaring64 bitmaps, both represented as
-# Ethereum accounts in op-reth's world-state trie. Pure data primitives
-# — no DB plumbing, no revm. Consumed by `arkiv-node`'s precompile and
-# by any client (RPC handler, future SDK) that needs to read an entity
-# account directly.
+# Canonical home of the v2 Arkiv state model. Holds the data primitives
+# (EntityRlp, Bitmap, address derivations, system-account slot keys),
+# the abstract `StateAdapter` trait that op handlers run against, and
+# the six entity-op handlers (`create`, `update`, `extend`, `transfer`,
+# `delete`, `expire`) — the precompile is a thin adapter that decodes
+# calldata and dispatches to these. No revm / MDBX deps.
+#
+# The `test-utils` feature exposes an in-memory `StateAdapter` backed
+# by an `InMemoryStateDb`, used by this crate's tests and reusable
+# downstream.
 
 [dependencies]
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 roaring.workspace = true
 eyre.workspace = true
+
+
+[features]
+default = []
+test-utils = []
+
+[dev-dependencies]
+arkiv-entitydb = { path = ".", features = ["test-utils"] }
