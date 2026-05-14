@@ -1,23 +1,28 @@
 //! `arkiv_*` JSON-RPC namespace.
 //!
 //! Registers a single method, `arkiv_query`, on the node's HTTP RPC
-//! server. Implementation flow:
+//! server. This module is intentionally thin: it owns the JSON-RPC
+//! plumbing, the wire-format types, and the `StateProvider` snapshot
+//! selection — and delegates everything else to
+//! [`arkiv_entitydb::query::execute`].
 //!
-//! 1. Parse the query string via [`arkiv_entitydb::query::parse`].
-//! 2. Take a `StateProvider` snapshot at the head ([`StateProviderFactory::latest`]).
-//! 3. Evaluate the query through a read-only [`RethStateAdapter`] →
-//!    a [`Bitmap`] of entity IDs.
-//! 4. Paginate descending (newest IDs first) and resolve each ID to an
-//!    [`EntityData`] via [`arkiv_entitydb::resolve_id`].
+//! Per-request flow:
 //!
-//! Phase 11 scope: head state only (no `atBlock`), no `includeData`
-//! filtering, no separate `getEntityByKey` / `getEntityCount` methods.
-//! All of those can land later without disturbing this shape.
+//! 1. Resolve `at_block` → a [`StateProvider`] snapshot + the actual
+//!    block number to report back.
+//! 2. Wrap the snapshot in a read-only [`RethStateAdapter`] and call
+//!    [`execute`].
+//! 3. Render the returned [`EntityRlp`]s into wire-format
+//!    [`EntityData`] and encode the next cursor as a hex string.
+//!
+//! Phase 11 scope: no `includeData` field selection, no separate
+//! `getEntityByKey` / `getEntityCount` methods. Both can land later
+//! without changing the call shape.
 
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{Address, B256, Bytes, U256};
-use arkiv_entitydb::query::parse;
-use arkiv_entitydb::{Bitmap, EntityRlp, StateAdapter, resolve_id};
+use arkiv_entitydb::query::{Page, PageParams, execute};
+use arkiv_entitydb::{EntityRlp, StateAdapter};
 use async_trait::async_trait;
 use eyre::Result;
 use jsonrpsee::core::RpcResult;
@@ -138,16 +143,23 @@ fn run_query<P: StateProviderFactory>(
     q: &str,
     options: &QueryOptions,
 ) -> Result<QueryResponse> {
-    let parsed = parse(q)?;
     let (state, block_number) = snapshot_for(&provider, options.at_block)?;
     let mut adapter = RethStateAdapter::new(state);
 
-    let bitmap = parsed.evaluate(&mut adapter)?;
-    let cursor = parse_cursor(options.cursor.as_deref())?;
+    let params = PageParams {
+        page_size: options
+            .results_per_page
+            .unwrap_or(DEFAULT_PAGE_SIZE)
+            .clamp(1, MAX_PAGE_SIZE),
+        cursor: parse_cursor(options.cursor.as_deref())?,
+    };
+    let Page { entries, next_cursor } = execute(&mut adapter, q, params)?;
 
-    let (data, next_cursor) = paginate(&mut adapter, bitmap, cursor, options.results_per_page)?;
-
-    Ok(QueryResponse { data, block_number, cursor: next_cursor })
+    Ok(QueryResponse {
+        data: entries.into_iter().map(entity_data_from).collect(),
+        block_number,
+        cursor: next_cursor.map(|id| format!("0x{id:x}")),
+    })
 }
 
 /// Resolve `at_block` to a concrete `(StateProvider, block_number)`.
@@ -172,53 +184,6 @@ fn snapshot_for<P: StateProviderFactory>(
             "atBlock tag {other:?} not supported; pass a hex block number or 'latest'"
         ),
     }
-}
-
-/// Descending pagination. Returns (page, next_cursor).
-fn paginate(
-    adapter: &mut RethStateAdapter,
-    bitmap: Bitmap,
-    cursor: Option<u64>,
-    page_size_req: Option<u64>,
-) -> Result<(Vec<EntityData>, Option<String>)> {
-    let page_size = page_size_req
-        .unwrap_or(DEFAULT_PAGE_SIZE)
-        .clamp(1, MAX_PAGE_SIZE) as usize;
-
-    // Collect ascending, drop IDs >= cursor, iterate in reverse for
-    // newest-first. Page sizes are small (≤200) so the materialized
-    // Vec is fine even when the bitmap is large.
-    let mut ids: Vec<u64> = bitmap.iter().collect();
-    ids.sort_unstable();
-    if let Some(c) = cursor {
-        while ids.last().is_some_and(|id| *id >= c) {
-            ids.pop();
-        }
-    }
-
-    let mut data = Vec::with_capacity(page_size.min(ids.len()));
-    let mut last_returned_id: Option<u64> = None;
-    let mut has_more = false;
-
-    for &id in ids.iter().rev() {
-        if data.len() >= page_size {
-            has_more = true;
-            break;
-        }
-        // Entities can race delete between the bitmap read and the
-        // resolve — `None` means the entity was tombstoned; skip.
-        if let Some(entity) = resolve_id(adapter, id)? {
-            data.push(entity_data_from(entity));
-            last_returned_id = Some(id);
-        }
-    }
-
-    let next_cursor = if has_more {
-        last_returned_id.map(|id| format!("0x{id:x}"))
-    } else {
-        None
-    };
-    Ok((data, next_cursor))
 }
 
 fn entity_data_from(e: EntityRlp) -> EntityData {

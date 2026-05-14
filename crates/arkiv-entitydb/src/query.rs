@@ -14,4 +14,5 @@ pub mod interpreter;
 pub mod lexer;
 pub mod parser;
 
+pub use interpreter::{Page, PageParams, execute};
 pub use parser::{AnnotKey, AnnotVal, BuiltIn, Query, parse};

@@ -1,4 +1,5 @@
-//! Tree-walking evaluator for the parsed query AST.
+//! Tree-walking evaluator for the parsed query AST + the top-level
+//! [`execute`] entry point that callers (RPC, tests) should use.
 //!
 //! `Query::evaluate` recursively turns a [`Query`] into a [`Bitmap`] of
 //! matching entity IDs by issuing point reads against a
@@ -7,12 +8,17 @@
 //! costs one extra `$all` read. Acceptable for the small queries we
 //! expect; can revisit if profiling says otherwise.
 //!
+//! [`execute`] is the convenience wrapper that combines parse →
+//! evaluate → paginate → resolve. The RPC layer calls only this; the
+//! lower-level `parse` / `Query::evaluate` / `resolve_id` remain
+//! public for tests and advanced consumers.
+//!
 //! Integration tests live in `crates/arkiv-entitydb/tests/query_eval.rs`.
 
 use eyre::Result;
 
-use super::parser::{AnnotKey, AnnotVal, Query};
-use crate::{Bitmap, StateAdapter, all_entities, read_pair_bitmap};
+use super::parser::{AnnotKey, AnnotVal, Query, parse};
+use crate::{Bitmap, EntityRlp, StateAdapter, all_entities, read_pair_bitmap, resolve_id};
 
 impl Query {
     /// Evaluate the AST against `state`, returning the bitmap of
@@ -84,4 +90,83 @@ fn read_in<S: StateAdapter>(
         acc.union_with(&bm);
     }
     Ok(acc)
+}
+
+// ── Top-level entry point ────────────────────────────────────────────
+
+/// Parameters for paginated query execution.
+///
+/// Cursors are raw entity IDs — the RPC layer is responsible for any
+/// hex (or other) encoding on the wire.
+#[derive(Debug, Clone, Copy)]
+pub struct PageParams {
+    /// Maximum number of entities to return in this page. Must be > 0.
+    pub page_size: u64,
+    /// If `Some(c)`, only return IDs strictly less than `c`. Use the
+    /// `next_cursor` from the previous page to walk through results.
+    pub cursor: Option<u64>,
+}
+
+/// One page of query results, ordered descending by entity ID
+/// (newest first).
+#[derive(Debug, Clone)]
+pub struct Page {
+    /// The matching entities — already resolved through the
+    /// `id_to_addr` system slot + `EntityRlp::decode_from_code`.
+    pub entries: Vec<EntityRlp>,
+    /// Set when more pages remain. Pass it as the next call's
+    /// `cursor` to walk forward.
+    pub next_cursor: Option<u64>,
+}
+
+/// Parse → evaluate → paginate → resolve, in one call.
+///
+/// This is the entry point the RPC layer (and any other caller that
+/// just wants matching entities) should use. The lower-level
+/// [`parse`], [`Query::evaluate`], and [`resolve_id`] remain public
+/// for tests and advanced consumers.
+///
+/// IDs that fail to resolve (e.g. entity tombstoned between the
+/// bitmap read and the resolve — possible under concurrent writes)
+/// are skipped silently and don't count toward `page_size`.
+pub fn execute<S: StateAdapter>(
+    state: &mut S,
+    query: &str,
+    params: PageParams,
+) -> Result<Page> {
+    eyre::ensure!(params.page_size > 0, "page_size must be > 0");
+
+    let parsed = parse(query)?;
+    let bitmap = parsed.evaluate(state)?;
+
+    // Collect ascending so we can pop ids >= cursor off the tail
+    // cheaply, then iterate in reverse for newest-first output. Page
+    // sizes are small (typical RPC cap is 200) so materializing the
+    // full Vec doesn't matter even when the bitmap is large.
+    let mut ids: Vec<u64> = bitmap.iter().collect();
+    ids.sort_unstable();
+    if let Some(c) = params.cursor {
+        while ids.last().is_some_and(|id| *id >= c) {
+            ids.pop();
+        }
+    }
+
+    let page_size = params.page_size as usize;
+    let mut entries = Vec::with_capacity(page_size.min(ids.len()));
+    let mut last_returned_id: Option<u64> = None;
+    let mut has_more = false;
+
+    for &id in ids.iter().rev() {
+        if entries.len() >= page_size {
+            has_more = true;
+            break;
+        }
+        if let Some(entity) = resolve_id(state, id)? {
+            entries.push(entity);
+            last_returned_id = Some(id);
+        }
+    }
+
+    let next_cursor = if has_more { last_returned_id } else { None };
+    Ok(Page { entries, next_cursor })
 }
