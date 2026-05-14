@@ -35,6 +35,8 @@ use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use eyre::{Result, ensure};
 use roaring::RoaringTreemap;
 
+pub mod query;
+
 // ─── Canonical addresses ──────────────────────────────────────────────
 
 /// Singleton account that holds the global entity counter
