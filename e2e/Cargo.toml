@@ -35,6 +35,7 @@ alloy-eips.workspace = true
 alloy-sol-types.workspace = true
 
 jsonrpsee = { workspace = true, features = ["http-client", "client"] }
+serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 eyre.workspace = true

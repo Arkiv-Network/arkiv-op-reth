@@ -1426,6 +1426,7 @@ dependencies = [
  "reth-provider",
  "reth-tasks",
  "reth-tracing",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -1468,8 +1469,10 @@ dependencies = [
  "alloy-sol-types",
  "arkiv-entitydb",
  "arkiv-genesis",
+ "async-trait",
  "clap",
  "eyre",
+ "jsonrpsee",
  "op-alloy-consensus",
  "op-revm",
  "reth-evm",
@@ -1480,8 +1483,11 @@ dependencies = [
  "reth-optimism-node",
  "reth-optimism-primitives",
  "reth-primitives-traits",
+ "reth-storage-api",
  "revm",
  "revm-precompile",
+ "serde",
+ "tokio",
  "tracing",
 ]
 

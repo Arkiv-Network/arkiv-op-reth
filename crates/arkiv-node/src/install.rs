@@ -1,12 +1,8 @@
 //! Installation of Arkiv extensions onto an op-stack node builder.
 //!
-//! Currently a no-op pass-through. The v1 ExEx + EntityDB JSON-RPC bridge
-//! has been demolished; the v2 precompile + custom `EvmFactory` +
-//! `arkiv_*` RPC namespace + `ArkivPairs` MDBX table are not yet wired in.
-//!
-//! Phase 2+ will fill this function with the v2 wiring (`EvmFactory`
-//! override on `OpNode`, RPC module registration, `ArkivPairs` handle
-//! plumbing). See `docs/v2-migration-plan.md` in the workspace root.
+//! Registers the `arkiv_*` JSON-RPC namespace on the node's HTTP RPC
+//! server. The custom `EvmFactory` (precompile, predeploys) is wired
+//! separately via [`crate::ArkivOpNode`] passed to `builder.node(...)`.
 
 use reth_node_builder::{
     FullNodeTypes, NodeAdapter, NodeBuilderWithComponents, NodeComponentsBuilder, NodeTypes,
@@ -14,10 +10,9 @@ use reth_node_builder::{
 };
 use reth_optimism_primitives::OpPrimitives;
 
-/// No-op installer. Returns the builder unchanged.
-///
-/// The bounds match what Phase 2+ will need once the `EvmFactory` override
-/// and RPC extension calls go back in.
+use crate::rpc::{ArkivApiServer, ArkivRpc};
+
+/// Installer that registers the `arkiv_*` RPC namespace.
 pub fn install<T, CB, AO>(
     node: WithLaunchContext<NodeBuilderWithComponents<T, CB, AO>>,
 ) -> WithLaunchContext<NodeBuilderWithComponents<T, CB, AO>>
@@ -27,5 +22,11 @@ where
     CB: NodeComponentsBuilder<T>,
     AO: RethRpcAddOns<NodeAdapter<T, CB::Components>>,
 {
-    node
+    node.extend_rpc_modules(|ctx| {
+        let provider = ctx.provider().clone();
+        let api = ArkivRpc::new(provider);
+        ctx.modules.merge_configured(api.into_rpc())?;
+        tracing::info!(target: "arkiv::rpc", "registered arkiv_* RPC namespace");
+        Ok(())
+    })
 }

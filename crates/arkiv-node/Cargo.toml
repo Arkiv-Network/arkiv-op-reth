@@ -22,6 +22,7 @@ reth-node-api.workspace = true
 reth-node-builder.workspace = true
 reth-evm.workspace = true
 reth-primitives-traits.workspace = true
+reth-storage-api.workspace = true
 
 arkiv-genesis.workspace = true
 arkiv-entitydb.workspace = true
@@ -39,6 +40,10 @@ op-revm.workspace = true
 revm.workspace = true
 revm-precompile.workspace = true
 
+async-trait.workspace = true
 clap.workspace = true
 eyre.workspace = true
+jsonrpsee.workspace = true
+serde.workspace = true
+tokio.workspace = true
 tracing.workspace = true

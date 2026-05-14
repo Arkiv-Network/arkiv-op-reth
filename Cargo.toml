@@ -80,6 +80,7 @@ op-revm = { git = "https://github.com/ethereum-optimism/optimism.git", tag = "op
 roaring = "0.11"
 
 # Util
+async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
 eyre = "0.6"
 serde = { version = "1", features = ["derive"] }

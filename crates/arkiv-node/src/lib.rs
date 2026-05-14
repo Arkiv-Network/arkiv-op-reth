@@ -18,6 +18,7 @@ pub mod evm;
 mod genesis;
 mod install;
 pub mod precompile;
+pub mod rpc;
 
 pub use cli::ArkivExt;
 pub use evm::ArkivOpNode;
