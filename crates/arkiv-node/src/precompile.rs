@@ -1,28 +1,33 @@
-//! Arkiv precompile — **stub**.
+//! Arkiv precompile — thin adapter over [`arkiv_entitydb`].
 //!
 //! Registered by [`crate::evm::ArkivOpEvmFactory`] at
 //! [`ARKIV_PRECOMPILE_ADDRESS`](arkiv_genesis::ARKIV_PRECOMPILE_ADDRESS).
-//! Called by `EntityRegistry.execute()` with `abi.encode(OpRecord[])`
-//! as its calldata; today every per-op handler is a no-op that logs
-//! the op and returns success. A later phase fills in:
+//! `EntityRegistry.execute()` calls this with `abi.encode(OpRecord[])`
+//! as calldata; we:
 //!
-//! - content validation (payload caps, attribute formats, `0x00` ban)
-//! - entity / pair / system-account state writes via `EvmInternals`
-//! - `ArkivPairs` first-sight MDBX put
-//! - roaring64 bitmap deser/ser
-//! - `EntityRlp` encode/decode (including the v2 `owner` / `expires_at`
-//!   fields that make the entity account self-sufficient for queries)
-//! - real gas accounting (pure function of op shape, per design doc §5)
+//! 1. Enforce caller restrictions (direct CALL from `EntityRegistry`,
+//!    non-static, zero value).
+//! 2. Decode the batched `OpRecord[]`.
+//! 3. Compute gas as a pure function of op shape and charge it up-front.
+//! 4. For each record, convert the ABI types into [`arkiv_entitydb`]
+//!    types and dispatch to the corresponding op handler via a
+//!    [`RevmStateAdapter`] over revm's [`EvmInternals`].
 //!
-//! The contract↔precompile ABI is mirrored from
-//! `contracts/src/EntityRegistry.sol`'s `OpRecord` struct via `sol!`.
-//! Field layouts must stay in lockstep across both sides.
+//! All indexing logic (system counter, ID maps, bitmap deltas across
+//! built-in and user annotations, RLP encode/decode, tombstoning) lives
+//! in [`arkiv_entitydb`] — this file is the revm-side adapter only.
 
-use alloy_evm::precompiles::{DynPrecompile, PrecompileInput};
-use alloy_primitives::{Bytes, U256};
+use alloy_evm::{EvmInternals, precompiles::{DynPrecompile, PrecompileInput}};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_sol_types::{SolValue, sol};
+use arkiv_entitydb::{NumericAnnotation, StateAdapter, StringAnnotation};
 use arkiv_genesis::ENTITY_REGISTRY_ADDRESS;
-use revm::precompile::{PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult};
+use revm::{
+    precompile::{
+        PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult,
+    },
+    state::Bytecode,
+};
 
 pub use arkiv_genesis::ARKIV_PRECOMPILE_ADDRESS;
 
@@ -55,8 +60,8 @@ sol! {
     }
 }
 
-// Op-type tags — must match the constants in contracts/src/EntityRegistry.sol
-// (`Entity.CREATE` .. `Entity.EXPIRE`, 1-indexed).
+// Op-type tags — must match `Entity.CREATE..Entity.EXPIRE` (1-indexed)
+// in contracts/src/EntityRegistry.sol.
 const OP_CREATE: u8 = 1;
 const OP_UPDATE: u8 = 2;
 const OP_EXTEND: u8 = 3;
@@ -64,23 +69,46 @@ const OP_TRANSFER: u8 = 4;
 const OP_DELETE: u8 = 5;
 const OP_EXPIRE: u8 = 6;
 
-// Stub gas model — placeholder while the precompile is wired in. A later
-// phase replaces this with the per-op formulas from design doc §5.
-const STUB_BASE_GAS: u64 = 5_000;
-const STUB_GAS_PER_OP: u64 = 1_000;
+// Attribute valueType tags — must match `Entity.ATTR_UINT..ATTR_ENTITY_KEY`.
+const ATTR_UINT: u8 = 1;
+const ATTR_STRING: u8 = 2;
+const ATTR_ENTITY_KEY: u8 = 3;
+
+// ── Gas model ────────────────────────────────────────────────────────
+//
+// Pure function of op shape — required for cross-node consensus on the
+// returned `gas_used`. Anchors:
+//   - SSTORE_INIT  ≈ 22,100
+//   - SSTORE_RESET ≈  5,000
+//   - per code byte ≈ 200
+//
+// Per-op base costs cover the fixed state touches:
+//   - CREATE writes counter + 2 ID-map slots + 7 built-in bitmaps + entity RLP
+//   - DELETE/EXPIRE clears 2 ID-map slots + 7 built-in bitmaps + tombstone
+//   - UPDATE rewrites the entity RLP + diffs the $contentType bitmap
+//   - EXTEND / TRANSFER rewrite the entity RLP + swap a single bitmap
+//
+// Per-byte costs cover payload + annotation key/value bytes that land in
+// account code; per-annotation cost amortises the extra bitmap touch.
+
+const G_CREATE: u64 = 80_000;
+const G_UPDATE: u64 = 30_000;
+const G_EXTEND: u64 = 25_000;
+const G_TRANSFER: u64 = 25_000;
+const G_DELETE: u64 = 50_000;
+const G_EXPIRE: u64 = 50_000;
+const G_BYTE: u64 = 16;
+const G_ANNOTATION: u64 = 5_000;
 
 const PRECOMPILE_NAME: &str = "ARKIV";
 
-/// Build the stub Arkiv precompile.
+/// Build the Arkiv precompile.
 ///
 /// Returns a [`DynPrecompile`] suitable for insertion into a
-/// `PrecompilesMap`. Every state-mutation path is a no-op log; the
-/// intent is to land the precompile↔contract ABI plumbing (calldata
-/// decode, caller restriction, dispatch shape) so the real handlers
-/// drop in later without churning the call site.
+/// `PrecompilesMap` via [`crate::evm::ArkivOpEvmFactory`].
 pub fn arkiv_precompile() -> DynPrecompile {
     let id = PrecompileId::custom(PRECOMPILE_NAME);
-    let call = move |input: PrecompileInput<'_>| -> PrecompileResult {
+    let call = move |mut input: PrecompileInput<'_>| -> PrecompileResult {
         // ── Caller restriction ──────────────────────────────────────
         //
         // Direct call only, from the `EntityRegistry` predeploy.
@@ -118,26 +146,24 @@ pub fn arkiv_precompile() -> DynPrecompile {
             }
         };
 
-        let gas_used = STUB_BASE_GAS + STUB_GAS_PER_OP * records.len() as u64;
+        // ── Gas: pure function of op shape ──────────────────────────
+
+        let gas_used = total_gas(&records);
         if gas_used > input.gas {
             return Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, input.reservoir));
         }
 
-        // ── Dispatch ────────────────────────────────────────────────
+        // ── Dispatch into entitydb ──────────────────────────────────
 
-        for (i, rec) in records.iter().enumerate() {
-            match rec.operationType {
-                OP_CREATE => handle_create(i, rec),
-                OP_UPDATE => handle_update(i, rec),
-                OP_EXTEND => handle_extend(i, rec),
-                OP_TRANSFER => handle_transfer(i, rec),
-                OP_DELETE => handle_delete(i, rec),
-                OP_EXPIRE => handle_expire(i, rec),
-                t => {
-                    return Err(PrecompileError::Fatal(format!(
-                        "arkiv precompile: unknown operationType {t} in record #{i}"
-                    )));
-                }
+        let current_block: u64 = input.internals.block_number().saturating_to();
+        let mut adapter = RevmStateAdapter::new(&mut input.internals);
+
+        for (i, rec) in records.into_iter().enumerate() {
+            if let Err(e) = dispatch(&mut adapter, current_block, &rec) {
+                return Err(PrecompileError::Fatal(format!(
+                    "arkiv precompile: op #{i} ({}) failed: {e}",
+                    op_name(rec.operationType),
+                )));
             }
         }
 
@@ -146,101 +172,247 @@ pub fn arkiv_precompile() -> DynPrecompile {
     DynPrecompile::new_stateful(id, call)
 }
 
-// ── Per-op stub handlers ─────────────────────────────────────────────
-//
-// Each takes the record's index in the batch (for diagnostic logging)
-// and the decoded record. A later phase replaces these bodies with the
-// real state mutations.
+// ── Op dispatch ──────────────────────────────────────────────────────
 
-fn handle_create(i: usize, rec: &OpRecord) {
-    tracing::debug!(
-        index = i,
-        entity_key = %rec.entityKey,
-        sender = %rec.sender,
-        new_owner = %rec.newOwner,
-        expires_at = rec.newExpiresAt,
-        payload_len = rec.payload.len(),
-        attr_count = rec.attributes.len(),
-        "arkiv precompile (stub): CREATE"
-    );
-    // TODO: bump system.entity_count; write ID maps; create entity
-    // account; for each annotation (incl. built-ins $all / $creator /
-    // $createdAtBlock / $owner / $key / $expiration / $contentType) do
-    // the first-sight ArkivPairs put + bitmap insert; encode the
-    // EntityRlp (with owner + expires_at) and SetCode the entity.
-    let _ = rec;
+fn dispatch<S: StateAdapter>(
+    state: &mut S,
+    current_block: u64,
+    rec: &OpRecord,
+) -> eyre::Result<()> {
+    match rec.operationType {
+        OP_CREATE => {
+            let (string_annotations, numeric_annotations) = convert_attributes(&rec.attributes)?;
+            arkiv_entitydb::create(
+                state,
+                rec.sender,
+                rec.entityKey,
+                rec.newExpiresAt as u64,
+                current_block,
+                rec.payload.to_vec(),
+                mime128_to_bytes(&rec.contentType),
+                string_annotations,
+                numeric_annotations,
+            )
+        }
+        OP_UPDATE => {
+            let (string_annotations, numeric_annotations) = convert_attributes(&rec.attributes)?;
+            arkiv_entitydb::update(
+                state,
+                rec.entityKey,
+                rec.payload.to_vec(),
+                mime128_to_bytes(&rec.contentType),
+                string_annotations,
+                numeric_annotations,
+            )
+        }
+        OP_EXTEND => arkiv_entitydb::extend(state, rec.entityKey, rec.newExpiresAt as u64),
+        OP_TRANSFER => arkiv_entitydb::transfer(state, rec.entityKey, rec.newOwner),
+        OP_DELETE => arkiv_entitydb::delete(state, rec.entityKey),
+        OP_EXPIRE => arkiv_entitydb::expire(state, rec.entityKey),
+        t => Err(eyre::eyre!("unknown operationType {t}")),
+    }
 }
 
-fn handle_update(i: usize, rec: &OpRecord) {
-    tracing::debug!(
-        index = i,
-        entity_key = %rec.entityKey,
-        sender = %rec.sender,
-        payload_len = rec.payload.len(),
-        attr_count = rec.attributes.len(),
-        "arkiv precompile (stub): UPDATE"
-    );
-    // TODO: read entity_id from system.addr_to_id; decode old
-    // EntityRlp; diff annotations; remove ID from bitmaps that dropped,
-    // add to bitmaps that appeared; re-encode RLP preserving owner /
-    // expires_at / creator / created_at_block / key from the old one.
-    let _ = rec;
+fn op_name(t: u8) -> &'static str {
+    match t {
+        OP_CREATE => "CREATE",
+        OP_UPDATE => "UPDATE",
+        OP_EXTEND => "EXTEND",
+        OP_TRANSFER => "TRANSFER",
+        OP_DELETE => "DELETE",
+        OP_EXPIRE => "EXPIRE",
+        _ => "UNKNOWN",
+    }
 }
 
-fn handle_extend(i: usize, rec: &OpRecord) {
-    tracing::debug!(
-        index = i,
-        entity_key = %rec.entityKey,
-        sender = %rec.sender,
-        new_expires_at = rec.newExpiresAt,
-        "arkiv precompile (stub): EXTEND"
-    );
-    // TODO: decode old EntityRlp to recover old expires_at; remove ID
-    // from $expiration=old bitmap; add ID to $expiration=newExpiresAt
-    // bitmap (first-sight ArkivPairs put if new); re-encode EntityRlp
-    // with expires_at=newExpiresAt, everything else preserved.
-    let _ = rec;
+// ── Gas accounting ───────────────────────────────────────────────────
+
+fn total_gas(records: &[OpRecord]) -> u64 {
+    records
+        .iter()
+        .map(record_gas)
+        .fold(0u64, u64::saturating_add)
 }
 
-fn handle_transfer(i: usize, rec: &OpRecord) {
-    tracing::debug!(
-        index = i,
-        entity_key = %rec.entityKey,
-        sender = %rec.sender,
-        new_owner = %rec.newOwner,
-        "arkiv precompile (stub): TRANSFER"
-    );
-    // TODO: decode old EntityRlp to recover old owner; remove ID from
-    // $owner=old bitmap; add ID to $owner=newOwner bitmap (first-sight
-    // ArkivPairs put if new); re-encode EntityRlp with owner=newOwner,
-    // everything else preserved.
-    let _ = rec;
+fn record_gas(rec: &OpRecord) -> u64 {
+    let base = match rec.operationType {
+        OP_CREATE => G_CREATE,
+        OP_UPDATE => G_UPDATE,
+        OP_EXTEND => G_EXTEND,
+        OP_TRANSFER => G_TRANSFER,
+        OP_DELETE => G_DELETE,
+        OP_EXPIRE => G_EXPIRE,
+        // Unknown op-types still get charged so a malformed batch can't
+        // dodge gas; dispatch will fatal anyway.
+        _ => G_CREATE,
+    };
+
+    // EXTEND / TRANSFER / DELETE / EXPIRE don't read payload or
+    // attributes from the record — gas is only the fixed base.
+    if !matches!(rec.operationType, OP_CREATE | OP_UPDATE) {
+        return base;
+    }
+
+    let payload_bytes = rec.payload.len() as u64;
+    let annotation_count = rec.attributes.len() as u64;
+    // Each annotation's name (≤32 bytes) + value (≤128 bytes) lands in
+    // both the entity RLP and a pair-account bitmap.
+    let annotation_bytes = annotation_count.saturating_mul(32 + 128);
+
+    base.saturating_add(payload_bytes.saturating_mul(G_BYTE))
+        .saturating_add(annotation_bytes.saturating_mul(G_BYTE))
+        .saturating_add(annotation_count.saturating_mul(G_ANNOTATION))
 }
 
-fn handle_delete(i: usize, rec: &OpRecord) {
-    tracing::debug!(
-        index = i,
-        entity_key = %rec.entityKey,
-        sender = %rec.sender,
-        "arkiv precompile (stub): DELETE"
-    );
-    // TODO: read entity_id; decode old EntityRlp; for every annotation
-    // (incl. built-ins recovered from RLP — $owner=old_owner,
-    // $expiration=old_expires_at) remove ID from the bitmap; clear both
-    // system-account ID slots; SetCode(entity, nil) keeping nonce=1.
-    let _ = rec;
+// ── ABI → entitydb conversions ───────────────────────────────────────
+
+/// Concatenate a `bytes32[4]` into 128 bytes, then strip trailing `0x00`.
+///
+/// Strings written by the SDK are packed left-aligned into the four
+/// words and zero-padded on the right; trimming gives the original
+/// bytes back. Strings that legitimately end in `0x00` are not
+/// supported by this encoding (which is fine — `0x00` is banned in
+/// pair keys/values anyway).
+fn pack_bytes32_4(words: &[alloy_primitives::FixedBytes<32>; 4]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(128);
+    for w in words {
+        out.extend_from_slice(w.as_slice());
+    }
+    strip_trailing_zeros(out)
 }
 
-fn handle_expire(i: usize, rec: &OpRecord) {
-    tracing::debug!(
-        index = i,
-        entity_key = %rec.entityKey,
-        sender = %rec.sender,
-        "arkiv precompile (stub): EXPIRE"
-    );
-    // TODO: identical state path to handle_delete — the contract has
-    // already validated `block.number > expiresAt`.
-    let _ = rec;
+fn strip_trailing_zeros(mut v: Vec<u8>) -> Vec<u8> {
+    while matches!(v.last(), Some(0)) {
+        v.pop();
+    }
+    v
+}
+
+fn mime128_to_bytes(m: &Mime128) -> Vec<u8> {
+    pack_bytes32_4(&m.data)
+}
+
+/// Strip trailing zeros from an `Ident32` (`bytes32`) annotation key.
+fn ident32_to_bytes(name: B256) -> Vec<u8> {
+    strip_trailing_zeros(name.0.to_vec())
+}
+
+fn convert_attributes(
+    attrs: &[Attribute],
+) -> eyre::Result<(Vec<StringAnnotation>, Vec<NumericAnnotation>)> {
+    let mut strings = Vec::new();
+    let mut numerics = Vec::new();
+    for a in attrs {
+        let key = ident32_to_bytes(a.name);
+        match a.valueType {
+            ATTR_UINT => {
+                // The SDK packs a uint256 into value[0] big-endian; the
+                // remaining three words are zero. Treat the leading
+                // 32-byte word as the value.
+                numerics.push(NumericAnnotation {
+                    key,
+                    value: U256::from_be_slice(a.value[0].as_slice()),
+                });
+            }
+            ATTR_STRING => {
+                strings.push(StringAnnotation {
+                    key,
+                    value: pack_bytes32_4(&a.value),
+                });
+            }
+            ATTR_ENTITY_KEY => {
+                // Entity keys are exactly 32 bytes — store the leading
+                // word verbatim (no trailing-zero strip; a key may
+                // legitimately end in zeros).
+                strings.push(StringAnnotation {
+                    key,
+                    value: a.value[0].as_slice().to_vec(),
+                });
+            }
+            t => eyre::bail!("unknown attribute valueType {t}"),
+        }
+    }
+    Ok((strings, numerics))
+}
+
+// ── revm-side state adapter ──────────────────────────────────────────
+
+/// [`StateAdapter`] over revm's journaled state. Each call goes through
+/// the journal so reverts roll back cleanly on dispatch failure.
+struct RevmStateAdapter<'a, 'b> {
+    internals: &'a mut EvmInternals<'b>,
+}
+
+impl<'a, 'b> RevmStateAdapter<'a, 'b> {
+    fn new(internals: &'a mut EvmInternals<'b>) -> Self {
+        Self { internals }
+    }
+
+    /// `set_code(..., Bytecode)` doesn't bump the nonce; new accounts
+    /// land with `nonce = 0` which EIP-161 would prune. Force `nonce >=
+    /// 1` so the account survives.
+    fn ensure_nonce_at_least_one(&mut self, addr: Address) -> eyre::Result<()> {
+        let nonce = self
+            .internals
+            .load_account_code(addr)
+            .map_err(|e| eyre::eyre!("load_account_code({addr}): {e:?}"))?
+            .data
+            .nonce();
+        if nonce == 0 {
+            self.internals
+                .bump_nonce(addr)
+                .map_err(|e| eyre::eyre!("bump_nonce({addr}): {e:?}"))?;
+        }
+        Ok(())
+    }
+}
+
+impl StateAdapter for RevmStateAdapter<'_, '_> {
+    fn code(&mut self, addr: &Address) -> eyre::Result<Vec<u8>> {
+        let load = self
+            .internals
+            .load_account_code(*addr)
+            .map_err(|e| eyre::eyre!("load_account_code({addr}): {e:?}"))?;
+        Ok(load
+            .data
+            .code()
+            .map(|c| c.original_byte_slice().to_vec())
+            .unwrap_or_default())
+    }
+
+    fn set_code(&mut self, addr: &Address, code: Vec<u8>) -> eyre::Result<()> {
+        let bytecode = Bytecode::new_raw(Bytes::from(code));
+        self.internals
+            .set_code(*addr, bytecode)
+            .map_err(|e| eyre::eyre!("set_code({addr}): {e:?}"))?;
+        self.ensure_nonce_at_least_one(*addr)
+    }
+
+    fn tombstone_code(&mut self, addr: &Address) -> eyre::Result<()> {
+        let bytecode = Bytecode::new_raw(Bytes::new());
+        self.internals
+            .set_code(*addr, bytecode)
+            .map_err(|e| eyre::eyre!("set_code (tombstone, {addr}): {e:?}"))?;
+        self.ensure_nonce_at_least_one(*addr)
+    }
+
+    fn storage(&mut self, addr: &Address, slot: B256) -> eyre::Result<B256> {
+        let key = U256::from_be_bytes(slot.0);
+        let load = self
+            .internals
+            .sload(*addr, key)
+            .map_err(|e| eyre::eyre!("sload({addr}, {slot}): {e:?}"))?;
+        Ok(B256::from(load.data.to_be_bytes()))
+    }
+
+    fn set_storage(&mut self, addr: &Address, slot: B256, value: B256) -> eyre::Result<()> {
+        let key = U256::from_be_bytes(slot.0);
+        let val = U256::from_be_bytes(value.0);
+        self.internals
+            .sstore(*addr, key, val)
+            .map_err(|e| eyre::eyre!("sstore({addr}, {slot}): {e:?}"))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -248,9 +420,9 @@ mod tests {
     use super::*;
     use alloy_primitives::{Address as Addr, B256, FixedBytes};
 
-    // End-to-end dispatch tests (caller restriction in a live revm
-    // context) land in a later phase — `PrecompileInput::internals` is
-    // an EVM-internal handle that can't be constructed standalone.
+    // End-to-end dispatch tests (state mutations against a live revm
+    // context) live in `e2e/tests/precompile_e2e.rs` — `EvmInternals`
+    // can't be constructed standalone.
 
     #[test]
     fn op_type_constants_match_contract() {
@@ -263,17 +435,21 @@ mod tests {
     }
 
     #[test]
+    fn attr_type_constants_match_contract() {
+        assert_eq!(ATTR_UINT, 1);
+        assert_eq!(ATTR_STRING, 2);
+        assert_eq!(ATTR_ENTITY_KEY, 3);
+    }
+
+    #[test]
     fn arkiv_precompile_constructs() {
-        // Smoke test — confirms the constructor produces a value
-        // without panicking. Behavioural tests are deferred.
         let _ = arkiv_precompile();
     }
 
     #[test]
     fn record_decodes_minimal_create_batch() {
         // Hand-construct a one-op CREATE record, abi-encode it as a
-        // Vec<OpRecord>, then round-trip-decode. Confirms the sol!
-        // layout matches what the contract emits.
+        // Vec<OpRecord>, then round-trip-decode.
         let rec = OpRecord {
             operationType: OP_CREATE,
             sender: Addr::repeat_byte(0xaa),
@@ -291,5 +467,112 @@ mod tests {
         assert_eq!(decoded[0].operationType, OP_CREATE);
         assert_eq!(decoded[0].entityKey, rec.entityKey);
         assert_eq!(decoded[0].newExpiresAt, 12345);
+    }
+
+    #[test]
+    fn pack_bytes32_4_strips_trailing_zeros() {
+        let mut w0 = [0u8; 32];
+        w0[..10].copy_from_slice(b"text/plain");
+        let m = Mime128 {
+            data: [
+                FixedBytes::from(w0),
+                FixedBytes::ZERO,
+                FixedBytes::ZERO,
+                FixedBytes::ZERO,
+            ],
+        };
+        assert_eq!(mime128_to_bytes(&m), b"text/plain".to_vec());
+    }
+
+    #[test]
+    fn ident32_strips_trailing_zeros() {
+        let mut buf = [0u8; 32];
+        buf[..3].copy_from_slice(b"tag");
+        assert_eq!(ident32_to_bytes(B256::from(buf)), b"tag".to_vec());
+    }
+
+    #[test]
+    fn convert_uint_attribute_packs_be_word() {
+        let mut name = [0u8; 32];
+        name[..5].copy_from_slice(b"score");
+        let mut val = [0u8; 32];
+        val[31] = 42;
+        let attrs = vec![Attribute {
+            name: FixedBytes::from(name),
+            valueType: ATTR_UINT,
+            value: [
+                FixedBytes::from(val),
+                FixedBytes::ZERO,
+                FixedBytes::ZERO,
+                FixedBytes::ZERO,
+            ],
+        }];
+        let (strings, numerics) = convert_attributes(&attrs).expect("convert");
+        assert!(strings.is_empty());
+        assert_eq!(numerics.len(), 1);
+        assert_eq!(numerics[0].key, b"score".to_vec());
+        assert_eq!(numerics[0].value, U256::from(42));
+    }
+
+    #[test]
+    fn convert_string_attribute_strips_zeros() {
+        let mut name = [0u8; 32];
+        name[..3].copy_from_slice(b"tag");
+        let mut val0 = [0u8; 32];
+        val0[..5].copy_from_slice(b"music");
+        let attrs = vec![Attribute {
+            name: FixedBytes::from(name),
+            valueType: ATTR_STRING,
+            value: [
+                FixedBytes::from(val0),
+                FixedBytes::ZERO,
+                FixedBytes::ZERO,
+                FixedBytes::ZERO,
+            ],
+        }];
+        let (strings, numerics) = convert_attributes(&attrs).expect("convert");
+        assert!(numerics.is_empty());
+        assert_eq!(strings.len(), 1);
+        assert_eq!(strings[0].key, b"tag".to_vec());
+        assert_eq!(strings[0].value, b"music".to_vec());
+    }
+
+    #[test]
+    fn convert_entity_key_attribute_keeps_full_32_bytes() {
+        let mut name = [0u8; 32];
+        name[..3].copy_from_slice(b"ref");
+        let val0 = [0x42u8; 32];
+        let attrs = vec![Attribute {
+            name: FixedBytes::from(name),
+            valueType: ATTR_ENTITY_KEY,
+            value: [
+                FixedBytes::from(val0),
+                FixedBytes::ZERO,
+                FixedBytes::ZERO,
+                FixedBytes::ZERO,
+            ],
+        }];
+        let (strings, _) = convert_attributes(&attrs).expect("convert");
+        assert_eq!(strings[0].value, vec![0x42u8; 32]);
+    }
+
+    #[test]
+    fn record_gas_charges_per_op_correctly() {
+        let mk = |op| OpRecord {
+            operationType: op,
+            sender: Addr::ZERO,
+            entityKey: B256::ZERO,
+            newOwner: Addr::ZERO,
+            newExpiresAt: 0,
+            payload: Bytes::new(),
+            contentType: Mime128 { data: [FixedBytes::ZERO; 4] },
+            attributes: vec![],
+        };
+        assert_eq!(record_gas(&mk(OP_CREATE)), G_CREATE);
+        assert_eq!(record_gas(&mk(OP_UPDATE)), G_UPDATE);
+        assert_eq!(record_gas(&mk(OP_EXTEND)), G_EXTEND);
+        assert_eq!(record_gas(&mk(OP_TRANSFER)), G_TRANSFER);
+        assert_eq!(record_gas(&mk(OP_DELETE)), G_DELETE);
+        assert_eq!(record_gas(&mk(OP_EXPIRE)), G_EXPIRE);
     }
 }

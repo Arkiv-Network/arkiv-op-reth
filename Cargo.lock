@@ -1466,6 +1466,7 @@ dependencies = [
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
  "alloy-sol-types",
+ "arkiv-entitydb",
  "arkiv-genesis",
  "clap",
  "eyre",

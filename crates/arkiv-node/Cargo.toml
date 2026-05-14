@@ -24,6 +24,7 @@ reth-evm.workspace = true
 reth-primitives-traits.workspace = true
 
 arkiv-genesis.workspace = true
+arkiv-entitydb.workspace = true
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
