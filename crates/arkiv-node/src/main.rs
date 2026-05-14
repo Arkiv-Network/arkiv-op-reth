@@ -1,4 +1,4 @@
-use arkiv_node::{ArkivExt, has_arkiv_predeploy, install};
+use arkiv_node::{ArkivExt, ArkivOpNode, has_arkiv_predeploy, install};
 use clap::Parser;
 use eyre::{Result, bail};
 use reth_optimism_cli::{Cli, chainspec::OpChainSpecParser};
@@ -9,7 +9,6 @@ fn main() -> Result<()> {
         let ArkivExt { rollup } = ext;
 
         // Hard fail if the predeploy is missing — v2 has no fallback mode.
-        // (Phase 2+ will install the precompile / RPC / table iff this is true.)
         if !has_arkiv_predeploy(&builder.config().chain) {
             bail!(
                 "EntityRegistry predeploy not detected at {} in the loaded chainspec; \
@@ -18,7 +17,13 @@ fn main() -> Result<()> {
             );
         }
 
-        let node = install(builder.node(OpNode::new(rollup)));
+        // ArkivOpNode swaps in our `ArkivOpExecutorBuilder`, which builds
+        // an `ArkivOpEvmConfig` that uses `ArkivOpEvmFactory`. The
+        // factory installs the Arkiv precompile at 0x…0045 on every
+        // fresh revm instance (canonical execution, tracing,
+        // payload-building, simulation).
+        let arkiv_node = ArkivOpNode::new(OpNode::new(rollup));
+        let node = install(builder.node(arkiv_node));
         let handle = node.launch_with_debug_capabilities().await?;
         handle.wait_for_node_exit().await
     })

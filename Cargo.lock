@@ -1390,18 +1390,30 @@ dependencies = [
 name = "arkiv-node"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
+ "alloy-eips 2.0.4",
  "alloy-evm",
+ "alloy-hardforks",
+ "alloy-op-evm",
  "alloy-primitives",
+ "alloy-rpc-types-engine",
+ "alloy-rpc-types-eth",
  "alloy-sol-types",
  "arkiv-genesis",
  "clap",
  "eyre",
+ "op-alloy-consensus",
+ "op-revm",
+ "reth-evm",
+ "reth-node-api",
  "reth-node-builder",
  "reth-optimism-chainspec",
  "reth-optimism-cli",
  "reth-optimism-node",
  "reth-optimism-primitives",
+ "reth-primitives-traits",
  "revm",
+ "revm-precompile",
  "tracing",
 ]
 

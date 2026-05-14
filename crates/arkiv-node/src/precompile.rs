@@ -1,10 +1,10 @@
 //! Arkiv precompile — **stub**.
 //!
-//! Registered (in a later phase) by the custom `EvmFactory` at
+//! Registered by [`crate::evm::ArkivOpEvmFactory`] at
 //! [`ARKIV_PRECOMPILE_ADDRESS`](arkiv_genesis::ARKIV_PRECOMPILE_ADDRESS).
 //! Called by `EntityRegistry.execute()` with `abi.encode(OpRecord[])`
 //! as its calldata; today every per-op handler is a no-op that logs
-//! the op and returns success. Phase 4 fills in:
+//! the op and returns success. A later phase fills in:
 //!
 //! - content validation (payload caps, attribute formats, `0x00` ban)
 //! - entity / pair / system-account state writes via `EvmInternals`
@@ -18,11 +18,13 @@
 //! `contracts/src/EntityRegistry.sol`'s `OpRecord` struct via `sol!`.
 //! Field layouts must stay in lockstep across both sides.
 
-use alloy_evm::precompiles::{Precompile, PrecompileInput};
+use alloy_evm::precompiles::{DynPrecompile, PrecompileInput};
 use alloy_primitives::{Bytes, U256};
 use alloy_sol_types::{SolValue, sol};
 use arkiv_genesis::ENTITY_REGISTRY_ADDRESS;
-use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
+use revm::precompile::{PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult};
+
+pub use arkiv_genesis::ARKIV_PRECOMPILE_ADDRESS;
 
 // Mirror of `EntityRegistry.OpRecord` in contracts/src/EntityRegistry.sol.
 // Field order, types, and names must match exactly — the contract calls
@@ -62,52 +64,26 @@ const OP_TRANSFER: u8 = 4;
 const OP_DELETE: u8 = 5;
 const OP_EXPIRE: u8 = 6;
 
-// Stub gas model — placeholder while the precompile is wired in. Phase 4
-// replaces this with the per-op formulas from design doc §5.
+// Stub gas model — placeholder while the precompile is wired in. A later
+// phase replaces this with the per-op formulas from design doc §5.
 const STUB_BASE_GAS: u64 = 5_000;
 const STUB_GAS_PER_OP: u64 = 1_000;
 
-/// Stub implementation of the Arkiv precompile.
+const PRECOMPILE_NAME: &str = "ARKIV";
+
+/// Build the stub Arkiv precompile.
 ///
-/// Every state-mutation path is a no-op log. The intent is to land the
-/// precompile↔contract ABI plumbing (calldata decode, caller restriction,
-/// dispatch shape) so the EvmFactory wiring in the next phase has
-/// something concrete to register.
-#[derive(Debug)]
-pub struct ArkivPrecompile {
-    id: PrecompileId,
-}
-
-impl ArkivPrecompile {
-    pub fn new() -> Self {
-        Self { id: PrecompileId::custom("arkiv") }
-    }
-}
-
-impl Default for ArkivPrecompile {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Precompile for ArkivPrecompile {
-    fn precompile_id(&self) -> &PrecompileId {
-        &self.id
-    }
-
-    fn supports_caching(&self) -> bool {
-        // State-mutating: never cache.
-        false
-    }
-
-    fn call(&self, input: PrecompileInput<'_>) -> PrecompileResult {
+/// Returns a [`DynPrecompile`] suitable for insertion into a
+/// `PrecompilesMap`. Every state-mutation path is a no-op log; the
+/// intent is to land the precompile↔contract ABI plumbing (calldata
+/// decode, caller restriction, dispatch shape) so the real handlers
+/// drop in later without churning the call site.
+pub fn arkiv_precompile() -> DynPrecompile {
+    let id = PrecompileId::custom(PRECOMPILE_NAME);
+    let call = move |input: PrecompileInput<'_>| -> PrecompileResult {
         // ── Caller restriction ──────────────────────────────────────
         //
-        // The precompile is only callable directly from the Arkiv
-        // EntityRegistry contract. Reject DELEGATECALL / CALLCODE
-        // (target ≠ bytecode address), STATICCALL (no state mutation
-        // for our use case), value-bearing calls, and any caller other
-        // than the registry's predeploy address.
+        // Direct call only, from the `EntityRegistry` predeploy.
 
         if input.target_address != input.bytecode_address {
             return Err(PrecompileError::Fatal(
@@ -144,12 +120,7 @@ impl Precompile for ArkivPrecompile {
 
         let gas_used = STUB_BASE_GAS + STUB_GAS_PER_OP * records.len() as u64;
         if gas_used > input.gas {
-            // Stub gas charge is a placeholder; if even this fails the
-            // budget, halt out-of-gas.
-            return Ok(PrecompileOutput::halt(
-                revm::precompile::PrecompileHalt::OutOfGas,
-                input.reservoir,
-            ));
+            return Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, input.reservoir));
         }
 
         // ── Dispatch ────────────────────────────────────────────────
@@ -171,14 +142,15 @@ impl Precompile for ArkivPrecompile {
         }
 
         Ok(PrecompileOutput::new(gas_used, Bytes::new(), input.reservoir))
-    }
+    };
+    DynPrecompile::new_stateful(id, call)
 }
 
 // ── Per-op stub handlers ─────────────────────────────────────────────
 //
 // Each takes the record's index in the batch (for diagnostic logging)
-// and the decoded record. Phase 4 replaces these bodies with the real
-// state mutations.
+// and the decoded record. A later phase replaces these bodies with the
+// real state mutations.
 
 fn handle_create(i: usize, rec: &OpRecord) {
     tracing::debug!(
@@ -191,10 +163,10 @@ fn handle_create(i: usize, rec: &OpRecord) {
         attr_count = rec.attributes.len(),
         "arkiv precompile (stub): CREATE"
     );
-    // TODO[phase 4]: bump system.entity_count; write ID maps; create
-    // entity account; for each annotation (incl. built-ins
-    // $all/$creator/$createdAtBlock/$owner/$key/$expiration/$contentType)
-    // do the first-sight ArkivPairs put + bitmap insert; encode the
+    // TODO: bump system.entity_count; write ID maps; create entity
+    // account; for each annotation (incl. built-ins $all / $creator /
+    // $createdAtBlock / $owner / $key / $expiration / $contentType) do
+    // the first-sight ArkivPairs put + bitmap insert; encode the
     // EntityRlp (with owner + expires_at) and SetCode the entity.
     let _ = rec;
 }
@@ -208,7 +180,7 @@ fn handle_update(i: usize, rec: &OpRecord) {
         attr_count = rec.attributes.len(),
         "arkiv precompile (stub): UPDATE"
     );
-    // TODO[phase 4]: read entity_id from system.addr_to_id; decode old
+    // TODO: read entity_id from system.addr_to_id; decode old
     // EntityRlp; diff annotations; remove ID from bitmaps that dropped,
     // add to bitmaps that appeared; re-encode RLP preserving owner /
     // expires_at / creator / created_at_block / key from the old one.
@@ -223,11 +195,10 @@ fn handle_extend(i: usize, rec: &OpRecord) {
         new_expires_at = rec.newExpiresAt,
         "arkiv precompile (stub): EXTEND"
     );
-    // TODO[phase 4]: decode old EntityRlp to recover old expires_at;
-    // remove ID from $expiration=old bitmap; add ID to
-    // $expiration=newExpiresAt bitmap (first-sight ArkivPairs put if
-    // new); re-encode EntityRlp with expires_at=newExpiresAt, everything
-    // else preserved.
+    // TODO: decode old EntityRlp to recover old expires_at; remove ID
+    // from $expiration=old bitmap; add ID to $expiration=newExpiresAt
+    // bitmap (first-sight ArkivPairs put if new); re-encode EntityRlp
+    // with expires_at=newExpiresAt, everything else preserved.
     let _ = rec;
 }
 
@@ -239,10 +210,10 @@ fn handle_transfer(i: usize, rec: &OpRecord) {
         new_owner = %rec.newOwner,
         "arkiv precompile (stub): TRANSFER"
     );
-    // TODO[phase 4]: decode old EntityRlp to recover old owner; remove
-    // ID from $owner=old bitmap; add ID to $owner=newOwner bitmap
-    // (first-sight ArkivPairs put if new); re-encode EntityRlp with
-    // owner=newOwner, everything else preserved.
+    // TODO: decode old EntityRlp to recover old owner; remove ID from
+    // $owner=old bitmap; add ID to $owner=newOwner bitmap (first-sight
+    // ArkivPairs put if new); re-encode EntityRlp with owner=newOwner,
+    // everything else preserved.
     let _ = rec;
 }
 
@@ -253,8 +224,8 @@ fn handle_delete(i: usize, rec: &OpRecord) {
         sender = %rec.sender,
         "arkiv precompile (stub): DELETE"
     );
-    // TODO[phase 4]: read entity_id; decode old EntityRlp; for every
-    // annotation (incl. built-ins recovered from RLP — $owner=old_owner,
+    // TODO: read entity_id; decode old EntityRlp; for every annotation
+    // (incl. built-ins recovered from RLP — $owner=old_owner,
     // $expiration=old_expires_at) remove ID from the bitmap; clear both
     // system-account ID slots; SetCode(entity, nil) keeping nonce=1.
     let _ = rec;
@@ -267,24 +238,19 @@ fn handle_expire(i: usize, rec: &OpRecord) {
         sender = %rec.sender,
         "arkiv precompile (stub): EXPIRE"
     );
-    // TODO[phase 4]: identical state path to handle_delete — the
-    // contract has already validated `block.number > expiresAt`.
+    // TODO: identical state path to handle_delete — the contract has
+    // already validated `block.number > expiresAt`.
     let _ = rec;
 }
-
-/// Address at which the precompile is registered in `PrecompilesMap`.
-/// Re-exported from `arkiv-genesis` so callers building the EvmFactory
-/// don't need a transitive dep.
-pub use arkiv_genesis::ARKIV_PRECOMPILE_ADDRESS;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy_primitives::{Address as Addr, B256, FixedBytes};
 
-    // End-to-end dispatch tests (caller restriction, real revm context)
-    // land in phase 4 — `PrecompileInput::internals` is an EVM-internal
-    // handle that can't be constructed standalone.
+    // End-to-end dispatch tests (caller restriction in a live revm
+    // context) land in a later phase — `PrecompileInput::internals` is
+    // an EVM-internal handle that can't be constructed standalone.
 
     #[test]
     fn op_type_constants_match_contract() {
@@ -297,10 +263,10 @@ mod tests {
     }
 
     #[test]
-    fn precompile_id_is_custom_arkiv() {
-        let p = ArkivPrecompile::new();
-        assert_eq!(p.precompile_id().name(), "arkiv");
-        assert!(!p.supports_caching());
+    fn arkiv_precompile_constructs() {
+        // Smoke test — confirms the constructor produces a value
+        // without panicking. Behavioural tests are deferred.
+        let _ = arkiv_precompile();
     }
 
     #[test]

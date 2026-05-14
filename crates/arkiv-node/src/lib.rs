@@ -14,10 +14,12 @@
 //!   in with the `EvmFactory` + RPC wiring.
 
 mod cli;
+pub mod evm;
 mod genesis;
 mod install;
 pub mod precompile;
 
 pub use cli::ArkivExt;
+pub use evm::ArkivOpNode;
 pub use genesis::has_arkiv_predeploy;
 pub use install::install;
