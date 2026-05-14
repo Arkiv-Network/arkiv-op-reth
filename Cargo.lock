@@ -1431,6 +1431,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "arkiv-entitydb"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-rlp",
+ "eyre",
+ "roaring",
+]
+
+[[package]]
 name = "arkiv-genesis"
 version = "0.1.0"
 dependencies = [

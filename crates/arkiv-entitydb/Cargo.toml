@@ -1,0 +1,19 @@
+[package]
+name = "arkiv-entitydb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Core encode/decode + address-derivation primitives for the v2 Arkiv
+# state model: entities and roaring64 bitmaps, both represented as
+# Ethereum accounts in op-reth's world-state trie. Pure data primitives
+# — no DB plumbing, no revm. Consumed by `arkiv-node`'s precompile and
+# by any client (RPC handler, future SDK) that needs to read an entity
+# account directly.
+
+[dependencies]
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+roaring.workspace = true
+eyre.workspace = true
