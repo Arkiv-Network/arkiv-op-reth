@@ -28,6 +28,7 @@ arkiv-genesis.workspace = true
 arkiv-entitydb.workspace = true
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
+
 alloy-eips.workspace = true
 alloy-hardforks.workspace = true
 alloy-sol-types.workspace = true

@@ -275,6 +275,10 @@ pub struct EntityRlp {
     pub key: B256,
     pub string_annotations: Vec<StringAnnotation>,
     pub numeric_annotations: Vec<NumericAnnotation>,
+    /// Block number of the most recent mutation (CREATE / UPDATE /
+    /// EXTEND / TRANSFER) — equals `created_at_block` until the
+    /// entity is first modified.
+    pub last_modified_at_block: u64,
 }
 
 /// `(key, value)` pair where `value` is opaque bytes — used for the
@@ -398,6 +402,7 @@ pub fn create<S: StateAdapter>(
         key: entity_key,
         string_annotations,
         numeric_annotations,
+        last_modified_at_block: current_block,
     };
     state.set_code(&entity_addr, entity.encode_as_code())?;
 
@@ -412,6 +417,7 @@ pub fn create<S: StateAdapter>(
 pub fn update<S: StateAdapter>(
     state: &mut S,
     entity_key: B256,
+    current_block: u64,
     payload: Vec<u8>,
     content_type: Vec<u8>,
     string_annotations: Vec<StringAnnotation>,
@@ -434,6 +440,7 @@ pub fn update<S: StateAdapter>(
     entity.content_type = content_type;
     entity.string_annotations = string_annotations;
     entity.numeric_annotations = numeric_annotations;
+    entity.last_modified_at_block = current_block;
     state.set_code(&entity_addr, entity.encode_as_code())?;
 
     Ok(())
@@ -444,6 +451,7 @@ pub fn update<S: StateAdapter>(
 pub fn extend<S: StateAdapter>(
     state: &mut S,
     entity_key: B256,
+    current_block: u64,
     new_expires_at: u64,
 ) -> Result<()> {
     let entity_addr = entity_address(entity_key);
@@ -454,6 +462,7 @@ pub fn extend<S: StateAdapter>(
     insert_into_pair_bitmap(state, ANNOT_EXPIRATION, &encode_u64_be(new_expires_at), entity_id)?;
 
     entity.expires_at = new_expires_at;
+    entity.last_modified_at_block = current_block;
     state.set_code(&entity_addr, entity.encode_as_code())?;
 
     Ok(())
@@ -464,6 +473,7 @@ pub fn extend<S: StateAdapter>(
 pub fn transfer<S: StateAdapter>(
     state: &mut S,
     entity_key: B256,
+    current_block: u64,
     new_owner: Address,
 ) -> Result<()> {
     let entity_addr = entity_address(entity_key);
@@ -474,6 +484,7 @@ pub fn transfer<S: StateAdapter>(
     insert_into_pair_bitmap(state, ANNOT_OWNER, &encode_address(new_owner), entity_id)?;
 
     entity.owner = new_owner;
+    entity.last_modified_at_block = current_block;
     state.set_code(&entity_addr, entity.encode_as_code())?;
 
     Ok(())
@@ -830,6 +841,7 @@ mod tests {
                 key: b"priority".to_vec(),
                 value: U256::from(42),
             }],
+            last_modified_at_block: 1234,
         };
         let code = original.encode_as_code();
         assert_eq!(code[0], ENTITY_CODE_PREFIX);
@@ -848,6 +860,7 @@ mod tests {
             key: B256::ZERO,
             string_annotations: vec![],
             numeric_annotations: vec![],
+            last_modified_at_block: 0,
         };
         let mut bad = entity.encode_as_code();
         bad[0] = 0x00;
@@ -944,7 +957,7 @@ mod tests {
         {
             let mut state = InMemoryAdapter::new(&mut db);
             create(&mut state, alice(), key, 100, 10, vec![], vec![], vec![], vec![]).unwrap();
-            transfer(&mut state, key, bob()).unwrap();
+            transfer(&mut state, key, 20, bob()).unwrap();
         }
         assert!(!read_bitmap(&db, ANNOT_OWNER, alice().as_slice()).contains(0));
         assert!(read_bitmap(&db, ANNOT_OWNER, bob().as_slice()).contains(0));
@@ -962,7 +975,7 @@ mod tests {
         {
             let mut state = InMemoryAdapter::new(&mut db);
             create(&mut state, alice(), key, 100, 10, vec![], vec![], vec![], vec![]).unwrap();
-            extend(&mut state, key, 500).unwrap();
+            extend(&mut state, key, 20, 500).unwrap();
         }
         assert!(!read_bitmap(&db, ANNOT_EXPIRATION, &100u64.to_be_bytes()).contains(0));
         assert!(read_bitmap(&db, ANNOT_EXPIRATION, &500u64.to_be_bytes()).contains(0));
@@ -997,6 +1010,7 @@ mod tests {
             update(
                 &mut state,
                 key,
+                20,
                 vec![0xff],
                 b"text/plain".to_vec(),
                 vec![StringAnnotation {

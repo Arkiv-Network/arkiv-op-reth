@@ -19,16 +19,17 @@
 //! `getEntityByKey` / `getEntityCount` methods. Both can land later
 //! without changing the call shape.
 
+use alloy_consensus::BlockHeader;
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{Address, B256, Bytes, U256};
 use arkiv_entitydb::query::{Page, PageParams, execute};
-use arkiv_entitydb::{EntityRlp, StateAdapter};
+use arkiv_entitydb::{EntityRlp, StateAdapter, all_entities};
 use async_trait::async_trait;
 use eyre::Result;
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::error::{ErrorObject, ErrorObjectOwned, INTERNAL_ERROR_CODE};
-use reth_storage_api::{StateProvider, StateProviderBox, StateProviderFactory};
+use reth_storage_api::{HeaderProvider, StateProvider, StateProviderBox, StateProviderFactory};
 use serde::{Deserialize, Serialize};
 
 /// Default `resultsPerPage` if not specified by the caller.
@@ -48,6 +49,16 @@ pub trait ArkivApi {
         q: String,
         options: Option<QueryOptions>,
     ) -> RpcResult<QueryResponse>;
+
+    /// Number of live entities at the head (`$all` bitmap cardinality).
+    #[method(name = "getEntityCount")]
+    async fn get_entity_count(&self) -> RpcResult<u64>;
+
+    /// Head block number, head block timestamp, and the duration
+    /// (seconds) between the head and its parent. Field names match
+    /// op-geth's `arkivAPI.GetBlockTiming` JSON wire shape.
+    #[method(name = "getBlockTiming")]
+    async fn get_block_timing(&self) -> RpcResult<BlockTiming>;
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -88,6 +99,18 @@ pub struct EntityData {
     pub owner: Address,
     pub creator: Address,
     pub created_at_block: u64,
+    /// Block of the most recent mutation (CREATE / UPDATE / EXTEND /
+    /// TRANSFER). Equal to `created_at_block` until the entity is
+    /// first modified.
+    pub last_modified_at_block: u64,
+    /// Tx-position metadata. Reth's revm context doesn't expose the
+    /// tx-index-in-block during precompile execution, so we report 0
+    /// here today — included for SDK wire-shape parity. Same applies
+    /// to `operation_index_in_transaction`. Real values require a
+    /// non-trivial block-builder-side annotation that we haven't
+    /// landed yet.
+    pub transaction_index_in_block: u64,
+    pub operation_index_in_transaction: u64,
     pub string_attributes: Vec<StringAttribute>,
     pub numeric_attributes: Vec<NumericAttribute>,
 }
@@ -104,6 +127,18 @@ pub struct NumericAttribute {
     pub value: U256,
 }
 
+/// Response shape for `arkiv_getBlockTiming`. Snake_case on the wire —
+/// the SDK reads `current_block` / `current_block_time` / `duration`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct BlockTiming {
+    /// Head block number.
+    pub current_block: u64,
+    /// Head block timestamp (seconds since epoch).
+    pub current_block_time: u64,
+    /// Seconds between the head and its parent.
+    pub duration: u64,
+}
+
 /// JSON-RPC handler for the `arkiv_*` namespace.
 pub struct ArkivRpc<P> {
     provider: P,
@@ -118,7 +153,7 @@ impl<P> ArkivRpc<P> {
 #[async_trait]
 impl<P> ArkivApiServer for ArkivRpc<P>
 where
-    P: StateProviderFactory + Clone + Send + Sync + 'static,
+    P: StateProviderFactory + HeaderProvider + Clone + Send + Sync + 'static,
 {
     async fn query(
         &self,
@@ -133,6 +168,43 @@ where
             .await
             .map_err(|e| internal_err(format!("blocking task join: {e}")))?
             .map_err(|e| internal_err(format!("{e}")))
+    }
+
+    async fn get_entity_count(&self) -> RpcResult<u64> {
+        let provider = self.provider.clone();
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut adapter = RethStateAdapter::new(provider.latest()?);
+            Ok(all_entities(&mut adapter)?.len())
+        })
+        .await
+        .map_err(|e| internal_err(format!("blocking task join: {e}")))?
+        .map_err(|e| internal_err(format!("{e}")))
+    }
+
+    async fn get_block_timing(&self) -> RpcResult<BlockTiming> {
+        let provider = self.provider.clone();
+        tokio::task::spawn_blocking(move || -> Result<BlockTiming> {
+            let current_block = provider.best_block_number()?;
+            let head = provider
+                .header_by_number(current_block)?
+                .ok_or_else(|| eyre::eyre!("head header missing for block {current_block}"))?;
+            let current_block_time = head.timestamp();
+            // Genesis has no parent — report duration=0 in that case.
+            let duration = if current_block == 0 {
+                0
+            } else {
+                let parent = provider
+                    .header_by_number(current_block - 1)?
+                    .ok_or_else(|| {
+                        eyre::eyre!("parent header missing for block {}", current_block - 1)
+                    })?;
+                current_block_time.saturating_sub(parent.timestamp())
+            };
+            Ok(BlockTiming { current_block, current_block_time, duration })
+        })
+        .await
+        .map_err(|e| internal_err(format!("blocking task join: {e}")))?
+        .map_err(|e| internal_err(format!("{e}")))
     }
 }
 
@@ -195,6 +267,10 @@ fn entity_data_from(e: EntityRlp) -> EntityData {
         owner: e.owner,
         creator: e.creator,
         created_at_block: e.created_at_block,
+        last_modified_at_block: e.last_modified_at_block,
+        // Not yet tracked through the precompile path — see field doc.
+        transaction_index_in_block: 0,
+        operation_index_in_transaction: 0,
         string_attributes: e
             .string_annotations
             .into_iter()

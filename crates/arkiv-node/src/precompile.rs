@@ -199,14 +199,15 @@ fn dispatch<S: StateAdapter>(
             arkiv_entitydb::update(
                 state,
                 rec.entityKey,
+                current_block,
                 rec.payload.to_vec(),
                 mime128_to_bytes(&rec.contentType),
                 string_annotations,
                 numeric_annotations,
             )
         }
-        OP_EXTEND => arkiv_entitydb::extend(state, rec.entityKey, rec.newExpiresAt as u64),
-        OP_TRANSFER => arkiv_entitydb::transfer(state, rec.entityKey, rec.newOwner),
+        OP_EXTEND => arkiv_entitydb::extend(state, rec.entityKey, current_block, rec.newExpiresAt as u64),
+        OP_TRANSFER => arkiv_entitydb::transfer(state, rec.entityKey, current_block, rec.newOwner),
         OP_DELETE => arkiv_entitydb::delete(state, rec.entityKey),
         OP_EXPIRE => arkiv_entitydb::expire(state, rec.entityKey),
         t => Err(eyre::eyre!("unknown operationType {t}")),

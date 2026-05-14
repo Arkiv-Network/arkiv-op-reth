@@ -270,7 +270,7 @@ fn transfer_moves_owner_match() {
     let mut db = fresh();
     let mut s = InMemoryAdapter::new(&mut db);
     create_simple(&mut s, alice(), key_n(1), b"text/plain", 100);
-    transfer(&mut s, key_n(1), bob()).expect("transfer");
+    transfer(&mut s, key_n(1), 20, bob()).expect("transfer");
 
     let q_old = format!("$owner = 0x{}", hex_lower(alice().as_slice()));
     let q_new = format!("$owner = 0x{}", hex_lower(bob().as_slice()));
