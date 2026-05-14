@@ -232,6 +232,21 @@ impl Bitmap {
     pub fn iter(&self) -> impl Iterator<Item = u64> + '_ {
         self.0.iter()
     }
+
+    /// In-place set union: `self ∪= other`.
+    pub fn union_with(&mut self, other: &Bitmap) {
+        self.0 |= &other.0;
+    }
+
+    /// In-place set intersection: `self ∩= other`.
+    pub fn intersect_with(&mut self, other: &Bitmap) {
+        self.0 &= &other.0;
+    }
+
+    /// In-place set difference: `self \= other`.
+    pub fn subtract(&mut self, other: &Bitmap) {
+        self.0 -= &other.0;
+    }
 }
 
 impl FromIterator<u64> for Bitmap {
@@ -592,15 +607,9 @@ fn insert_into_pair_bitmap<S: StateAdapter>(
     annot_val: &[u8],
     entity_id: u64,
 ) -> Result<()> {
-    let pair_addr = pair_address(annot_key, annot_val);
-    let existing = state.code(&pair_addr)?;
-    let mut bitmap = if existing.is_empty() {
-        Bitmap::new()
-    } else {
-        Bitmap::from_bytes(&existing)?
-    };
+    let mut bitmap = read_pair_bitmap(state, annot_key, annot_val)?;
     bitmap.insert(entity_id);
-    state.set_code(&pair_addr, bitmap.to_bytes())?;
+    state.set_code(&pair_address(annot_key, annot_val), bitmap.to_bytes())?;
     Ok(())
 }
 
@@ -610,17 +619,59 @@ fn remove_from_pair_bitmap<S: StateAdapter>(
     annot_val: &[u8],
     entity_id: u64,
 ) -> Result<()> {
-    let pair_addr = pair_address(annot_key, annot_val);
-    let existing = state.code(&pair_addr)?;
-    if existing.is_empty() {
+    let mut bitmap = read_pair_bitmap(state, annot_key, annot_val)?;
+    if bitmap.is_empty() {
         // Bitmap doesn't exist yet — nothing to remove. Shouldn't
-        // happen under well-formed ops; logged but tolerated.
+        // happen under well-formed ops; tolerated.
         return Ok(());
     }
-    let mut bitmap = Bitmap::from_bytes(&existing)?;
     bitmap.remove(entity_id);
-    state.set_code(&pair_addr, bitmap.to_bytes())?;
+    state.set_code(&pair_address(annot_key, annot_val), bitmap.to_bytes())?;
     Ok(())
+}
+
+// ─── Public read-side helpers (used by the query interpreter) ─────────
+
+/// Read the pair-account bitmap for `(annot_key, annot_val)`. An
+/// account with empty code (never written, or tombstoned) decodes to
+/// an empty [`Bitmap`] — not an error.
+pub fn read_pair_bitmap<S: StateAdapter>(
+    state: &mut S,
+    annot_key: &[u8],
+    annot_val: &[u8],
+) -> Result<Bitmap> {
+    let pair_addr = pair_address(annot_key, annot_val);
+    let code = state.code(&pair_addr)?;
+    if code.is_empty() {
+        Ok(Bitmap::new())
+    } else {
+        Bitmap::from_bytes(&code)
+    }
+}
+
+/// Bitmap of every live entity ID — the `$all` built-in bitmap.
+/// Convenience wrapper around [`read_pair_bitmap`].
+pub fn all_entities<S: StateAdapter>(state: &mut S) -> Result<Bitmap> {
+    read_pair_bitmap(state, ANNOT_ALL, b"")
+}
+
+/// Resolve a query-hit entity ID to its on-trie [`EntityRlp`].
+///
+/// Returns `Ok(None)` if the ID's `id_to_addr` slot is zero (never
+/// written, or cleared by `delete` / `expire`) or if the entity
+/// account has empty code (tombstoned). Returns `Err` only on
+/// underlying state errors or malformed entity bytes.
+pub fn resolve_id<S: StateAdapter>(state: &mut S, id: u64) -> Result<Option<EntityRlp>> {
+    let raw = state.storage(&SYSTEM_ACCOUNT_ADDRESS, slot_id_to_addr(id))?;
+    if raw == B256::ZERO {
+        return Ok(None);
+    }
+    let entity_addr = Address::from_slice(&raw.0[12..]);
+    let code = state.code(&entity_addr)?;
+    if code.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(EntityRlp::decode_from_code(&code)?))
 }
 
 // ─── Test backend (in-memory state DB) ────────────────────────────────

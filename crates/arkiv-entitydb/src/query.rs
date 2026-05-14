@@ -10,6 +10,7 @@
 //! The public surface re-exported here is the only thing callers
 //! outside `arkiv_entitydb` should depend on.
 
+pub mod interpreter;
 pub mod lexer;
 pub mod parser;
 
