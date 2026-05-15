@@ -71,7 +71,10 @@ pub struct QueryOptions {
     /// standard JSON-RPC tags (`earliest`, `pending`, `finalized`,
     /// `safe`).
     pub at_block: Option<BlockNumberOrTag>,
-    /// Page size; clamped to `[1, 200]`. Defaults to 100.
+    /// Page size; clamped to `[1, 200]`. Defaults to 100. Accepts
+    /// either a JSON number (our e2e helpers) or a hex string
+    /// (the JS SDK's wire format via `numberToHex`).
+    #[serde(default, deserialize_with = "de_u64_flexible")]
     pub results_per_page: Option<u64>,
     /// Hex-encoded entity ID. Next page contains IDs strictly less
     /// than this value.
@@ -398,6 +401,38 @@ fn entity_data_from(e: EntityRlp, inc: &ResolvedIncludeData) -> EntityData {
         operation_index_in_transaction: inc.operation_index_in_transaction.then_some(0),
         string_attributes,
         numeric_attributes,
+    }
+}
+
+/// Accept either a JSON number or a hex string for an `Option<u64>`
+/// field. The JS SDK encodes integers as hex strings (`numberToHex`)
+/// over the wire; our own e2e helpers pass plain numbers. Supporting
+/// both keeps both ergonomic.
+fn de_u64_flexible<'de, D>(de: D) -> std::result::Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Either {
+        Num(u64),
+        Hex(String),
+    }
+    let opt: Option<Either> = Option::deserialize(de)?;
+    match opt {
+        None => Ok(None),
+        Some(Either::Num(n)) => Ok(Some(n)),
+        Some(Either::Hex(s)) => {
+            let stripped = s
+                .strip_prefix("0x")
+                .or_else(|| s.strip_prefix("0X"))
+                .unwrap_or(&s);
+            u64::from_str_radix(stripped, 16)
+                .map(Some)
+                .map_err(|e| D::Error::custom(format!("invalid hex u64 {s:?}: {e}")))
+        }
     }
 }
 
