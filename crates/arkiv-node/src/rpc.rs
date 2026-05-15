@@ -76,6 +76,32 @@ pub struct QueryOptions {
     /// Hex-encoded entity ID. Next page contains IDs strictly less
     /// than this value.
     pub cursor: Option<String>,
+    /// Per-field projection. When `None`, every field is included
+    /// (matches the simple direct-call shape our e2e uses). When
+    /// `Some`, each missing field defaults to `false` — i.e. the
+    /// caller has to opt in to every field they want.
+    pub include_data: Option<IncludeData>,
+}
+
+/// Field-selection options for `arkiv_query`. Boolean per top-level
+/// field; missing fields default to `false` when the struct itself is
+/// present. `key` is always returned regardless of this struct —
+/// callers always need an identifier, and the SDK constructs its
+/// `Entity` with `key` as a required parameter.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IncludeData {
+    pub key: Option<bool>,
+    pub payload: Option<bool>,
+    pub attributes: Option<bool>,
+    pub content_type: Option<bool>,
+    pub expiration: Option<bool>,
+    pub owner: Option<bool>,
+    pub creator: Option<bool>,
+    pub created_at_block: Option<bool>,
+    pub last_modified_at_block: Option<bool>,
+    pub transaction_index_in_block: Option<bool>,
+    pub operation_index_in_transaction: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,29 +115,47 @@ pub struct QueryResponse {
     pub cursor: Option<String>,
 }
 
+/// Per-entity payload in `arkiv_query` responses. Every metadata
+/// field is `Option<T>` and `skip_serialize_if_none`: when the caller
+/// opts out via `includeData`, the field is *omitted* from the JSON,
+/// which the JS SDK reads as `undefined`. `key` is always present.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntityData {
     pub key: B256,
-    pub value: Bytes,
-    pub content_type: String,
-    pub expires_at: u64,
-    pub owner: Address,
-    pub creator: Address,
-    pub created_at_block: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<Bytes>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<Address>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creator: Option<Address>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at_block: Option<u64>,
     /// Block of the most recent mutation (CREATE / UPDATE / EXTEND /
     /// TRANSFER). Equal to `created_at_block` until the entity is
     /// first modified.
-    pub last_modified_at_block: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_modified_at_block: Option<u64>,
     /// Tx-position metadata. Reth's revm context doesn't expose the
     /// tx-index-in-block during precompile execution, so we report 0
     /// here today — included for SDK wire-shape parity. Same applies
     /// to `operation_index_in_transaction`. Real values require a
     /// non-trivial block-builder-side annotation that we haven't
     /// landed yet.
-    pub transaction_index_in_block: u64,
-    pub operation_index_in_transaction: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transaction_index_in_block: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_index_in_transaction: Option<u64>,
+    /// Empty arrays are skipped on the wire (SDK reads
+    /// `stringAttributes ?? []`). When `includeData.attributes` is
+    /// false both vectors are empty.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub string_attributes: Vec<StringAttribute>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub numeric_attributes: Vec<NumericAttribute>,
 }
 
@@ -226,9 +270,10 @@ fn run_query<P: StateProviderFactory>(
         cursor: parse_cursor(options.cursor.as_deref())?,
     };
     let Page { entries, next_cursor } = execute(&mut adapter, q, params)?;
+    let include = ResolvedIncludeData::from_options(options.include_data.as_ref());
 
     Ok(QueryResponse {
-        data: entries.into_iter().map(entity_data_from).collect(),
+        data: entries.into_iter().map(|e| entity_data_from(e, &include)).collect(),
         block_number,
         cursor: next_cursor.map(|id| format!("0x{id:x}")),
     })
@@ -258,35 +303,101 @@ fn snapshot_for<P: StateProviderFactory>(
     }
 }
 
-fn entity_data_from(e: EntityRlp) -> EntityData {
-    EntityData {
-        key: e.key,
-        value: Bytes::from(e.payload),
-        content_type: String::from_utf8_lossy(&e.content_type).into_owned(),
-        expires_at: e.expires_at,
-        owner: e.owner,
-        creator: e.creator,
-        created_at_block: e.created_at_block,
-        last_modified_at_block: e.last_modified_at_block,
-        // Not yet tracked through the precompile path — see field doc.
-        transaction_index_in_block: 0,
-        operation_index_in_transaction: 0,
-        string_attributes: e
-            .string_annotations
+/// Resolved per-field projection. `from_options(None)` → all true
+/// (the default for callers that don't bother with `includeData`,
+/// e.g. our e2e test). `from_options(Some(_))` → each field defaults
+/// to `false` unless the caller opts in.
+#[derive(Debug, Clone, Copy)]
+struct ResolvedIncludeData {
+    payload: bool,
+    attributes: bool,
+    content_type: bool,
+    expiration: bool,
+    owner: bool,
+    creator: bool,
+    created_at_block: bool,
+    last_modified_at_block: bool,
+    transaction_index_in_block: bool,
+    operation_index_in_transaction: bool,
+}
+
+impl ResolvedIncludeData {
+    fn all() -> Self {
+        Self {
+            payload: true,
+            attributes: true,
+            content_type: true,
+            expiration: true,
+            owner: true,
+            creator: true,
+            created_at_block: true,
+            last_modified_at_block: true,
+            transaction_index_in_block: true,
+            operation_index_in_transaction: true,
+        }
+    }
+
+    fn from_options(opt: Option<&IncludeData>) -> Self {
+        match opt {
+            None => Self::all(),
+            Some(id) => Self {
+                payload: id.payload.unwrap_or(false),
+                attributes: id.attributes.unwrap_or(false),
+                content_type: id.content_type.unwrap_or(false),
+                expiration: id.expiration.unwrap_or(false),
+                owner: id.owner.unwrap_or(false),
+                creator: id.creator.unwrap_or(false),
+                created_at_block: id.created_at_block.unwrap_or(false),
+                last_modified_at_block: id.last_modified_at_block.unwrap_or(false),
+                transaction_index_in_block: id.transaction_index_in_block.unwrap_or(false),
+                operation_index_in_transaction: id.operation_index_in_transaction.unwrap_or(false),
+            },
+        }
+    }
+}
+
+fn entity_data_from(e: EntityRlp, inc: &ResolvedIncludeData) -> EntityData {
+    let string_attributes = if inc.attributes {
+        e.string_annotations
             .into_iter()
             .map(|sa| StringAttribute {
                 key: String::from_utf8_lossy(&sa.key).into_owned(),
                 value: String::from_utf8_lossy(&sa.value).into_owned(),
             })
-            .collect(),
-        numeric_attributes: e
-            .numeric_annotations
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let numeric_attributes = if inc.attributes {
+        e.numeric_annotations
             .into_iter()
             .map(|na| NumericAttribute {
                 key: String::from_utf8_lossy(&na.key).into_owned(),
                 value: na.value,
             })
-            .collect(),
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    EntityData {
+        key: e.key,
+        value: inc.payload.then(|| Bytes::from(e.payload)),
+        content_type: inc
+            .content_type
+            .then(|| String::from_utf8_lossy(&e.content_type).into_owned()),
+        expires_at: inc.expiration.then_some(e.expires_at),
+        owner: inc.owner.then_some(e.owner),
+        creator: inc.creator.then_some(e.creator),
+        created_at_block: inc.created_at_block.then_some(e.created_at_block),
+        last_modified_at_block: inc
+            .last_modified_at_block
+            .then_some(e.last_modified_at_block),
+        // Not yet tracked through the precompile path — see field doc.
+        transaction_index_in_block: inc.transaction_index_in_block.then_some(0),
+        operation_index_in_transaction: inc.operation_index_in_transaction.then_some(0),
+        string_attributes,
+        numeric_attributes,
     }
 }
 

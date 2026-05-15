@@ -44,7 +44,11 @@ fn hex_key(k: B256) -> String {
 }
 
 fn ids_owned_by(results: &[EntityData], owner: Address) -> Vec<B256> {
-    results.iter().filter(|e| e.owner == owner).map(|e| e.key).collect()
+    results
+        .iter()
+        .filter(|e| e.owner == Some(owner))
+        .map(|e| e.key)
+        .collect()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -188,7 +192,10 @@ async fn full_pipeline() -> eyre::Result<()> {
     let new_tag = world.query(r#"tag = "podcast""#).await?;
     assert_eq!(new_tag.len(), 1);
     assert_eq!(new_tag[0].key, alice_key);
-    assert_eq!(new_tag[0].value.as_ref(), b"alice v2");
+    assert_eq!(
+        new_tag[0].value.as_ref().map(|b| b.as_ref()),
+        Some(b"alice v2".as_slice()),
+    );
 
     // Old score=42 bitmap should be empty for alice.
     assert!(world.query("score = 42").await?.is_empty());
@@ -199,11 +206,11 @@ async fn full_pipeline() -> eyre::Result<()> {
     // ── 7. EXTEND ───────────────────────────────────────────────────
 
     let bob_entity = world.query(&format!("$key = 0x{}", hex_key(bob_key))).await?;
-    let old_expiration = bob_entity[0].expires_at;
+    let old_expiration = bob_entity[0].expires_at.expect("expires_at included by default");
     world.extend(1, bob_key, 5_000).await?;
 
     let bob_entity = world.query(&format!("$key = 0x{}", hex_key(bob_key))).await?;
-    let new_expiration = bob_entity[0].expires_at;
+    let new_expiration = bob_entity[0].expires_at.expect("expires_at included by default");
     assert!(
         new_expiration > old_expiration,
         "extend should raise expiration: {old_expiration} -> {new_expiration}"
