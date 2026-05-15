@@ -1,19 +1,13 @@
 # Architecture
 
-This document describes the design of the `arkiv-op-reth` workspace: what
-the binary is, how the workspace is laid out, where each concern lives,
-and the design decisions that fall out.
+This document describes the design of the `arkiv-op-reth` workspace:
+what the binary is, how the workspace is laid out, where each concern
+lives, and the design decisions that fall out.
 
 The canonical state-model design — entity accounts, pair accounts, the
 system account, gas, query verification — lives in
 [`statedb-design.md`](statedb-design.md). This doc summarises and
 cross-references; it does not duplicate.
-
-The phased migration from the v1 architecture (off-process EntityDB +
-ExEx + JSON-RPC bridge) to v2 (in-process precompile + custom
-`EvmFactory` + one MDBX side table) is tracked in
-`arkiv-op-reth-v2-migration-plan.md` at the workspace root. Current
-implementation status is in §10 below.
 
 ---
 
@@ -23,27 +17,25 @@ implementation status is in §10 below.
 fork that turns an OP-stack L2/L3 node into an **Arkiv** node by adding
 three things:
 
-1. A single predeploy at `0x4400000000000000000000000000000000000044` —
-   the `EntityRegistry` contract.
+1. Two predeploys: `EntityRegistry` at
+   `0x4400000000000000000000000000000000000044` and a singleton system
+   account at `0x4400000000000000000000000000000000000046`.
 2. A custom op-reth `EvmFactory` that registers an **Arkiv precompile**
-   into `PrecompilesMap` for every revm context (canonical execution,
-   payload-building, simulation, validation, tracing).
-3. A custom MDBX table — `ArkivPairs` — registered alongside op-reth's
-   built-in tables. The only piece of Arkiv state that lives outside
-   the L3 state trie.
+   at `0x4400000000000000000000000000000000000045` into `PrecompilesMap`
+   for every revm context (canonical execution, payload-building,
+   simulation, validation, tracing).
+3. An `arkiv_*` JSON-RPC namespace on the node's standard transports.
 
-Together these store every entity, every annotation index, and every
-counter inside op-reth's standard world-state trie, committed in the L3
-`stateRoot`. Reads — single-entity lookups and SQL-like annotation
-queries — are served by an `arkiv_*` JSON-RPC namespace backed entirely
-by local state. No external indexer process, no JSON-RPC bridge, no
-ExEx.
+Every entity, every annotation index, and every counter lives inside
+op-reth's standard world-state trie, committed in the L3 `stateRoot`.
+Reads are served by the `arkiv_*` namespace backed entirely by local
+state. There is no external indexer process, no JSON-RPC bridge, no
+ExEx, no out-of-trie state.
 
 The binary is a **drop-in op-reth**: against a chainspec without the
-predeploy it refuses to start (until that gating is relaxed in a future
-phase). Against a chainspec containing the predeploy it installs the
-custom `EvmFactory` + the `arkiv_*` RPC and serves the full Arkiv
-surface.
+predeploy it refuses to start. Against a chainspec containing the
+predeploy it installs the custom `EvmFactory` + the `arkiv_*` RPC and
+serves the full Arkiv surface.
 
 ---
 
@@ -54,25 +46,22 @@ surface.
                   │ arkiv-node binary                                │
                   │                                                  │
                   │   ┌──────────────────────────────────────────┐   │
-   user tx ──────►│   │ revm  ─── ArkivEvmFactory inserts ───────┼─► trie state (entity/pair/system accounts)
-                  │   │       │   ArkivPrecompile               │   │   committed in stateRoot
-                  │   │       │   into PrecompilesMap            │   │
-                  │   │       └──► ArkivPrecompile ──────────────┼─► ArkivPairs MDBX table (append-only)
+   user tx ──────►│   │ revm  ─── ArkivOpEvmFactory inserts ─────┼─► trie state
+                  │   │       │   ArkivPrecompile at 0x…0045    │   │   entity / pair / system
+                  │   │       │   into PrecompilesMap            │   │   accounts (committed in
+                  │   │       └──► dispatches into arkiv-entitydb│   │   stateRoot)
                   │   └──────────────────────────────────────────┘   │
                   │                                                  │
                   │   ┌──────────────────────────────────────────┐   │
    user query ───►│   │ arkiv_* RPC                              │   │
-                  │   │   reads entity accounts, pair-account     │   │
-                  │   │   bitmaps, ArkivPairs iterator           │   │
+                  │   │   parse → evaluate via arkiv-entitydb    │   │
+                  │   │   against a read-only StateProvider      │   │
                   │   └──────────────────────────────────────────┘   │
                   └──────────────────────────────────────────────────┘
 ```
 
-Everything consensus-critical flows through revm's journaled state and
-ends up in the L3 `stateRoot`. The single non-journaled write — the
-`ArkivPairs` insert on first-sight of a `(annot_key, annot_val)` pair —
-is append-only and idempotent; it is not part of the verification path
-(see [`statedb-design.md`](statedb-design.md) §2.4).
+Everything flows through revm's journaled state and ends up in the
+`stateRoot`. There is no separate KV table for Arkiv data.
 
 ---
 
@@ -80,104 +69,125 @@ is append-only and idempotent; it is not part of the verification path
 
 ```
 crates/
-  arkiv-node/       # binary + custom EvmFactory + precompile + arkiv_* RPC
-  arkiv-cli/        # operator CLI: entity ops, batches, simulate, inject-predeploy
-  arkiv-genesis/    # shared lib: predeploy address, runtime bytecode, alloc helpers
-chainspec/
-  dev.base.json     # geth-format dev chainspec (no predeploy; injected at recipe time)
+  arkiv-node/         # binary + custom EvmFactory + Arkiv precompile + arkiv_* RPC
+  arkiv-entitydb/     # state model + op handlers + query language
+  arkiv-cli/          # operator CLI: entity ops, batches, simulate, inject-predeploy
+  arkiv-genesis/      # shared lib: predeploy addresses, runtime bytecode, alloc helpers
+e2e/                  # full-pipeline integration tests
+contracts/
+  src/EntityRegistry.sol             # in-tree contract source
+  artifacts/EntityRegistry.runtime.hex   # baked into arkiv-genesis at build time
 docs/
-  architecture.md   # this file
-  statedb-design.md # canonical state model
+  architecture.md     # this file
+  statedb-design.md   # canonical state model
 ```
 
 ### 3.1 `arkiv-genesis`
 
-Pure library shared by both binaries. Owns:
+Pure library. Owns:
 
-- `ENTITY_REGISTRY_ADDRESS` — the canonical predeploy address constant.
+- `ENTITY_REGISTRY_ADDRESS`, `SYSTEM_ACCOUNT_ADDRESS`,
+  `ARKIV_PRECOMPILE_ADDRESS` — canonical predeploy addresses.
 - `ARKIV_DEV_MNEMONIC`, `DEV_ADDRESS`, `ARKIV_DEV_ACCOUNT_COUNT` — the
   hardhat-compatible dev mnemonic and the 100 pre-funded dev accounts
   derived from it.
-- `deploy_creation_code(chain_id) -> Bytes` — runs
-  `arkiv_bindings::ENTITY_REGISTRY_CREATION_CODE` through revm at the
-  given chain ID and returns the resulting runtime bytecode. The
-  chain ID is forwarded to revm's `block.chainid` so the EIP-712 domain
-  separator baked into immutables matches the target chain.
-- `predeploy_account(chain_id)`, `genesis_alloc(chain_id)` — assemble
-  the predeploy + dev-funding entries for splicing into a
-  `Genesis.alloc`.
+- `entity_registry_runtime_code() -> Bytes` — returns the EntityRegistry
+  runtime bytecode loaded via `include_str!` from
+  `contracts/artifacts/EntityRegistry.runtime.hex`. Chain-id-independent
+  (the contract reads `block.chainid` at runtime, no constructor
+  immutables).
+- `genesis_alloc()`, `entity_registry_account()`, `system_account()`,
+  `dev_funding_alloc(...)` — assemble predeploy + dev-funding entries
+  for splicing into a `Genesis.alloc`.
 
-The runtime bytecode comes from the in-tree Solidity source
-(`contracts/src/EntityRegistry.sol`) via the committed artifact at
-`contracts/artifacts/EntityRegistry.runtime.hex`. The contract has no
-constructor immutables — it reads `block.chainid` at runtime — so the
-same runtime code works on every chain. `just contracts-build`
-refreshes the artifact after editing the source.
+The runtime bytecode is regenerated by `just contracts-build` (runs
+`forge build` and overwrites the artifact). Without that step the
+binary still ships the old bytes.
 
-`genesis_alloc()` produces three predeploys + 100 dev-funded accounts:
+### 3.2 `arkiv-entitydb`
 
-| Address | What |
-|---|---|
-| `0x44…0044` | `EntityRegistry` runtime code |
-| `0x44…0046` | System account (`nonce=1`, no code, no storage) |
-| `…funding addresses…` | First 100 hardhat-mnemonic accounts, 10k ETH each |
+Canonical home of the v2 state model. No `revm` deps, no DB deps —
+runs against an abstract `StateAdapter` trait. Contains:
 
-(No genesis entry for `0x44…0045` — that's where `arkiv-op-reth`'s
-custom `EvmFactory` registers the Arkiv precompile; it's a native
-component, not an Ethereum account.)
+- **Primitives.** `EntityRlp`, `Bitmap` (roaring64), `entity_address`,
+  `pair_address`, built-in annotation keys, system-account slot keys.
+- **`StateAdapter` trait.** `code` / `set_code` / `tombstone_code` /
+  `storage` / `set_storage`. Implemented in production by
+  `RevmStateAdapter` (precompile path, journaled writes) and
+  `RethStateAdapter` (RPC read path, against a `StateProvider`
+  snapshot). The `test-utils` feature exposes `InMemoryAdapter` for
+  unit tests.
+- **Op handlers.** `create` / `update` / `extend` / `transfer` /
+  `delete` / `expire`. All indexing logic (system counter, ID maps,
+  bitmap deltas across built-in and user annotations, RLP
+  encode/decode, tombstoning) lives here.
+- **Query language.** Lexer (hand-rolled), recursive-descent parser
+  producing a `Query` AST, tree-walking interpreter that runs against
+  a `StateAdapter` and returns a roaring64 `Bitmap` of matching
+  entity IDs. Plus a paginated `execute(state, query_str, params)`
+  convenience that resolves IDs to `EntityRlp` via the system-account
+  ID map.
 
-### 3.2 `arkiv-node`
+### 3.3 `arkiv-node`
 
 The execution-client binary. A thin wrapper around
-`reth_optimism_cli::Cli`. Layout (target v2 state — current state is
-the post-demolition scaffold, see §10):
+`reth_optimism_cli::Cli`. Layout:
 
-- `evm.rs` — `ArkivEvmFactory` wrapping `OpEvmFactory<OpTx>`. Registers
-  `ArkivPrecompile` into `PrecompilesMap` in both `create_evm` and
-  `create_evm_with_inspector` so simulation, payload-building,
-  validation, tracing, and canonical execution see the same set.
-- `precompile/` — the precompile implementation: caller restriction,
-  content validation, gas accounting, op dispatch, entity/pair/system
-  account writes via `EvmInternals`, `ArkivPairs` first-sight write,
-  roaring64 bitmap ser/deser, `EntityRlp` codec.
-- `rpc/` — the `arkiv_*` JSON-RPC namespace. Local-only handlers
-  (`arkiv_getEntity`, `arkiv_getEntityByKey`, `arkiv_getEntityCount`,
-  `arkiv_query`, `arkiv_getBitmap`, `arkiv_getBlockTiming`).
-- `install.rs` — wires the EvmFactory + RPC + `ArkivPairs` handle onto
-  an `OpNode` builder.
-- `cli.rs` — `ArkivExt` clap args (currently an empty wrapper over
-  `RollupArgs`; v2 flags land here as they appear).
+- `evm.rs` — `ArkivOpEvmFactory` wrapping `OpEvmFactory<OpTx>`.
+  Registers the Arkiv precompile into `PrecompilesMap` in both
+  `create_evm` and `create_evm_with_inspector` so simulation, tracing,
+  payload-building, validation, and canonical execution all see the
+  same set. Also includes the local newtype around `OpEvmConfig`
+  (needed for the orphan-rule `ConfigureEngineEvm<OpExecData>` impl)
+  and the `ArkivOpNode` / `ArkivOpExecutorBuilder` layers that wire it
+  all together.
+- `precompile.rs` — caller restriction (direct CALL from
+  `EntityRegistry` only; not static, not value-bearing), calldata
+  decode, gas accounting (pure function of op shape), `RevmStateAdapter`
+  over `EvmInternals`, op dispatch into `arkiv-entitydb`.
+- `rpc.rs` — `arkiv_*` JSON-RPC namespace + wire-format types.
+  `RethStateAdapter` wraps a `StateProvider` for read-only state. The
+  query handler is a thin shell over `arkiv_entitydb::query::execute`.
+- `install.rs` — `extend_rpc_modules` hook registering the `arkiv_*`
+  namespace.
 - `genesis.rs` — `has_arkiv_predeploy(chain)` bytecode-equality check.
+- `cli.rs` — `ArkivExt` clap args.
 
-There is **no chainspec mutation**. The chainspec is whatever `--chain`
-loaded; we never reach into `config_mut()` to inject anything at
-startup. The predeploy must already be in the loaded chainspec's
-`alloc` (see §6).
+There is **no chainspec mutation**. The predeploys must be in the
+loaded chainspec's `alloc` (see §6).
 
-### 3.3 `arkiv-cli`
+### 3.4 `arkiv-cli`
 
-The operator command-line tool. Two distinct surfaces:
+Operator command-line tool. Two distinct surfaces:
 
 **Entity operations** (require an RPC endpoint + signer):
 `create`, `update`, `extend`, `transfer`, `delete`, `expire`, `query`,
 `balance`, `spam`, `batch`, `simulate`. All ops go through
 `EntityRegistry.execute(Operation[])` — the contract validates
-ownership / liveness and dispatches to the Arkiv precompile during EVM
-execution. The CLI itself is unaware of the precompile; it speaks the
-same Solidity ABI as any other contract caller.
+ownership / liveness / attribute charset and `CALL`s the Arkiv
+precompile. The CLI itself is unaware of the precompile; it speaks
+the same Solidity ABI as any other contract caller via
+`arkiv-bindings`.
 
 **Genesis post-processing** (no network required):
-`arkiv-cli inject-predeploy <input.json>` reads `chainId` from a
-geth-format genesis, computes the matching predeploy runtime bytecode,
-and splices it into `alloc` at the canonical predeploy address.
-Composes with op-deployer output for production deployments. See §6.
+`arkiv-cli inject-predeploy <input.json>` reads a geth-format genesis
+and splices the predeploy runtime code + system account + dev-funded
+accounts into `alloc`. Composes with op-deployer output for production
+deployments.
 
-The traffic simulator (`simulate`) is described in detail in the
-migration plan; the short version is that it rotates through
-mnemonic-derived signers, maintains an in-memory pool of alive
-entities, and submits a weighted random mix of CRUD ops. State updates
-come from decoding `EntityOperation` logs and from polling the
-contract's `entities` mapping.
+The traffic simulator (`simulate`) rotates through mnemonic-derived
+signers, maintains an in-memory pool of alive entities, and submits a
+weighted random mix of CRUD ops. State updates come from decoding
+`EntityOperation` logs and polling the contract's `entities` mapping.
+
+### 3.5 `e2e`
+
+End-to-end integration tests. Uses `reth-e2e-test-utils`'
+`NodeTestContext` to boot an `ArkivOpNode` in-process, then drives it
+via the `World` helper in `e2e/src/lib.rs` (signer pool, nonce
+tracking, ABI encoding, query plumbing). `tests/full_pipeline_e2e.rs`
+walks a single narrative through every op type and every query
+construct.
 
 ---
 
@@ -186,139 +196,115 @@ contract's `entities` mapping.
 The canonical state-model spec is in
 [`statedb-design.md`](statedb-design.md). A one-paragraph summary:
 
-Three kinds of Ethereum account hold Arkiv state in the trie. **Entity
-accounts** (one per entity, address = `entityKey[:20]`) hold the
-RLP-encoded entity payload + annotation set in `codeHash`, prefixed
-with `0xFE` so a `CALL` reverts. **Pair accounts** (one per
-`(annot_key, annot_val)` ever seen) hold a roaring64 bitmap of matching
-entity IDs as the account's code; `codeHash` is the keccak hash of the
-bitmap bytes, so **every bitmap is content-addressed in the trie**. A
-singleton **system account** at `0x4400000000000000000000000000000000000046` (adjacent to the registry) holds
-the global entity counter (`entity_count`) and both directions of the
-ID ↔ address map. The `EntityRegistry` contract holds per-entity
-`(owner, expiresAt)` and a sender-scoped `createNonce`.
-
-Outside the trie, the `ArkivPairs` MDBX table is an append-only
-existence index of every `(annot_key, annot_val)` pair ever seen — it
-exists to make range and glob queries efficient via prefix scans. It
-is **not** part of the verification path. Range/glob query *results*
-are verified against the per-pair bitmap proofs (each bitmap is a
-single-level `eth_getProof` against `stateRoot`).
+Three kinds of Ethereum account hold Arkiv state in the trie.
+**Entity accounts** (one per entity, address = `entityKey[:20]`) hold
+the RLP-encoded entity payload + annotation set in `codeHash`,
+prefixed with `0xFE` so a `CALL` reverts immediately. **Pair accounts**
+(one per `(annot_key, annot_val)` ever seen, address =
+`keccak256("arkiv.pair" || k || 0x00 || v)[:20]`) hold a roaring64
+bitmap of matching entity IDs as the account's code; `codeHash` is the
+keccak hash of the bitmap bytes, so **every bitmap is
+content-addressed in the trie**. A singleton **system account** at
+`0x4400…0046` holds the global entity counter (`entity_count`) and
+both directions of the ID ↔ address map. The `EntityRegistry`
+contract holds per-entity `(owner, expiresAt)` and a sender-scoped
+`createNonce`.
 
 ---
 
 ## 5. Precompile integration
 
-The `EntityRegistry` contract validates ownership and liveness from its
-own storage, updates that storage, then calls the Arkiv precompile via
-a fixed address. The precompile:
+The `EntityRegistry` contract validates ownership, liveness, and
+attribute-name charset (`Ident32`) from its own storage + the op
+calldata, updates its `(owner, expiresAt)` records, emits
+`EntityOperation` logs, then `CALL`s the Arkiv precompile with an
+`abi.encode(OpRecord[])`. The precompile:
 
-- Refuses non-direct calls (STATICCALL, DELEGATECALL, value-bearing, or
-  any caller other than `EntityRegistry`).
-- Validates content (payload size, attribute count, attribute formats,
-  ban on `0x00` in annotation keys/values).
+- Refuses non-direct calls (STATICCALL, DELEGATECALL, value-bearing,
+  or any caller other than `EntityRegistry`).
 - Computes per-op gas as a **pure function of calldata** (no
   state-dependent gas). Charged via standard revm precompile
   accounting.
 - Performs every consensus-critical write through revm's journaled
   state via `EvmInternals`: entity-account create + `SetCode`,
-  pair-account create + bitmap `SetCode`, system-account `SetState` for
-  `entity_count` and the ID maps.
-- Performs one **direct MDBX write** on first sight of an annotation
-  pair: `ArkivPairs[k || 0x00 || v] = 0x01`. Not journaled, not
-  reverted on reorg, idempotent.
+  pair-account create + bitmap `SetCode`, system-account `SetState`
+  for `entity_count` and the ID maps.
 
-Determinism is by construction: gas is pure-function-of-calldata, trie
-writes are pure-function-of-(op-batch, prior-trie-state), and the same
-`EvmFactory` is used by sequencer, validator, and the fault-proof
-program — so all three execute identically. See
-[`statedb-design.md`](statedb-design.md) §1.4 and §5.
+The op dispatch itself lives in `arkiv-entitydb`. The precompile is a
+revm-side adapter over an abstract `StateAdapter`.
 
----
-
-## 6. Custom MDBX table
-
-`ArkivPairs` lives alongside op-reth's built-in tables. Schema:
-
-```
-ArkivPairs   annot_key || 0x00 || annot_val   →   0x01
-```
-
-Append-only and idempotent. Two consequences fall out:
-
-- **Reorg-safe by virtue of being append-only.** The trie (which holds
-  the bitmap contents) reverts via op-reth's standard machinery; an
-  `ArkivPairs` entry pointing at a reverted pair account just resolves
-  to an empty bitmap at the new head and contributes nothing to range
-  queries.
-- **Speculative-execution pollution is bounded.** Reth runs the
-  precompile across multiple paths per transaction; non-canonical
-  paths can write `ArkivPairs` entries that never become canonical.
-  Entries are 1 byte and idempotent. No GC today; a future periodic
-  compaction is tracked as an open item.
-
-This is the **only** direct MDBX touch from the precompile. Everything
-else flows through revm's journaled state. The asymmetry is
-deliberate — `ArkivPairs` is a server-side index for prefix scans, not
-a commitment. See [`statedb-design.md`](statedb-design.md) §2.4 / §6.
-
-**Open implementation question:** at the pinned reth rev
-(`27bfddeada3953edc22759080a3659ccea62ca1f`), the reth `Tables` enum is
-historically closed. Three options to register `ArkivPairs`: patch
-reth, open a sibling MDBX env at a separate path, or use whatever
-post-`Tables`-enum extension surface exists at this rev. Decision is
-the first deliverable of Phase 2; see the migration plan.
+Determinism is by construction: gas is pure-function-of-calldata,
+state writes are pure-function-of-`(op-batch, prior-trie-state)`, and
+the same `EvmFactory` is used by sequencer, validator, and the
+fault-proof program — all three execute identically.
 
 ---
 
-## 7. `arkiv_*` RPC namespace
+## 6. `arkiv_*` RPC namespace
 
-Local-only — no proxy, no external indexer. Handlers (target set):
+Local-only. Registered via the standard `extend_rpc_modules` hook.
 
-| Method | What it returns |
+| Method | Returns |
 |---|---|
-| `arkiv_getEntity(addr, [blockTag])` | Decoded RLP from the entity account's code at that block |
-| `arkiv_getEntityByKey(key, [blockTag])` | Same, with address derivation from the 32-byte key done server-side |
-| `arkiv_getEntityCount([blockTag])` | `system.slot[keccak256("entity_count")]` |
-| `arkiv_query(predicate, [options])` | Query execution: derive pair addresses for equality terms, iterate `ArkivPairs` for range/glob, combine bitmaps, resolve IDs through the system account, return entities or addresses |
-| `arkiv_getBitmap(pair_addr, [blockTag])` | Raw bitmap bytes + codeHash; supports client-side query verification |
-| `arkiv_getBlockTiming()` | Current block number, timestamp, seconds since previous block |
+| `arkiv_query(query, [options])` | Page of matching entities. Pagination is descending by entity ID. Options carry `atBlock`, `resultsPerPage`, `cursor`, and per-field `includeData` projection. |
+| `arkiv_getEntityCount()` | Cardinality of the `$all` bitmap at head. |
+| `arkiv_getBlockTiming()` | Head block number, head block timestamp, and seconds since the parent block. |
 
-All historical reads work via op-reth's standard historical state
-cursor — bitmap bytes are retained in the `Bytecodes` table keyed by
-hash, so equality queries at any retained block resolve cleanly.
+The namespace registers on every transport the operator has enabled
+(`--http`, `--ws`, `--ipc`).
 
-`arkiv_query` replaces the v1 EntityDB-proxy method of the same name.
-The wire shape **changes**: v1 took an opaque `expr: String` + options
-object proxied verbatim to the Go EntityDB. The v2 grammar is a
-structured-predicate JSON; the exact shape is tracked in the migration
-plan as an open question to lock during Phase 4.
+### 6.1 Query language
 
-The namespace is registered on every transport the operator has
-enabled (`--http`, `--ws`, `--ipc`).
+Implemented today:
+
+- Top-level: `*` and `$all` (every live entity).
+- Equality and inequality: `k = v`, `k != v`.
+- Inclusion: `k IN (v1 v2 …)`, `k NOT IN (…)`.
+- Boolean combinators: `&&` / `AND`, `||` / `OR`, `NOT (…)`, `!(…)`.
+- Built-ins: `$owner`, `$creator`, `$key`, `$expiration`,
+  `$contentType`, `$createdAtBlock`.
+- Value literals: hex addresses (`0x…40hex`), entity keys (`0x…64hex`,
+  optionally quoted), decimal numbers, double-quoted strings.
+
+**Not implemented:**
+
+- Range queries (`<`, `<=`, `>`, `>=`).
+- Glob queries (`~`, `!~`).
+- `$sequence` built-in.
+
+Range and glob both need an ordered enumeration over `(annot_key,
+annot_val)` pairs — the trie's hashed pair addresses preclude that.
+An ordered sibling index (MDBX or similar) would unblock them; that
+work isn't built yet.
+
+### 6.2 Historical reads
+
+`atBlock` is passed through to `provider.history_by_block_number(n)`.
+Bitmap bytes and entity RLP bytes are retained in op-reth's
+`Bytecodes` table keyed by hash, so equality queries at any retained
+block resolve cleanly.
 
 ---
 
-## 8. Genesis construction
+## 7. Genesis construction
 
-Genesis is the thorniest part of integrating with the OP stack, and the
-design here has been iterated several times. The current rules:
+Genesis is the thorniest part of integrating with the OP stack. The
+current rules:
 
-### 8.1 No runtime mutation
+### 7.1 No runtime mutation
 
 The chainspec is treated as read-only data flowing in from `--chain`.
-Whatever needs to be in there must already be in there before `--chain`
-is parsed. This is what lets the binary be a true drop-in op-reth, and
-what keeps `op-reth init` and `op-reth node` in agreement on the
-genesis hash (mutating the chainspec at startup historically caused
-`init` and `node` to disagree).
+Whatever needs to be in there must already be in there before
+`--chain` is parsed. This is what lets the binary be a true drop-in
+op-reth, and what keeps `op-reth init` and `op-reth node` in
+agreement on the genesis hash.
 
-### 8.2 Path-A chainspec
+### 7.2 Path-A chainspec
 
 OP-reth supports two paths to build an `OpChainSpec`: a **pure-JSON**
 path (hardforks in `config.{bedrockBlock, regolithTime, …}`,
 EIP-1559 params in `config.optimism`) and a **programmatic** path
-(forks attached in code via `LazyLock`, e.g. `OP_DEV`).
+(forks attached in code via `LazyLock`).
 
 For an `--chain ./file.json` flow to work for both `init` and `node`,
 the chainspec **must** be the pure-JSON form. The programmatic form
@@ -328,25 +314,25 @@ post-hardfork blocks anyway, and validation explodes.
 `chainspec/dev.base.json` is therefore pure-JSON, with all OP
 hardforks activated at time 0.
 
-### 8.3 The Holocene `extraData` requirement
+### 7.3 The Holocene `extraData` requirement
 
 After Holocene, EIP-1559 base-fee parameters are encoded in the
 previous block's `extraData` (9 bytes:
-`[version=0x00][denominator: u32 BE][elasticity: u32 BE]`). When block
-1 is validated against genesis, the consensus path bails if
+`[version=0x00][denominator: u32 BE][elasticity: u32 BE]`). When
+block 1 is validated against genesis, the consensus path bails if
 `genesis.extra_data` isn't exactly 9 bytes.
 
 The decoder has a documented fallback: if both encoded values are
-zero, it falls back to the chainspec's `base_fee_params_at_timestamp`.
-So `extraData = 0x000000000000000000` (9 zero bytes) is the canonical
-"use chainspec params at block 0" value. `chainspec/dev.base.json`
-ships with this.
+zero, it falls back to the chainspec's
+`base_fee_params_at_timestamp`. So `extraData = 0x000000000000000000`
+(9 zero bytes) is the canonical "use chainspec params at block 0"
+value. `chainspec/dev.base.json` ships with this.
 
-### 8.4 The injection step
+### 7.4 The injection step
 
 `chainspec/dev.base.json` ships with an empty `alloc` — no predeploy,
-no funded accounts. Both are added via `arkiv-cli inject-predeploy` at
-recipe time:
+no funded accounts. Both are added via `arkiv-cli inject-predeploy`
+at recipe time:
 
 ```bash
 cp chainspec/dev.base.json $TMPDIR/genesis.json
@@ -364,100 +350,73 @@ op-reth init --chain ops/genesis.json --datadir ./data
 op-reth node --chain ops/genesis.json --datadir ./data
 ```
 
-Why not bake the bytecode into the JSON? Drift — bytecode regenerates
-when the Solidity source changes; build-time injection (from the
-in-tree `contracts/` artifact) means every build is consistent with
-the source it depends on.
+The runtime bytecode is baked into `arkiv-genesis` at build time from
+the in-tree `contracts/artifacts/EntityRegistry.runtime.hex` (kept in
+sync with `contracts/src/EntityRegistry.sol` by `just contracts-build`).
 
-### 8.5 System account pre-allocation
+### 7.5 System account pre-allocation
 
-`genesis_alloc()` pre-allocates the system account at
-`0x4400000000000000000000000000000000000046` with `nonce=1` (empty
-code, empty storage). Pre-allocation avoids a per-`Create`
-"does the system account exist?" check, and the adjacent address means
-no derivation / collision check is needed at chain bring-up.
+`genesis_alloc()` pre-allocates the system account at `0x4400…0046`
+with `nonce=1` (empty code, empty storage). Pre-allocation avoids a
+per-`Create` "does the system account exist?" check, and the adjacent
+address means no derivation / collision check is needed at chain
+bring-up. `nonce=1` defeats EIP-161 pruning.
 
 ---
 
-## 9. Testing surface
+## 8. Testing surface
 
-Targets, per the migration plan:
-
-| Layer | Test type |
+| Layer | Where |
 |---|---|
-| `arkiv-genesis` | Pure-function unit tests; bindings drift tests run upstream |
-| `arkiv-cli inject-predeploy` | Smoke: feed a known JSON, diff the alloc |
-| Precompile per-op | Unit tests on a revm harness: pre-state → call → assert journaled writes match expected codeHashes |
-| Precompile caller restriction | STATICCALL / DELEGATECALL / non-EntityRegistry caller all fatal-error |
-| `ArkivPairs` first-sight | Same `(k, v)` twice → one entry |
-| Gas determinism | Two revm contexts, different pre-state, same op batch → identical gas |
-| End-to-end | Dev chain + `arkiv-cli batch` + `arkiv_getEntity` round-trip |
-| Range / glob query | Multi-pair fixture; verify result + bitmap proofs |
-| Reorg posture | Force a reorg; confirm trie state reverts and `ArkivPairs` entries remain harmless |
+| `arkiv-genesis` unit tests | `crates/arkiv-genesis/src/lib.rs` (`#[cfg(test)]`) — bytecode decode, alloc shape, signer derivation. |
+| State model + op handlers | `crates/arkiv-entitydb/src/lib.rs` (`#[cfg(test)]`) — against `InMemoryAdapter`. |
+| Query lexer + parser unit tests | `crates/arkiv-entitydb/src/query/{lexer,parser}.rs`. |
+| Query interpreter integration | `crates/arkiv-entitydb/tests/query_eval.rs` — parse + evaluate end-to-end against `InMemoryAdapter`. |
+| Precompile unit tests | `crates/arkiv-node/src/precompile.rs` — ABI round-trip, gas constants, attribute conversion. |
+| Full pipeline e2e | `e2e/tests/full_pipeline_e2e.rs` — boots an in-process `ArkivOpNode`, walks every op type + every query construct + atBlock + pagination + non-owner revert. |
 
 The matrix that v1 used (manual `just node-dev-jsonrpc` + `just batch`
 + mock-entitydb output) is gone with the JSON-RPC bridge.
 
 ---
 
-## 10. Implementation status
-
-Phase 1 (demolition of the v1 ExEx + EntityDB bridge) is complete. The
-binary currently compiles as plain op-reth with predeploy detection:
-no precompile, no `arkiv_*` RPC, no `ArkivPairs` table. Phases 2–6
-fill it back in.
-
-| Phase | What | Status |
-|---|---|---|
-| 0 | Doc rewrite (this doc + `statedb-design.md`) | done |
-| 1 | Demolition of v1 ExEx, storage, RPC proxy, storaged | done |
-| 2 | `arkiv-db` crate + empty `ArkivEvmFactory` scaffolding | pending |
-| 3 | Precompile + per-op handlers + gas + tests | pending |
-| 4 | `arkiv_*` RPC namespace | pending |
-| 5 | Integration glue + reorg/spec-exec tests | pending |
-| 6 | `arkiv-cli` Query/Hash/History cleanup + simulator audit | pending |
-
-Phase details, exit criteria, and open questions are in
-`arkiv-op-reth-v2-migration-plan.md` at the workspace root.
-
-The v2 design depends on coordinated changes to the `EntityRegistry`
-contract (move ownership / lifetime validation into the contract; drop
-the rolling-changeset-hash machinery; call the precompile with
-`msg.sender` + minted keys + owner + expiresAt). Contract work lives
-in `arkiv-contracts`; a rev bump of `arkiv-bindings` picks it up here.
-
----
-
-## 11. Key design decisions, recapped
+## 9. Key design decisions, recapped
 
 | Decision | Why |
 |---|---|
-| Predeploy at `0x44…0044` | Matches OP convention for system contracts; the address is a property of the chain, not the binary |
-| Custom `EvmFactory` (not ExEx) | State mutation happens inside EVM execution, not after; the result lands in `stateRoot` and inherits op-reth's standard reorg machinery for free |
-| Bitmap as account code (`codeHash` = `keccak256(bitmap)`) | Content-addressing in the trie comes for free; query verification is one `eth_getProof` per bitmap |
-| `0xFE` prefix on entity-account code | Defends against accidental `CALL` to an entity address; `INVALID` opcode reverts immediately |
-| Entity tombstone keeps `nonce=1` | Prevents EIP-161 pruning of deleted entities |
-| `ArkivPairs` outside the trie, append-only | Index, not commitment; range/glob enumeration via prefix scan without contaminating consensus state |
-| Gas is pure function of calldata | Consensus determinism by construction — same op batch from any pre-state charges the same gas |
-| Same `EvmFactory` across sequencer/validator/fault-proof | Disputed Arkiv blocks replay identically in `op-program` / `cannon` / `op-challenger` |
-| Path-A chainspec | `op-reth init` and `op-reth node` need to agree on genesis hash when reading the same JSON file |
-| `inject-predeploy` as a separate post-process | Composes with op-deployer output rather than forking it; same tool serves dev and prod |
-| `arkiv-genesis` as its own crate | Both binaries need the same predeploy-bytecode generator; lifting it out avoids cross-bin deps |
-| No runtime chainspec mutation | Removed the `init`/`node` genesis-hash divergence bug structurally |
+| Predeploy at `0x4400…0044` | Matches OP convention for system contracts; the address is a property of the chain, not the binary. |
+| System account adjacent at `0x4400…0046` | Memorable, no derivation, no collision check needed at chain bring-up. |
+| Custom `EvmFactory` (not ExEx) | State mutation happens inside EVM execution; the result lands in `stateRoot` and inherits op-reth's standard reorg machinery for free. |
+| Bitmap as account code (`codeHash` = `keccak256(bitmap)`) | Content-addressing in the trie comes for free; query verification is one `eth_getProof` per bitmap. |
+| `0xFE` prefix on entity-account code | Defends against accidental `CALL` to an entity address; `INVALID` opcode reverts immediately. |
+| Entity tombstone keeps `nonce=1` | Prevents EIP-161 pruning of deleted entities. |
+| Gas is pure function of calldata | Consensus determinism by construction — same op batch from any pre-state charges the same gas. |
+| Contract validates `Ident32` charset | SDK clients depend on a specific revert (`Ident32InvalidByte`) for malformed attribute names; cheaper than letting the precompile reject after the contract's other validation. |
+| `arkiv-entitydb` has no revm dep | Reusable for testing (against `InMemoryAdapter`) and for the read path (against `RethStateAdapter`); op handlers only talk to a `StateAdapter` trait. |
+| Path-A chainspec | `op-reth init` and `op-reth node` need to agree on genesis hash when reading the same JSON file. |
+| `inject-predeploy` as a separate post-process | Composes with op-deployer output rather than forking it; same tool serves dev and prod. |
+| `arkiv-genesis` as its own crate | Both binaries need the same predeploy data; lifting it out avoids cross-bin deps. |
+| No runtime chainspec mutation | Removes the `init`/`node` genesis-hash divergence bug structurally. |
 
 ---
 
-## 12. Things this design does *not* do
+## 10. Things this design does *not* do
 
 - **Built-in `--chain arkiv` name.** Could be done via a custom
   `ChainSpecParser`. Not pursued; the file-based flow works and
   composes uniformly with prod.
-- **Mainnet predeploy registration in `L2Genesis.s.sol`.** The cleanest
-  long-term home for `EntityRegistry`. Not pursued yet; the
+- **Mainnet predeploy registration in `L2Genesis.s.sol`.** The
+  cleanest long-term home for the predeploys. Not pursued yet; the
   post-process approach has a tinier surface we own.
-- **L1 / op-node / op-batcher / op-proposer.** Out of scope. This repo
-  is the L3 execution client only.
-- **Pre-Bedrock state import.** Standard op-reth concern.
+- **Range / glob queries.** Need an ordered sibling index over
+  `(annot_key, annot_val)` pairs. The trie's hashed pair addresses
+  preclude in-trie range scans. Future work.
+- **Per-op tx-position metadata.** `transaction_index_in_block` and
+  `operation_index_in_transaction` are kept in the wire shape for SDK
+  parity but always 0 — revm's precompile context doesn't expose
+  either.
+- **L1 / op-node / op-batcher / op-proposer.** Out of scope. This
+  repo is the L3 execution client only.
 - **Fault-proof EVM integration verification.** The design relies on
   `op-program` / `cannon` / `op-challenger` picking up our custom
   `EvmFactory` through whatever shared crate dependency they use; if
@@ -466,21 +425,13 @@ in `arkiv-contracts`; a rev bump of `arkiv-bindings` picks it up here.
 
 ---
 
-## 13. Where to read next
+## 11. Where to read next
 
 - **Canonical state model:** [`statedb-design.md`](statedb-design.md) —
-  read this if you're touching the precompile, the RPC handlers, or
+  read this if you're touching the precompile, the op handlers, or
   the gas model.
-- **Migration plan:** `arkiv-op-reth-v2-migration-plan.md` (workspace
-  root) — phase scope, exit criteria, open questions.
 - **EntityRegistry contract:**
-  <https://github.com/Arkiv-Network/arkiv-contracts> — `EntityRegistry.sol`,
-  `Entity.sol`, and `docs/value128-encoding.md` for attribute-value
-  packing.
-- **`arkiv-bindings`:** the contracts repo also publishes Rust bindings
-  consumed here as `arkiv-bindings`. Validated types (`Ident32`,
-  `Mime128`), `Operation` calldata encoders, and storage-layout helpers
-  live there.
+  [`contracts/src/EntityRegistry.sol`](../contracts/src/EntityRegistry.sol).
 - **op-reth:** <https://github.com/ethereum-optimism/optimism/tree/develop/rust/op-reth>
 - **alloy-evm `Precompile` trait:** the host trait the Arkiv precompile
   implements.
