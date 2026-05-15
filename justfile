@@ -85,10 +85,10 @@ node-dev *args='':
         --dev.block-time 2s \
         --datadir "$DATADIR" \
         --http \
-        --http.api eth,net,web3,debug,arkiv \
+        --http.api eth,net,web3,debug \
         --http.corsdomain '*' \
         --ws \
-        --ws.api eth,net,web3,debug,arkiv \
+        --ws.api eth,net,web3,debug \
         --ws.port 8546 \
         --log.file.directory "$DATADIR/logs" \
         {{ args }}

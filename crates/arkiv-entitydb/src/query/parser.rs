@@ -315,6 +315,10 @@ fn encode_for_key(key: &AnnotKey, lit: Literal) -> Result<AnnotVal> {
         }
 
         (AnnotKey::BuiltIn(BuiltIn::Key), Literal::EntityKey(b)) => b.to_vec(),
+        // The JS SDK quotes all `eq(...)` string values uniformly, so
+        // `eq("$key", "0x…64hex")` arrives as a string literal. Accept
+        // that shape too, as long as it decodes to exactly 32 bytes.
+        (AnnotKey::BuiltIn(BuiltIn::Key), Literal::String(s)) => decode_entity_key_string(&s)?,
         (AnnotKey::BuiltIn(BuiltIn::Key), other) => {
             bail!("expected entity-key literal for $key, got {other:?}")
         }
@@ -341,6 +345,25 @@ fn encode_for_key(key: &AnnotKey, lit: Literal) -> Result<AnnotVal> {
         (AnnotKey::User(_), Literal::Address(a)) => a.to_vec(),
         (AnnotKey::User(_), Literal::EntityKey(b)) => b.to_vec(),
     }))
+}
+
+/// Decode a quoted entity-key literal (e.g. `"0x" + 64 hex`) into 32
+/// raw bytes. Used to accept the JS SDK's `eq("$key", "0x…")` shape,
+/// which arrives as `Literal::String` rather than `Literal::EntityKey`
+/// because the SDK uniformly quotes string values in `eq(...)`.
+fn decode_entity_key_string(s: &str) -> Result<Vec<u8>> {
+    let stripped = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .ok_or_else(|| eyre::eyre!("expected 0x-prefixed entity-key string for $key, got {s:?}"))?;
+    if stripped.len() != 64 {
+        bail!(
+            "expected 64 hex chars for $key, got {} ({s:?})",
+            stripped.len()
+        );
+    }
+    alloy_primitives::hex::decode(stripped)
+        .map_err(|e| eyre::eyre!("invalid hex in $key literal {s:?}: {e}"))
 }
 
 #[cfg(test)]
@@ -428,6 +451,34 @@ mod tests {
             p("$key = 0x1111111111111111111111111111111111111111000000000000000000000000"),
             Query::Eq { key: builtin(BuiltIn::Key), value: val(&k) },
         );
+    }
+
+    #[test]
+    fn eq_builtin_key_accepts_quoted_hex() {
+        // The JS SDK's `eq("$key", entityKey)` produces a quoted
+        // string literal — `$key = "0x…"`. Decode it to the same 32
+        // bytes as the unquoted form.
+        let mut k = [0u8; 32];
+        k[..20].copy_from_slice(&[0x22; 20]);
+        let unquoted =
+            p("$key = 0x2222222222222222222222222222222222222222000000000000000000000000");
+        let quoted = p(
+            r#"$key = "0x2222222222222222222222222222222222222222000000000000000000000000""#,
+        );
+        assert_eq!(quoted, unquoted);
+        assert_eq!(quoted, Query::Eq { key: builtin(BuiltIn::Key), value: val(&k) });
+    }
+
+    #[test]
+    fn eq_builtin_key_rejects_malformed_quoted_hex() {
+        // Wrong length
+        assert!(parse(r#"$key = "0x1234""#).is_err());
+        // Missing 0x prefix
+        let sixty_four_hex_no_prefix = "a".repeat(64);
+        assert!(parse(&format!(r#"$key = "{sixty_four_hex_no_prefix}""#)).is_err());
+        // Non-hex chars
+        let bad = format!("0x{}", "z".repeat(64));
+        assert!(parse(&format!(r#"$key = "{bad}""#)).is_err());
     }
 
     #[test]
