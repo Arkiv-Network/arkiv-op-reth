@@ -34,9 +34,57 @@ function blockNumberAdd(BlockNumber32 a, BlockNumber32 b) pure returns (BlockNum
 }
 
 /// @dev Validated lowercase-ASCII identifier (≤32 bytes, left-aligned).
-/// v1 UDVT preserved so the SDK's `Ident32` wrapper resolves; in v2 the
-/// charset validation runs inside the precompile, not on-chain.
+/// v1 UDVT preserved so the SDK's `Ident32` wrapper resolves.
+///
+/// **Charset validation lives in the contract** (see `validateIdent32`
+/// below). The SDK expects an `Ident32InvalidByte` revert when an
+/// attribute name has any byte outside the valid set — so we can't
+/// fully defer this to the precompile, even though the rest of v2
+/// content validation does live there.
 type Ident32 is bytes32;
+
+error Ident32Empty();
+error Ident32InvalidByte(uint256 position, bytes1 value);
+
+/// @dev Bitmap of valid identifier characters: a-z, 0-9, '.', '-', '_'.
+///   bits 45–46  (0x2D–0x2E): set  (hyphen, dot)
+///   bits 48–57  (0x30–0x39): set  (digits)
+///   bit  95     (0x5F):      set  (underscore)
+///   bits 97–122 (0x61–0x7A): set  (lowercase)
+uint256 constant IDENT_CHARSET =
+    (1 << 0x2D) | (1 << 0x2E) | (((1 << 10) - 1) << 0x30) | (1 << 0x5F) | (((1 << 26) - 1) << 0x61);
+
+/// @dev Bitmap for the leading byte: a-z only.
+uint256 constant IDENT_LEADING = ((1 << 26) - 1) << 0x61;
+
+/// @notice Validate that an Ident32 is a valid identifier.
+/// @dev Leading byte must be a-z. Subsequent bytes must be in
+/// IDENT_CHARSET (a-z, 0-9, '.', '-', '_'). Once a zero byte is
+/// encountered, all remaining bytes must also be zero (left-aligned,
+/// no embedded nulls). Mirrors `validateIdent32` in
+/// arkiv-contracts/types/Ident32.sol so SDK error parsing matches v1.
+function validateIdent32(Ident32 value) pure {
+    bytes32 raw = Ident32.unwrap(value);
+    uint8 b0 = uint8(raw[0]);
+    if (b0 == 0) revert Ident32Empty();
+    if ((IDENT_LEADING >> b0) & 1 == 0) revert Ident32InvalidByte(0, bytes1(b0));
+
+    for (uint256 j = 1; j < 32; j++) {
+        uint8 b = uint8(raw[j]);
+        if (b == 0) {
+            // Trailing bytes must all be zero (no embedded nulls).
+            for (uint256 k = j + 1; k < 32; k++) {
+                if (uint8(raw[k]) != 0) {
+                    revert Ident32InvalidByte(k, bytes1(uint8(raw[k])));
+                }
+            }
+            return;
+        }
+        if ((IDENT_CHARSET >> b) & 1 == 0) {
+            revert Ident32InvalidByte(j, bytes1(b));
+        }
+    }
+}
 
 /// @dev 128-byte MIME type descriptor, four-word packed. v1 struct
 /// preserved so the SDK's `Mime128` resolves. Validation runs in the
@@ -241,6 +289,7 @@ contract EntityRegistry {
         returns (OpRecord memory rec)
     {
         if (BlockNumber32.unwrap(op.btl) == 0) revert Entity.ZeroBtl();
+        _validateAttributeNames(op.attributes);
 
         uint32 nonce = nonces[msg.sender]++;
         bytes32 key = entityKey(msg.sender, nonce);
@@ -267,6 +316,7 @@ contract EntityRegistry {
         _requireExists(op.entityKey, stored);
         _requireActive(op.entityKey, stored, current);
         _requireOwner(op.entityKey, stored);
+        _validateAttributeNames(op.attributes);
 
         emit EntityOperation(op.entityKey, Entity.UPDATE, stored.owner, stored.expiresAt, bytes32(0));
 
@@ -276,6 +326,14 @@ contract EntityRegistry {
         rec.payload = op.payload;
         rec.contentType = op.contentType;
         rec.attributes = op.attributes;
+    }
+
+    /// @dev Charset-check every attribute name. Reverts with
+    /// `Ident32InvalidByte(position, value)` on the first bad byte.
+    function _validateAttributeNames(Entity.Attribute[] calldata attrs) internal pure {
+        for (uint256 i = 0; i < attrs.length; i++) {
+            validateIdent32(attrs[i].name);
+        }
     }
 
     function _extend(Entity.Operation calldata op, BlockNumber32 current)
