@@ -17,11 +17,9 @@ fn main() -> Result<()> {
             );
         }
 
-        // ArkivOpNode swaps in our `ArkivOpExecutorBuilder`, which builds
-        // an `ArkivOpEvmConfig` that uses `ArkivOpEvmFactory`. The
-        // factory installs the Arkiv precompile at 0x…0045 on every
-        // fresh revm instance (canonical execution, tracing,
-        // payload-building, simulation).
+        // ArkivOpNode swaps OpNode's EvmFactory for `ArkivOpEvmFactory`,
+        // which installs the Arkiv precompile at 0x…0045 on every fresh
+        // revm instance. `install` adds the `arkiv_*` RPC namespace.
         let arkiv_node = ArkivOpNode::new(OpNode::new(rollup));
         let node = install(builder.node(arkiv_node));
         let handle = node.launch_with_debug_capabilities().await?;

@@ -1,21 +1,9 @@
-//! Arkiv precompile — thin adapter over [`arkiv_entitydb`].
+//! Arkiv precompile — revm-side adapter over [`arkiv_entitydb`].
 //!
-//! Registered by [`crate::evm::ArkivOpEvmFactory`] at
-//! [`ARKIV_PRECOMPILE_ADDRESS`](arkiv_genesis::ARKIV_PRECOMPILE_ADDRESS).
-//! `EntityRegistry.execute()` calls this with `abi.encode(OpRecord[])`
-//! as calldata; we:
-//!
-//! 1. Enforce caller restrictions (direct CALL from `EntityRegistry`,
-//!    non-static, zero value).
-//! 2. Decode the batched `OpRecord[]`.
-//! 3. Compute gas as a pure function of op shape and charge it up-front.
-//! 4. For each record, convert the ABI types into [`arkiv_entitydb`]
-//!    types and dispatch to the corresponding op handler via a
-//!    [`RevmStateAdapter`] over revm's [`EvmInternals`].
-//!
-//! All indexing logic (system counter, ID maps, bitmap deltas across
-//! built-in and user annotations, RLP encode/decode, tombstoning) lives
-//! in [`arkiv_entitydb`] — this file is the revm-side adapter only.
+//! All indexing logic (system counter, ID maps, bitmap deltas, RLP
+//! encode/decode, tombstoning) lives in [`arkiv_entitydb`]. This file
+//! owns the caller restrictions, calldata decode, gas accounting, and
+//! the [`StateAdapter`] impl over revm's [`EvmInternals`].
 
 use alloy_evm::{EvmInternals, precompiles::{DynPrecompile, PrecompileInput}};
 use alloy_primitives::{Address, B256, Bytes, U256};
@@ -31,9 +19,8 @@ use revm::{
 
 pub use arkiv_genesis::ARKIV_PRECOMPILE_ADDRESS;
 
-// Mirror of `EntityRegistry.OpRecord` in contracts/src/EntityRegistry.sol.
-// Field order, types, and names must match exactly — the contract calls
-// `ARKIV_PRECOMPILE.call(abi.encode(records))` with the same schema.
+// Mirror of `EntityRegistry.OpRecord`. Field order / types / names must
+// stay in lockstep with `contracts/src/EntityRegistry.sol`.
 sol! {
     #[derive(Debug)]
     struct OpRecord {
@@ -60,8 +47,8 @@ sol! {
     }
 }
 
-// Op-type tags — must match `Entity.CREATE..Entity.EXPIRE` (1-indexed)
-// in contracts/src/EntityRegistry.sol.
+// Op-type + attribute valueType tags. Must match `Entity.{CREATE..EXPIRE}`
+// and `Entity.ATTR_{UINT,STRING,ENTITY_KEY}` in EntityRegistry.sol.
 const OP_CREATE: u8 = 1;
 const OP_UPDATE: u8 = 2;
 const OP_EXTEND: u8 = 3;
@@ -69,7 +56,6 @@ const OP_TRANSFER: u8 = 4;
 const OP_DELETE: u8 = 5;
 const OP_EXPIRE: u8 = 6;
 
-// Attribute valueType tags — must match `Entity.ATTR_UINT..ATTR_ENTITY_KEY`.
 const ATTR_UINT: u8 = 1;
 const ATTR_STRING: u8 = 2;
 const ATTR_ENTITY_KEY: u8 = 3;
@@ -77,19 +63,8 @@ const ATTR_ENTITY_KEY: u8 = 3;
 // ── Gas model ────────────────────────────────────────────────────────
 //
 // Pure function of op shape — required for cross-node consensus on the
-// returned `gas_used`. Anchors:
-//   - SSTORE_INIT  ≈ 22,100
-//   - SSTORE_RESET ≈  5,000
-//   - per code byte ≈ 200
-//
-// Per-op base costs cover the fixed state touches:
-//   - CREATE writes counter + 2 ID-map slots + 7 built-in bitmaps + entity RLP
-//   - DELETE/EXPIRE clears 2 ID-map slots + 7 built-in bitmaps + tombstone
-//   - UPDATE rewrites the entity RLP + diffs the $contentType bitmap
-//   - EXTEND / TRANSFER rewrite the entity RLP + swap a single bitmap
-//
-// Per-byte costs cover payload + annotation key/value bytes that land in
-// account code; per-annotation cost amortises the extra bitmap touch.
+// returned `gas_used`. Anchored to EVM costs: SSTORE_INIT ≈ 22,100,
+// SSTORE_RESET ≈ 5,000, per code byte ≈ 200.
 
 const G_CREATE: u64 = 80_000;
 const G_UPDATE: u64 = 30_000;
@@ -102,17 +77,10 @@ const G_ANNOTATION: u64 = 5_000;
 
 const PRECOMPILE_NAME: &str = "ARKIV";
 
-/// Build the Arkiv precompile.
-///
-/// Returns a [`DynPrecompile`] suitable for insertion into a
-/// `PrecompilesMap` via [`crate::evm::ArkivOpEvmFactory`].
 pub fn arkiv_precompile() -> DynPrecompile {
     let id = PrecompileId::custom(PRECOMPILE_NAME);
     let call = move |mut input: PrecompileInput<'_>| -> PrecompileResult {
-        // ── Caller restriction ──────────────────────────────────────
-        //
-        // Direct call only, from the `EntityRegistry` predeploy.
-
+        // Direct CALL only, from the EntityRegistry predeploy.
         if input.target_address != input.bytecode_address {
             return Err(PrecompileError::Fatal(
                 "arkiv precompile: DELEGATECALL/CALLCODE not allowed".into(),
@@ -135,8 +103,6 @@ pub fn arkiv_precompile() -> DynPrecompile {
             )));
         }
 
-        // ── Decode the batched OpRecord[] ───────────────────────────
-
         let records = match <Vec<OpRecord> as SolValue>::abi_decode(input.data) {
             Ok(r) => r,
             Err(e) => {
@@ -146,14 +112,10 @@ pub fn arkiv_precompile() -> DynPrecompile {
             }
         };
 
-        // ── Gas: pure function of op shape ──────────────────────────
-
         let gas_used = total_gas(&records);
         if gas_used > input.gas {
             return Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, input.reservoir));
         }
-
-        // ── Dispatch into entitydb ──────────────────────────────────
 
         let current_block: u64 = input.internals.block_number().saturating_to();
         let mut adapter = RevmStateAdapter::new(&mut input.internals);
@@ -171,8 +133,6 @@ pub fn arkiv_precompile() -> DynPrecompile {
     };
     DynPrecompile::new_stateful(id, call)
 }
-
-// ── Op dispatch ──────────────────────────────────────────────────────
 
 fn dispatch<S: StateAdapter>(
     state: &mut S,
@@ -226,8 +186,6 @@ fn op_name(t: u8) -> &'static str {
     }
 }
 
-// ── Gas accounting ───────────────────────────────────────────────────
-
 fn total_gas(records: &[OpRecord]) -> u64 {
     records
         .iter()
@@ -265,15 +223,10 @@ fn record_gas(rec: &OpRecord) -> u64 {
         .saturating_add(annotation_count.saturating_mul(G_ANNOTATION))
 }
 
-// ── ABI → entitydb conversions ───────────────────────────────────────
-
-/// Concatenate a `bytes32[4]` into 128 bytes, then strip trailing `0x00`.
-///
-/// Strings written by the SDK are packed left-aligned into the four
-/// words and zero-padded on the right; trimming gives the original
-/// bytes back. Strings that legitimately end in `0x00` are not
-/// supported by this encoding (which is fine — `0x00` is banned in
-/// pair keys/values anyway).
+/// Concatenate a `bytes32[4]` into 128 bytes, then strip trailing
+/// `0x00`. Strings written by the SDK are packed left-aligned and
+/// zero-padded on the right; trailing `0x00` is banned in pair
+/// keys/values so the strip is unambiguous.
 fn pack_bytes32_4(words: &[alloy_primitives::FixedBytes<32>; 4]) -> Vec<u8> {
     let mut out = Vec::with_capacity(128);
     for w in words {
@@ -293,7 +246,6 @@ fn mime128_to_bytes(m: &Mime128) -> Vec<u8> {
     pack_bytes32_4(&m.data)
 }
 
-/// Strip trailing zeros from an `Ident32` (`bytes32`) annotation key.
 fn ident32_to_bytes(name: B256) -> Vec<u8> {
     strip_trailing_zeros(name.0.to_vec())
 }
@@ -307,9 +259,8 @@ fn convert_attributes(
         let key = ident32_to_bytes(a.name);
         match a.valueType {
             ATTR_UINT => {
-                // The SDK packs a uint256 into value[0] big-endian; the
-                // remaining three words are zero. Treat the leading
-                // 32-byte word as the value.
+                // SDK packs the uint256 left-aligned into value[0]; the
+                // remaining three words are zero.
                 numerics.push(NumericAnnotation {
                     key,
                     value: U256::from_be_slice(a.value[0].as_slice()),
@@ -322,9 +273,8 @@ fn convert_attributes(
                 });
             }
             ATTR_ENTITY_KEY => {
-                // Entity keys are exactly 32 bytes — store the leading
-                // word verbatim (no trailing-zero strip; a key may
-                // legitimately end in zeros).
+                // 32 raw bytes — no trailing-zero strip (a real key may
+                // end in zeros).
                 strings.push(StringAnnotation {
                     key,
                     value: a.value[0].as_slice().to_vec(),
@@ -336,10 +286,6 @@ fn convert_attributes(
     Ok((strings, numerics))
 }
 
-// ── revm-side state adapter ──────────────────────────────────────────
-
-/// [`StateAdapter`] over revm's journaled state. Each call goes through
-/// the journal so reverts roll back cleanly on dispatch failure.
 struct RevmStateAdapter<'a, 'b> {
     internals: &'a mut EvmInternals<'b>,
 }
@@ -349,9 +295,8 @@ impl<'a, 'b> RevmStateAdapter<'a, 'b> {
         Self { internals }
     }
 
-    /// `set_code(..., Bytecode)` doesn't bump the nonce; new accounts
-    /// land with `nonce = 0` which EIP-161 would prune. Force `nonce >=
-    /// 1` so the account survives.
+    /// `set_code` doesn't bump the nonce; new accounts would land with
+    /// `nonce = 0` and EIP-161 would prune them. Force `nonce >= 1`.
     fn ensure_nonce_at_least_one(&mut self, addr: Address) -> eyre::Result<()> {
         let nonce = self
             .internals
@@ -421,8 +366,7 @@ mod tests {
     use super::*;
     use alloy_primitives::{Address as Addr, B256, FixedBytes};
 
-    // End-to-end dispatch tests (state mutations against a live revm
-    // context) live in `e2e/tests/precompile_e2e.rs` — `EvmInternals`
+    // End-to-end dispatch lives in the e2e crate — `EvmInternals`
     // can't be constructed standalone.
 
     #[test]
@@ -449,8 +393,6 @@ mod tests {
 
     #[test]
     fn record_decodes_minimal_create_batch() {
-        // Hand-construct a one-op CREATE record, abi-encode it as a
-        // Vec<OpRecord>, then round-trip-decode.
         let rec = OpRecord {
             operationType: OP_CREATE,
             sender: Addr::repeat_byte(0xaa),

@@ -23,9 +23,6 @@
 //! - [`ArkivLocalPayloadAttributesBuilder`] — verbatim copy of
 //!   op-reth's private `OpLocalPayloadAttributesBuilder`, required by
 //!   `DebugNode::local_payload_attributes_builder`.
-//!
-//! Pattern lifted from arkiv-op-reth's `pm/precompile-spike` branch,
-//! which itself mirrored op-reth's `examples/custom-node`.
 
 use std::sync::Arc;
 

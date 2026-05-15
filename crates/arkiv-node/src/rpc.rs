@@ -1,23 +1,8 @@
 //! `arkiv_*` JSON-RPC namespace.
 //!
-//! Registers a single method, `arkiv_query`, on the node's HTTP RPC
-//! server. This module is intentionally thin: it owns the JSON-RPC
-//! plumbing, the wire-format types, and the `StateProvider` snapshot
-//! selection — and delegates everything else to
+//! Thin adapter: owns the JSON-RPC plumbing, wire-format types, and
+//! the [`StateProvider`] snapshot selection. Query execution lives in
 //! [`arkiv_entitydb::query::execute`].
-//!
-//! Per-request flow:
-//!
-//! 1. Resolve `at_block` → a [`StateProvider`] snapshot + the actual
-//!    block number to report back.
-//! 2. Wrap the snapshot in a read-only [`RethStateAdapter`] and call
-//!    [`execute`].
-//! 3. Render the returned [`EntityRlp`]s into wire-format
-//!    [`EntityData`] and encode the next cursor as a hex string.
-//!
-//! Phase 11 scope: no `includeData` field selection, no separate
-//! `getEntityByKey` / `getEntityCount` methods. Both can land later
-//! without changing the call shape.
 
 use alloy_consensus::BlockHeader;
 use alloy_eips::BlockNumberOrTag;
@@ -32,9 +17,7 @@ use jsonrpsee::types::error::{ErrorObject, ErrorObjectOwned, INTERNAL_ERROR_CODE
 use reth_storage_api::{HeaderProvider, StateProvider, StateProviderBox, StateProviderFactory};
 use serde::{Deserialize, Serialize};
 
-/// Default `resultsPerPage` if not specified by the caller.
 const DEFAULT_PAGE_SIZE: u64 = 100;
-/// Hard cap on `resultsPerPage` — matches arkiv-storage-service.
 const MAX_PAGE_SIZE: u64 = 200;
 
 #[rpc(server, namespace = "arkiv")]
@@ -55,8 +38,7 @@ pub trait ArkivApi {
     async fn get_entity_count(&self) -> RpcResult<u64>;
 
     /// Head block number, head block timestamp, and the duration
-    /// (seconds) between the head and its parent. Field names match
-    /// op-geth's `arkivAPI.GetBlockTiming` JSON wire shape.
+    /// (seconds) between the head and its parent.
     #[method(name = "getBlockTiming")]
     async fn get_block_timing(&self) -> RpcResult<BlockTiming>;
 }
@@ -65,24 +47,19 @@ pub trait ArkivApi {
 #[serde(rename_all = "camelCase")]
 pub struct QueryOptions {
     /// Block to evaluate against. `None` or `"latest"` reads head; a
-    /// hex number (`"0x1a"`) reads historical state. The SDK's
-    /// `hexutil.Uint64` shape (just a hex string) is compatible —
-    /// `BlockNumberOrTag` is a superset that also accepts the
-    /// standard JSON-RPC tags (`earliest`, `pending`, `finalized`,
-    /// `safe`).
+    /// hex number (`"0x1a"`) reads historical state. Tags other than
+    /// `latest` are rejected.
     pub at_block: Option<BlockNumberOrTag>,
-    /// Page size; clamped to `[1, 200]`. Defaults to 100. Accepts
-    /// either a JSON number (our e2e helpers) or a hex string
-    /// (the JS SDK's wire format via `numberToHex`).
+    /// Page size; clamped to `[1, MAX_PAGE_SIZE]`. Accepts either a
+    /// JSON number or a hex string (`numberToHex` from the JS SDK).
     #[serde(default, deserialize_with = "de_u64_flexible")]
     pub results_per_page: Option<u64>,
-    /// Hex-encoded entity ID. Next page contains IDs strictly less
-    /// than this value.
+    /// Cursor for the next page (the last ID of the previous page,
+    /// hex-encoded). Results in this call have ID strictly less than
+    /// this value.
     pub cursor: Option<String>,
-    /// Per-field projection. When `None`, every field is included
-    /// (matches the simple direct-call shape our e2e uses). When
-    /// `Some`, each missing field defaults to `false` — i.e. the
-    /// caller has to opt in to every field they want.
+    /// Per-field projection. `None` → include everything. `Some` →
+    /// each missing field defaults to `false`.
     pub include_data: Option<IncludeData>,
 }
 
@@ -119,9 +96,8 @@ pub struct QueryResponse {
 }
 
 /// Per-entity payload in `arkiv_query` responses. Every metadata
-/// field is `Option<T>` and `skip_serialize_if_none`: when the caller
-/// opts out via `includeData`, the field is *omitted* from the JSON,
-/// which the JS SDK reads as `undefined`. `key` is always present.
+/// field is optional and skip-serialized when None, so opting out via
+/// `includeData` omits the field on the wire. `key` is always present.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntityData {
@@ -138,24 +114,16 @@ pub struct EntityData {
     pub creator: Option<Address>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at_block: Option<u64>,
-    /// Block of the most recent mutation (CREATE / UPDATE / EXTEND /
-    /// TRANSFER). Equal to `created_at_block` until the entity is
-    /// first modified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_modified_at_block: Option<u64>,
-    /// Tx-position metadata. Reth's revm context doesn't expose the
-    /// tx-index-in-block during precompile execution, so we report 0
-    /// here today — included for SDK wire-shape parity. Same applies
-    /// to `operation_index_in_transaction`. Real values require a
-    /// non-trivial block-builder-side annotation that we haven't
-    /// landed yet.
+    /// Always 0 — reth's revm context doesn't expose the
+    /// tx-index-in-block during precompile execution. Kept in the wire
+    /// shape for SDK parity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transaction_index_in_block: Option<u64>,
+    /// Always 0 — same caveat as `transaction_index_in_block`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_index_in_transaction: Option<u64>,
-    /// Empty arrays are skipped on the wire (SDK reads
-    /// `stringAttributes ?? []`). When `includeData.attributes` is
-    /// false both vectors are empty.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub string_attributes: Vec<StringAttribute>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -174,19 +142,15 @@ pub struct NumericAttribute {
     pub value: U256,
 }
 
-/// Response shape for `arkiv_getBlockTiming`. Snake_case on the wire —
-/// the SDK reads `current_block` / `current_block_time` / `duration`.
+/// Response shape for `arkiv_getBlockTiming`. Snake_case wire field
+/// names match what the SDK reads.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct BlockTiming {
-    /// Head block number.
     pub current_block: u64,
-    /// Head block timestamp (seconds since epoch).
     pub current_block_time: u64,
-    /// Seconds between the head and its parent.
     pub duration: u64,
 }
 
-/// JSON-RPC handler for the `arkiv_*` namespace.
 pub struct ArkivRpc<P> {
     provider: P,
 }
@@ -209,8 +173,7 @@ where
     ) -> RpcResult<QueryResponse> {
         let provider = self.provider.clone();
         let options = options.unwrap_or_default();
-        // State reads against MDBX are sync I/O — offload to a blocking
-        // worker so we don't tie up the tokio runtime.
+        // MDBX state reads are sync I/O — keep them off the tokio runtime.
         tokio::task::spawn_blocking(move || run_query(provider, &q, &options))
             .await
             .map_err(|e| internal_err(format!("blocking task join: {e}")))?
@@ -236,7 +199,6 @@ where
                 .header_by_number(current_block)?
                 .ok_or_else(|| eyre::eyre!("head header missing for block {current_block}"))?;
             let current_block_time = head.timestamp();
-            // Genesis has no parent — report duration=0 in that case.
             let duration = if current_block == 0 {
                 0
             } else {
@@ -254,8 +216,6 @@ where
         .map_err(|e| internal_err(format!("{e}")))
     }
 }
-
-// ── Query pipeline ───────────────────────────────────────────────────
 
 fn run_query<P: StateProviderFactory>(
     provider: P,
@@ -282,17 +242,14 @@ fn run_query<P: StateProviderFactory>(
     })
 }
 
-/// Resolve `at_block` to a concrete `(StateProvider, block_number)`.
-/// `None` / `Latest` reads head; an explicit number reads historical
-/// canonical state. Other tags are rejected for v1.
 fn snapshot_for<P: StateProviderFactory>(
     provider: &P,
     at_block: Option<BlockNumberOrTag>,
 ) -> Result<(StateProviderBox, u64)> {
     match at_block {
         None | Some(BlockNumberOrTag::Latest) => {
-            // Small race between best_block_number() and latest() is
-            // acceptable — both observe the canonical head.
+            // best_block_number / latest race is benign — both observe
+            // the canonical head.
             let n = provider.best_block_number()?;
             Ok((provider.latest()?, n))
         }
@@ -306,10 +263,8 @@ fn snapshot_for<P: StateProviderFactory>(
     }
 }
 
-/// Resolved per-field projection. `from_options(None)` → all true
-/// (the default for callers that don't bother with `includeData`,
-/// e.g. our e2e test). `from_options(Some(_))` → each field defaults
-/// to `false` unless the caller opts in.
+/// Resolved per-field projection. `None` includeData → every field
+/// included; `Some` → each unset field defaults to false.
 #[derive(Debug, Clone, Copy)]
 struct ResolvedIncludeData {
     payload: bool,
