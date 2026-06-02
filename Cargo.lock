@@ -1477,6 +1477,7 @@ dependencies = [
  "alloy-hardforks",
  "alloy-op-evm",
  "alloy-primitives",
+ "alloy-rlp",
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
  "alloy-sol-types",

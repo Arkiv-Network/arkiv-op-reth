@@ -1,75 +1,37 @@
-//! Canonical home of the Arkiv state model.
+//! Abstract Arkiv state model.
 //!
-//! Every entity and every annotation bitmap lives in op-reth's standard
-//! world-state trie as an Ethereum account:
+//! Op handlers (`create` / `update` / `extend` / `transfer` / `delete`
+//! / `expire`), the [`Store`] trait they run against, the typed
+//! primitives ([`Entity`], [`Bitmap`], [`IndexTree`]), the
+//! address-derivation functions used by the query interpreter and the
+//! SDK ([`entity_address`], [`pair_address`], [`index_address`]), and
+//! the query language itself.
 //!
-//! - **Entity account** at `entity_address(entityKey)` carries the
-//!   RLP-encoded entity (payload + content type + annotations +
-//!   owner/expires_at) in `code`, prefixed with `0xFE` so a stray
-//!   `CALL` reverts immediately.
-//! - **Pair account** at `pair_address(annot_key, annot_val)` carries a
-//!   roaring64 bitmap of entity IDs as `code`. `codeHash` is
-//!   `keccak256(bitmap_bytes)` by construction — every bitmap is
-//!   content-addressed in the trie.
-//! - **System account** (internal — see `SYSTEM_ACCOUNT_ADDRESS`) —
-//!   empty-coded account that hosts the global entity counter, the
-//!   per-caller `nonces` map, and the trie-committed ID ↔ address maps
-//!   as storage slots. Materialised lazily on the first write via
-//!   `StateAdapter::ensure_account_persists` — no genesis presence
-//!   required. Separate from the precompile's registration address
-//!   ([`ARKIV_ADDRESS`]) so the precompile itself stays a programmatic
-//!   registration target with no on-chain dependency.
-//!
-//! Top-level exports:
-//!
-//! - Primitives: [`EntityRlp`], [`Bitmap`], address derivations,
-//!   built-in annotation keys, system-account slot keys.
-//! - [`StateAdapter`] trait — what the op handlers need from the
-//!   underlying state (code + storage R/W). The precompile implements
-//!   this over `EvmInternals`; the [`test_utils::InMemoryStateAdapter`]
-//!   (behind the `test-utils` feature) implements it over an
-//!   [`InMemoryStateDb`].
-//! - Op handlers: [`create`], [`update`], [`extend`], [`transfer`],
-//!   [`delete`], [`expire`]. All the indexing logic (system counter +
-//!   ID maps, bitmap deltas across built-in and user annotations, RLP
-//!   encode/decode, tombstoning) lives here. The precompile is a thin
-//!   adapter: decode calldata, dispatch.
+//! This crate is deliberately abstract: it knows nothing about the
+//! trie, about EVM accounts, or about how a [`Store`] impl backs its
+//! storage. The trie encoding (system-account slot derivations, code
+//! packing, the `0xFE` entity-code prefix) lives in `arkiv-node`'s
+//! `trie_layout` and adapter modules.
 
 use alloy_primitives::{Address, B256, keccak256};
-use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
-use eyre::{Result, ensure};
-use roaring::RoaringTreemap;
+use eyre::Result;
 
 pub mod query;
 
-// ─── Canonical addresses ──────────────────────────────────────────────
+#[cfg(feature = "test-utils")]
+pub mod test_utils;
 
-/// Canonical Arkiv address — the address the precompile is registered
-/// at by the custom `EvmFactory`. EOAs / SDKs `CALL` this address with
-/// the `execute(Operation[])` / `nonces(address)` ABI declared by
-/// `IEntityRegistry`. The precompile itself touches no storage on this
-/// address — consensus state lives on the system account.
-///
-/// Matches the SDK's `ARKIV_ADDRESS` constant. `arkiv-genesis`
-/// re-exports it.
-pub const ARKIV_ADDRESS: Address = Address::new([
-    0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x44,
-]);
+mod bitmap;
+mod entity;
+mod index_tree;
 
-/// Address the precompile uses as a storage host — global entity
-/// counter, per-caller `nonces` map, and the trie-committed ID ↔
-/// address maps live here as storage slots. Materialised lazily on
-/// the first storage write via `StateAdapter::ensure_account_persists`
-/// (called from [`bump_nonce`]), which bumps the nonce to 1 so EIP-161
-/// doesn't prune the account at end-of-tx. No genesis allocation
-/// required.
-///
-/// `pub(crate)` — entitydb is the only crate that should touch this
-/// address. External callers go through the op handlers and the
-/// `read_nonce` / `bump_nonce` API.
-pub(crate) const SYSTEM_ACCOUNT_ADDRESS: Address = Address::new([
-    0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x46,
-]);
+pub use bitmap::Bitmap;
+pub use entity::{ATTR_ENTITY_KEY, ATTR_STRING, ATTR_UINT, Attribute, Entity};
+/// Adaptive Radix Tree ordered set of attribute values for a single
+/// attribute key, stored in an **index account** at [`index_address`].
+/// Provides O(log n) insert/remove, prefix-compressed deterministic
+/// serialisation, and ascending range/prefix iteration.
+pub use index_tree::IndexTree;
 
 // ─── Address derivations ──────────────────────────────────────────────
 
@@ -137,100 +99,6 @@ pub const ANNOT_EXPIRATION: &[u8] = b"$expiration";
 /// `Update`.
 pub const ANNOT_CONTENT_TYPE: &[u8] = b"$contentType";
 
-// ─── System-account storage slots ─────────────────────────────────────
-//
-// All four maps live as storage on [`SYSTEM_ACCOUNT_ADDRESS`]. Slot
-// keys are scoped by a short tag so the keyspaces can't collide.
-// `pub(crate)` so the slot layout stays an entitydb implementation
-// detail — external callers go through [`read_nonce`] / [`bump_nonce`]
-// and the op handlers.
-
-/// `slot[keccak256("entity_count")]` → next `entity_id` (uint64).
-pub(crate) fn slot_entity_count() -> B256 {
-    keccak256(b"entity_count")
-}
-
-/// `slot[keccak256("id_to_addr" || id_be_bytes)]` → entity_address.
-pub(crate) fn slot_id_to_addr(entity_id: u64) -> B256 {
-    let mut buf = [0u8; 10 + 8];
-    buf[..10].copy_from_slice(b"id_to_addr");
-    buf[10..].copy_from_slice(&entity_id.to_be_bytes());
-    keccak256(buf)
-}
-
-/// `slot[keccak256("addr_to_id" || entity_address_bytes)]` → uint64 ID.
-pub(crate) fn slot_addr_to_id(entity_addr: Address) -> B256 {
-    let mut buf = [0u8; 10 + 20];
-    buf[..10].copy_from_slice(b"addr_to_id");
-    buf[10..].copy_from_slice(entity_addr.as_slice());
-    keccak256(buf)
-}
-
-/// `slot[keccak256("nonces" || caller_address)]` → uint32 entity-key
-/// minting nonce, returned by the SDK-visible `nonces(address)` view.
-pub(crate) fn slot_nonces(caller: Address) -> B256 {
-    let mut buf = [0u8; 6 + 20];
-    buf[..6].copy_from_slice(b"nonces");
-    buf[6..].copy_from_slice(caller.as_slice());
-    keccak256(buf)
-}
-
-// ─── Public system-state accessors ────────────────────────────────────
-
-/// Read `caller`'s current entity-key minting nonce. Used by the
-/// `nonces(address)` view dispatched from the precompile, and as the
-/// `nonce` input to `entityKey` derivation in CREATE.
-pub fn read_nonce<S: StateAdapter>(state: &mut S, caller: Address) -> Result<u32> {
-    let raw = state.storage(&SYSTEM_ACCOUNT_ADDRESS, slot_nonces(caller))?;
-    Ok(u32::from_be_bytes(raw.0[28..].try_into().unwrap()))
-}
-
-/// Read-then-increment `caller`'s nonce. Returns the value that was
-/// there before the increment (the value to use for the entity-key
-/// derivation that's about to happen).
-///
-/// Also lazily materialises the system account: on the first call
-/// against a fresh chain, `ensure_account_persists` raises the system
-/// account's nonce to 1 so EIP-161 doesn't prune it (and the nonce
-/// slot we're about to write) at end-of-tx. Idempotent on subsequent
-/// calls. This is the only entry point that touches the system
-/// account before any other slot has been written, so it's enough to
-/// run the guard here.
-pub fn bump_nonce<S: StateAdapter>(state: &mut S, caller: Address) -> Result<u32> {
-    state.ensure_account_persists(&SYSTEM_ACCOUNT_ADDRESS)?;
-    let slot = slot_nonces(caller);
-    let raw = state.storage(&SYSTEM_ACCOUNT_ADDRESS, slot)?;
-    let current = u32::from_be_bytes(raw.0[28..].try_into().unwrap());
-    let next = current
-        .checked_add(1)
-        .ok_or_else(|| eyre::eyre!("nonce overflow for {caller}"))?;
-    let mut buf = [0u8; 32];
-    buf[28..].copy_from_slice(&next.to_be_bytes());
-    state.set_storage(&SYSTEM_ACCOUNT_ADDRESS, slot, B256::from(buf))?;
-    Ok(current)
-}
-
-// ─── Storage value encodings (for system-account slots) ──────────────
-
-#[inline]
-fn u64_to_storage(n: u64) -> B256 {
-    let mut buf = [0u8; 32];
-    buf[24..].copy_from_slice(&n.to_be_bytes());
-    B256::from(buf)
-}
-
-#[inline]
-fn storage_to_u64(b: B256) -> u64 {
-    u64::from_be_bytes(b.0[24..].try_into().unwrap())
-}
-
-#[inline]
-fn address_to_storage(addr: Address) -> B256 {
-    let mut buf = [0u8; 32];
-    buf[12..].copy_from_slice(addr.as_slice());
-    B256::from(buf)
-}
-
 // ─── Annotation value encodings (for pair-account addresses) ─────────
 //
 // Encoding choices are critical: lex order of these byte sequences
@@ -254,186 +122,93 @@ fn encode_b256(b: B256) -> Vec<u8> {
     b.0.to_vec()
 }
 
-// ─── Bitmap (roaring64) ───────────────────────────────────────────────
-
-/// Roaring64 bitmap of entity IDs.
-///
-/// Determinism guarantee: [`Bitmap::to_bytes`] produces the same bytes
-/// for any two instances that contain the same set of IDs. Required
-/// for `codeHash = keccak256(bitmap_bytes)` to agree across nodes.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Bitmap(RoaringTreemap);
-
-impl Bitmap {
-    pub fn new() -> Self {
-        Self(RoaringTreemap::new())
-    }
-
-    /// Deserialize from the portable RoaringFormatSpec layout.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        RoaringTreemap::deserialize_from(bytes)
-            .map(Self)
-            .map_err(|e| eyre::eyre!("invalid roaring bitmap bytes: {e}"))
-    }
-
-    /// Serialize to the portable RoaringFormatSpec layout. Same set →
-    /// same bytes.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(self.0.serialized_size());
-        self.0
-            .serialize_into(&mut buf)
-            .expect("writing to Vec is infallible");
-        buf
-    }
-
-    pub fn insert(&mut self, id: u64) -> bool {
-        self.0.insert(id)
-    }
-
-    pub fn remove(&mut self, id: u64) -> bool {
-        self.0.remove(id)
-    }
-
-    pub fn contains(&self, id: u64) -> bool {
-        self.0.contains(id)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn len(&self) -> u64 {
-        self.0.len()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = u64> + '_ {
-        self.0.iter()
-    }
-
-    /// In-place set union: `self ∪= other`.
-    pub fn union_with(&mut self, other: &Bitmap) {
-        self.0 |= &other.0;
-    }
-
-    /// In-place set intersection: `self ∩= other`.
-    pub fn intersect_with(&mut self, other: &Bitmap) {
-        self.0 &= &other.0;
-    }
-
-    /// In-place set difference: `self \= other`.
-    pub fn subtract(&mut self, other: &Bitmap) {
-        self.0 -= &other.0;
-    }
-}
-
-impl FromIterator<u64> for Bitmap {
-    fn from_iter<I: IntoIterator<Item = u64>>(iter: I) -> Self {
-        Self(RoaringTreemap::from_iter(iter))
-    }
-}
-
-// ─── IndexTree (Tier-2 ordered value set) ─────────────────────────────
-
-mod index_tree;
-/// Adaptive Radix Tree ordered set of attribute values for a single
-/// attribute key, stored in an **index account** at [`index_address`].
-/// Provides O(log n) insert/remove, prefix-compressed deterministic
-/// serialisation, and ascending range/prefix iteration.
-pub use index_tree::IndexTree;
-
-// ─── Entity RLP ───────────────────────────────────────────────────────
-
-/// Prefix prepended to the RLP bytes before storing as account `code`.
-/// `0xFE` is the EVM `INVALID` opcode — any `CALL` to an entity
-/// address halts immediately.
-pub const ENTITY_CODE_PREFIX: u8 = 0xFE;
-
-/// Attribute `value_type` tags. Must match
-/// `Entity.ATTR_{UINT,STRING,ENTITY_KEY}` in EntityRegistry.sol and
-/// the ABI shape decoded by the precompile.
-pub const ATTR_UINT: u8 = 1;
-pub const ATTR_STRING: u8 = 2;
-pub const ATTR_ENTITY_KEY: u8 = 3;
-
-/// On-trie representation of an entity. Encoded as
-/// `0xFE || RLP(EntityRlp)` and stored as the entity-account `code`.
-#[derive(Debug, Clone, PartialEq, Eq, RlpEncodable, RlpDecodable)]
-pub struct EntityRlp {
-    pub payload: Vec<u8>,
-    pub creator: Address,
-    pub created_at_block: u64,
-    pub owner: Address,
-    pub expires_at: u64,
-    pub content_type: Vec<u8>,
-    pub key: B256,
-    pub attributes: Vec<Attribute>,
-    /// Block number of the most recent mutation (CREATE / UPDATE /
-    /// EXTEND / TRANSFER) — equals `created_at_block` until the
-    /// entity is first modified.
-    pub last_modified_at_block: u64,
-}
-
-/// Discriminated `(key, value)` attribute mirroring the precompile
-/// ABI. `value_type` selects how `value` should be interpreted:
-/// `ATTR_UINT` → 32-byte big-endian uint256; `ATTR_STRING` → opaque
-/// bytes (UTF-8 by SDK convention); `ATTR_ENTITY_KEY` → 32 raw
-/// bytes of an entity key.
-#[derive(Debug, Clone, PartialEq, Eq, RlpEncodable, RlpDecodable)]
-pub struct Attribute {
-    pub key: Vec<u8>,
-    pub value_type: u8,
-    pub value: Vec<u8>,
-}
-
-impl EntityRlp {
-    /// Encode for storage as account code: `0xFE || RLP(self)`.
-    pub fn encode_as_code(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(1 + self.length());
-        buf.push(ENTITY_CODE_PREFIX);
-        self.encode(&mut buf);
-        buf
-    }
-
-    /// Decode from account code. Verifies the `0xFE` prefix and then
-    /// RLP-decodes the rest.
-    pub fn decode_from_code(code: &[u8]) -> Result<Self> {
-        ensure!(
-            code.first() == Some(&ENTITY_CODE_PREFIX),
-            "entity code is missing the {:#x} prefix",
-            ENTITY_CODE_PREFIX,
-        );
-        let mut rest = &code[1..];
-        Self::decode(&mut rest).map_err(|e| eyre::eyre!("RLP decode of EntityRlp failed: {e}"))
-    }
-}
 
 // ─── State adapter trait ──────────────────────────────────────────────
 
 /// Abstract state interface the op handlers run against.
 ///
-/// In production, [`arkiv_node::precompile`] implements this over
-/// revm's `EvmInternals`. For tests, [`test_utils::InMemoryStateAdapter`]
+/// In production, [`arkiv_node::state_adapter`] implements this over
+/// revm's `EvmInternals`. For tests, [`test_utils::InMemoryStore`]
 /// implements it over an [`test_utils::InMemoryStateDb`].
 ///
-/// Conventions:
-/// - `code` returns an empty `Vec` for absent / empty-coded accounts.
-/// - `set_code` creates the account if needed and sets `nonce = 1` if
-///   it was previously zero.
-/// - `tombstone_code` clears the code but preserves `nonce = 1` so
-///   EIP-161 doesn't prune the account.
-/// - `ensure_account_persists` raises the account's nonce to at least
-///   1 so EIP-161 doesn't prune it at end-of-tx. Idempotent. Used by
-///   the entitydb to lazily materialise the system account on its
-///   first storage write — without it, an empty-coded account that
-///   only receives storage writes is still EIP-161-empty (the check
-///   ignores storage) and gets pruned along with its slots.
-pub trait StateAdapter {
-    fn code(&mut self, addr: &Address) -> Result<Vec<u8>>;
-    fn set_code(&mut self, addr: &Address, code: Vec<u8>) -> Result<()>;
-    fn tombstone_code(&mut self, addr: &Address) -> Result<()>;
-    fn storage(&mut self, addr: &Address, slot: B256) -> Result<B256>;
-    fn set_storage(&mut self, addr: &Address, slot: B256, value: B256) -> Result<()>;
-    fn ensure_account_persists(&mut self, addr: &Address) -> Result<()>;
+/// The trait is typed end-to-end — op handlers never see raw bytes or
+/// storage slots. Four account categories, each with its own
+/// accessors:
+///
+/// - **System-account slots** (`get_entity_count` / `set_entity_count`,
+///   `get_id_to_addr` / `set_id_to_addr`, `get_addr_to_id` /
+///   `set_addr_to_id`, `get_nonce` / `set_nonce`) — the global entity
+///   counter, the ID ↔ address maps, and per-EOA minting nonces.
+///   Slot derivation and value encoding are impl details (the impls
+///   use [`slot_entity_count`] etc. and [`u64_to_storage`] etc.).
+/// - **Entity accounts** (`get_entity` / `set_entity` /
+///   `tombstone_entity`) — code carries `0xFE || RLP(Entity)`.
+/// - **Tier-1 pair-bitmap accounts** (`get_pair_bitmap` /
+///   `set_pair_bitmap`) — code carries a roaring64 bitmap of entity
+///   IDs, content-addressed in the trie. Addressed by
+///   `(annot_key, annot_val)`; impls derive the account address via
+///   [`pair_address`].
+/// - **Tier-2 ART index accounts** (`get_index_tree` /
+///   `set_index_tree` / `tombstone_index_tree`) — code carries a
+///   serialised [`IndexTree`]. Addressed by `attr_key`; impls derive
+///   the account address via [`index_address`].
+///
+/// Conventions on reads:
+/// - `get_entity` returns `Ok(None)` for an absent or tombstoned
+///   account.
+/// - `get_pair_bitmap` returns an empty [`Bitmap`] for an absent /
+///   empty pair account — not an error.
+/// - `get_index_tree` returns an empty [`IndexTree`] for an absent /
+///   tombstoned index account — not an error.
+/// - System-account getters return the zero value (`0` / `Address::ZERO`)
+///   for never-written slots; callers know the context (e.g. an entity
+///   ID of 0 is valid because creation has been verified upstream).
+///
+/// Conventions on writes:
+/// - Setters take owned values so a caching impl can park them
+///   directly without cloning.
+/// - System-slot setters and account-code setters materialise the
+///   underlying account if needed (raise `nonce` to ≥ 1 so EIP-161
+///   doesn't prune at end-of-tx).
+/// - `tombstone_*` clears the code but preserves `nonce = 1`. Pair
+///   accounts are never tombstoned — an empty bitmap is serialised
+///   normally.
+pub trait Store {
+    // ── System-account slots ───────────────────────────────────────
+
+    fn get_entity_count(&mut self) -> Result<u64>;
+    fn set_entity_count(&mut self, count: u64) -> Result<()>;
+
+    fn get_id_to_addr(&mut self, id: u64) -> Result<Address>;
+    fn set_id_to_addr(&mut self, id: u64, addr: Address) -> Result<()>;
+
+    fn get_addr_to_id(&mut self, addr: &Address) -> Result<u64>;
+    fn set_addr_to_id(&mut self, addr: &Address, id: u64) -> Result<()>;
+
+    fn get_nonce(&mut self, caller: &Address) -> Result<u32>;
+    fn set_nonce(&mut self, caller: &Address, nonce: u32) -> Result<()>;
+
+    // ── Entity accounts ────────────────────────────────────────────
+
+    fn get_entity(&mut self, addr: &Address) -> Result<Option<Entity>>;
+    fn set_entity(&mut self, addr: &Address, entity: Entity) -> Result<()>;
+    fn tombstone_entity(&mut self, addr: &Address) -> Result<()>;
+
+    // ── Tier-1 pair-bitmap accounts ────────────────────────────────
+
+    fn get_pair_bitmap(&mut self, annot_key: &[u8], annot_val: &[u8]) -> Result<Bitmap>;
+    fn set_pair_bitmap(
+        &mut self,
+        annot_key: &[u8],
+        annot_val: &[u8],
+        bitmap: Bitmap,
+    ) -> Result<()>;
+
+    // ── Tier-2 ART index accounts ──────────────────────────────────
+
+    fn get_index_tree(&mut self, attr_key: &[u8]) -> Result<IndexTree>;
+    fn set_index_tree(&mut self, attr_key: &[u8], tree: IndexTree) -> Result<()>;
+    fn tombstone_index_tree(&mut self, attr_key: &[u8]) -> Result<()>;
 }
 
 // ─── Op handlers ──────────────────────────────────────────────────────
@@ -456,7 +231,7 @@ pub trait StateAdapter {
         n_attrs = attributes.len(),
     ),
 )]
-pub fn create<S: StateAdapter>(
+pub fn create<S: Store>(
     state: &mut S,
     sender: Address,
     entity_key: B256,
@@ -467,27 +242,13 @@ pub fn create<S: StateAdapter>(
     attributes: Vec<Attribute>,
 ) -> Result<()> {
     // 1) Allocate entity_id.
-    let count_slot = slot_entity_count();
-    let prev = state.storage(&SYSTEM_ACCOUNT_ADDRESS, count_slot)?;
-    let entity_id = storage_to_u64(prev);
-    state.set_storage(
-        &SYSTEM_ACCOUNT_ADDRESS,
-        count_slot,
-        u64_to_storage(entity_id + 1),
-    )?;
+    let entity_id = state.get_entity_count()?;
+    state.set_entity_count(entity_id + 1)?;
 
     // 2) Write ID maps.
     let entity_addr = entity_address(entity_key);
-    state.set_storage(
-        &SYSTEM_ACCOUNT_ADDRESS,
-        slot_id_to_addr(entity_id),
-        address_to_storage(entity_addr),
-    )?;
-    state.set_storage(
-        &SYSTEM_ACCOUNT_ADDRESS,
-        slot_addr_to_id(entity_addr),
-        u64_to_storage(entity_id),
-    )?;
+    state.set_id_to_addr(entity_id, entity_addr)?;
+    state.set_addr_to_id(&entity_addr, entity_id)?;
 
     // 3) Insert into every bitmap (built-in + user).
     for (k, v) in built_in_pairs(
@@ -505,7 +266,7 @@ pub fn create<S: StateAdapter>(
     }
 
     // 4) Write the entity RLP.
-    let entity = EntityRlp {
+    let entity = Entity {
         payload,
         creator: sender,
         created_at_block: current_block,
@@ -516,7 +277,7 @@ pub fn create<S: StateAdapter>(
         attributes,
         last_modified_at_block: current_block,
     };
-    state.set_code(&entity_addr, entity.encode_as_code())?;
+    state.set_entity(&entity_addr, entity)?;
 
     Ok(())
 }
@@ -535,7 +296,7 @@ pub fn create<S: StateAdapter>(
         n_attrs = attributes.len(),
     ),
 )]
-pub fn update<S: StateAdapter>(
+pub fn update<S: Store>(
     state: &mut S,
     entity_key: B256,
     current_block: u64,
@@ -544,7 +305,7 @@ pub fn update<S: StateAdapter>(
     attributes: Vec<Attribute>,
 ) -> Result<()> {
     let entity_addr = entity_address(entity_key);
-    let entity_id = read_entity_id(state, entity_addr)?;
+    let entity_id = state.get_addr_to_id(&entity_addr)?;
     let mut entity = read_entity(state, entity_addr)?;
 
     // Annotation diff. Built-ins that don't change on UPDATE
@@ -560,7 +321,7 @@ pub fn update<S: StateAdapter>(
     entity.content_type = content_type;
     entity.attributes = attributes;
     entity.last_modified_at_block = current_block;
-    state.set_code(&entity_addr, entity.encode_as_code())?;
+    state.set_entity(&entity_addr, entity)?;
 
     Ok(())
 }
@@ -568,14 +329,14 @@ pub fn update<S: StateAdapter>(
 /// Extend an entity's `expires_at`. Updates the `$expiration` bitmap
 /// and re-encodes the RLP with the new value.
 #[tracing::instrument(name = "entitydb_extend", level = "debug", skip_all)]
-pub fn extend<S: StateAdapter>(
+pub fn extend<S: Store>(
     state: &mut S,
     entity_key: B256,
     current_block: u64,
     new_expires_at: u64,
 ) -> Result<()> {
     let entity_addr = entity_address(entity_key);
-    let entity_id = read_entity_id(state, entity_addr)?;
+    let entity_id = state.get_addr_to_id(&entity_addr)?;
     let mut entity = read_entity(state, entity_addr)?;
 
     remove_from_pair_bitmap(
@@ -593,7 +354,7 @@ pub fn extend<S: StateAdapter>(
 
     entity.expires_at = new_expires_at;
     entity.last_modified_at_block = current_block;
-    state.set_code(&entity_addr, entity.encode_as_code())?;
+    state.set_entity(&entity_addr, entity)?;
 
     Ok(())
 }
@@ -601,14 +362,14 @@ pub fn extend<S: StateAdapter>(
 /// Hand an entity's ownership to `new_owner`. Updates the `$owner`
 /// bitmap and re-encodes the RLP.
 #[tracing::instrument(name = "entitydb_transfer", level = "debug", skip_all)]
-pub fn transfer<S: StateAdapter>(
+pub fn transfer<S: Store>(
     state: &mut S,
     entity_key: B256,
     current_block: u64,
     new_owner: Address,
 ) -> Result<()> {
     let entity_addr = entity_address(entity_key);
-    let entity_id = read_entity_id(state, entity_addr)?;
+    let entity_id = state.get_addr_to_id(&entity_addr)?;
     let mut entity = read_entity(state, entity_addr)?;
 
     remove_from_pair_bitmap(state, ANNOT_OWNER, &encode_address(entity.owner), entity_id)?;
@@ -616,7 +377,7 @@ pub fn transfer<S: StateAdapter>(
 
     entity.owner = new_owner;
     entity.last_modified_at_block = current_block;
-    state.set_code(&entity_addr, entity.encode_as_code())?;
+    state.set_entity(&entity_addr, entity)?;
 
     Ok(())
 }
@@ -625,9 +386,9 @@ pub fn transfer<S: StateAdapter>(
 /// clears both ID-map slots on the Arkiv account, and tombstones the
 /// entity account (`code = nil`, `nonce = 1`).
 #[tracing::instrument(name = "entitydb_delete", level = "debug", skip_all)]
-pub fn delete<S: StateAdapter>(state: &mut S, entity_key: B256) -> Result<()> {
+pub fn delete<S: Store>(state: &mut S, entity_key: B256) -> Result<()> {
     let entity_addr = entity_address(entity_key);
-    let entity_id = read_entity_id(state, entity_addr)?;
+    let entity_id = state.get_addr_to_id(&entity_addr)?;
     let entity = read_entity(state, entity_addr)?;
 
     for (k, v) in built_in_pairs(
@@ -645,19 +406,11 @@ pub fn delete<S: StateAdapter>(state: &mut S, entity_key: B256) -> Result<()> {
     }
 
     // Clear ID-map slots.
-    state.set_storage(
-        &SYSTEM_ACCOUNT_ADDRESS,
-        slot_id_to_addr(entity_id),
-        B256::ZERO,
-    )?;
-    state.set_storage(
-        &SYSTEM_ACCOUNT_ADDRESS,
-        slot_addr_to_id(entity_addr),
-        B256::ZERO,
-    )?;
+    state.set_id_to_addr(entity_id, Address::ZERO)?;
+    state.set_addr_to_id(&entity_addr, 0)?;
 
     // Tombstone — keeps nonce=1 to defeat EIP-161.
-    state.tombstone_code(&entity_addr)?;
+    state.tombstone_entity(&entity_addr)?;
 
     Ok(())
 }
@@ -665,23 +418,16 @@ pub fn delete<S: StateAdapter>(state: &mut S, entity_key: B256) -> Result<()> {
 /// Identical state path to [`delete`]. The contract has already
 /// validated `block.number > expiresAt`.
 #[tracing::instrument(name = "entitydb_expire", level = "debug", skip_all)]
-pub fn expire<S: StateAdapter>(state: &mut S, entity_key: B256) -> Result<()> {
+pub fn expire<S: Store>(state: &mut S, entity_key: B256) -> Result<()> {
     delete(state, entity_key)
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────
 
-fn read_entity<S: StateAdapter>(state: &mut S, entity_addr: Address) -> Result<EntityRlp> {
-    let code = state.code(&entity_addr)?;
-    ensure!(!code.is_empty(), "no entity at {entity_addr}");
-    EntityRlp::decode_from_code(&code)
-}
-
-fn read_entity_id<S: StateAdapter>(state: &mut S, entity_addr: Address) -> Result<u64> {
-    let slot = slot_addr_to_id(entity_addr);
-    Ok(storage_to_u64(
-        state.storage(&SYSTEM_ACCOUNT_ADDRESS, slot)?,
-    ))
+fn read_entity<S: Store>(state: &mut S, entity_addr: Address) -> Result<Entity> {
+    state
+        .get_entity(&entity_addr)?
+        .ok_or_else(|| eyre::eyre!("no entity at {entity_addr}"))
 }
 
 /// All built-in `(key, value)` pairs for an entity. Used by `create`
@@ -734,7 +480,7 @@ fn updatable_pairs(content_type: &[u8], attributes: &[Attribute]) -> Vec<(Vec<u8
 
 /// Diff two `(key, value)` pair sets and apply removals + insertions
 /// to the corresponding pair bitmaps.
-fn apply_pair_diff<S: StateAdapter>(
+fn apply_pair_diff<S: Store>(
     state: &mut S,
     old: &[(Vec<u8>, Vec<u8>)],
     new: &[(Vec<u8>, Vec<u8>)],
@@ -752,48 +498,49 @@ fn apply_pair_diff<S: StateAdapter>(
     Ok(())
 }
 
-fn insert_into_pair_bitmap<S: StateAdapter>(
+fn insert_into_pair_bitmap<S: Store>(
     state: &mut S,
     annot_key: &[u8],
     annot_val: &[u8],
     entity_id: u64,
 ) -> Result<()> {
-    let mut bitmap = read_pair_bitmap(state, annot_key, annot_val)?;
+    let mut bitmap = state.get_pair_bitmap(annot_key, annot_val)?;
     let was_empty = bitmap.is_empty();
     bitmap.insert(entity_id);
-    state.set_code(&pair_address(annot_key, annot_val), bitmap.to_bytes())?;
+    state.set_pair_bitmap(annot_key, annot_val, bitmap)?;
     // Tier-2: insert the value into the index tree on first use of this pair.
     if was_empty {
-        let mut tree = read_index_tree(state, annot_key)?;
+        let mut tree = state.get_index_tree(annot_key)?;
         tree.insert(annot_val.to_vec());
-        state.set_code(&index_address(annot_key), tree.to_bytes())?;
+        state.set_index_tree(annot_key, tree)?;
     }
     Ok(())
 }
 
-fn remove_from_pair_bitmap<S: StateAdapter>(
+fn remove_from_pair_bitmap<S: Store>(
     state: &mut S,
     annot_key: &[u8],
     annot_val: &[u8],
     entity_id: u64,
 ) -> Result<()> {
-    let mut bitmap = read_pair_bitmap(state, annot_key, annot_val)?;
+    let mut bitmap = state.get_pair_bitmap(annot_key, annot_val)?;
     if bitmap.is_empty() {
         // Bitmap doesn't exist yet — nothing to remove. Shouldn't
         // happen under well-formed ops; tolerated.
         return Ok(());
     }
     bitmap.remove(entity_id);
-    state.set_code(&pair_address(annot_key, annot_val), bitmap.to_bytes())?;
+    let now_empty = bitmap.is_empty();
+    state.set_pair_bitmap(annot_key, annot_val, bitmap)?;
     // Tier-2: remove the value from the index tree when the last entity
     // using this pair is gone.
-    if bitmap.is_empty() {
-        let mut tree = read_index_tree(state, annot_key)?;
+    if now_empty {
+        let mut tree = state.get_index_tree(annot_key)?;
         tree.remove(annot_val);
         if tree.is_empty() {
-            state.tombstone_code(&index_address(annot_key))?;
+            state.tombstone_index_tree(annot_key)?;
         } else {
-            state.set_code(&index_address(annot_key), tree.to_bytes())?;
+            state.set_index_tree(annot_key, tree)?;
         }
     }
     Ok(())
@@ -803,157 +550,39 @@ fn remove_from_pair_bitmap<S: StateAdapter>(
 
 /// Read the pair-account bitmap for `(annot_key, annot_val)`. An
 /// account with empty code (never written, or tombstoned) decodes to
-/// an empty [`Bitmap`] — not an error.
-pub fn read_pair_bitmap<S: StateAdapter>(
+/// an empty [`Bitmap`] — not an error. Thin wrapper around
+/// [`Store::get_pair_bitmap`] for ergonomic call sites.
+pub fn read_pair_bitmap<S: Store>(
     state: &mut S,
     annot_key: &[u8],
     annot_val: &[u8],
 ) -> Result<Bitmap> {
-    let pair_addr = pair_address(annot_key, annot_val);
-    let code = state.code(&pair_addr)?;
-    if code.is_empty() {
-        Ok(Bitmap::new())
-    } else {
-        Bitmap::from_bytes(&code)
-    }
+    state.get_pair_bitmap(annot_key, annot_val)
 }
 
 /// Bitmap of every live entity ID — the `$all` built-in bitmap.
-/// Convenience wrapper around [`read_pair_bitmap`].
-pub fn all_entities<S: StateAdapter>(state: &mut S) -> Result<Bitmap> {
-    read_pair_bitmap(state, ANNOT_ALL, b"")
+pub fn all_entities<S: Store>(state: &mut S) -> Result<Bitmap> {
+    state.get_pair_bitmap(ANNOT_ALL, b"")
 }
 
 /// Read the Tier-2 [`IndexTree`] for `attr_key`. An absent or
 /// tombstoned index account decodes to an empty tree — not an error.
-pub fn read_index_tree<S: StateAdapter>(state: &mut S, attr_key: &[u8]) -> Result<IndexTree> {
-    let code = state.code(&index_address(attr_key))?;
-    if code.is_empty() {
-        Ok(IndexTree::new())
-    } else {
-        IndexTree::from_bytes(&code)
-    }
+pub fn read_index_tree<S: Store>(state: &mut S, attr_key: &[u8]) -> Result<IndexTree> {
+    state.get_index_tree(attr_key)
 }
 
-/// Resolve a query-hit entity ID to its on-trie [`EntityRlp`].
+/// Resolve a query-hit entity ID to its on-trie [`Entity`].
 ///
 /// Returns `Ok(None)` if the ID's `id_to_addr` slot is zero (never
 /// written, or cleared by `delete` / `expire`) or if the entity
 /// account has empty code (tombstoned). Returns `Err` only on
 /// underlying state errors or malformed entity bytes.
-pub fn resolve_id<S: StateAdapter>(state: &mut S, id: u64) -> Result<Option<EntityRlp>> {
-    let raw = state.storage(&SYSTEM_ACCOUNT_ADDRESS, slot_id_to_addr(id))?;
-    if raw == B256::ZERO {
+pub fn resolve_id<S: Store>(state: &mut S, id: u64) -> Result<Option<Entity>> {
+    let entity_addr = state.get_id_to_addr(id)?;
+    if entity_addr == Address::ZERO {
         return Ok(None);
     }
-    let entity_addr = Address::from_slice(&raw.0[12..]);
-    let code = state.code(&entity_addr)?;
-    if code.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(EntityRlp::decode_from_code(&code)?))
-}
-
-// ─── Test backend (in-memory state DB) ────────────────────────────────
-
-#[cfg(feature = "test-utils")]
-pub mod test_utils {
-    //! In-memory [`StateAdapter`] implementation, suitable for unit
-    //! tests in this crate and for downstream test code that wants to
-    //! drive the op handlers without a revm context.
-
-    use super::*;
-    use std::collections::HashMap;
-
-    /// Per-account state: nonce, code, and the storage map.
-    #[derive(Debug, Clone, Default, PartialEq, Eq)]
-    pub struct AccountState {
-        pub nonce: u64,
-        pub code: Vec<u8>,
-        pub storage: HashMap<B256, B256>,
-    }
-
-    /// Toy state DB: account address → [`AccountState`]. Stand-in for
-    /// revm's state DB during tests.
-    #[derive(Debug, Clone, Default)]
-    pub struct InMemoryStateDb {
-        accounts: HashMap<Address, AccountState>,
-    }
-
-    impl InMemoryStateDb {
-        pub fn new() -> Self {
-            Self::default()
-        }
-
-        pub fn account(&self, addr: &Address) -> Option<&AccountState> {
-            self.accounts.get(addr)
-        }
-
-        pub fn account_mut(&mut self, addr: &Address) -> &mut AccountState {
-            self.accounts.entry(*addr).or_default()
-        }
-    }
-
-    /// Thin [`StateAdapter`] over a borrowed [`InMemoryStateDb`].
-    pub struct InMemoryStateAdapter<'a> {
-        db: &'a mut InMemoryStateDb,
-    }
-
-    impl<'a> InMemoryStateAdapter<'a> {
-        pub fn new(db: &'a mut InMemoryStateDb) -> Self {
-            Self { db }
-        }
-    }
-
-    impl StateAdapter for InMemoryStateAdapter<'_> {
-        fn code(&mut self, addr: &Address) -> Result<Vec<u8>> {
-            Ok(self
-                .db
-                .account(addr)
-                .map(|a| a.code.clone())
-                .unwrap_or_default())
-        }
-
-        fn set_code(&mut self, addr: &Address, code: Vec<u8>) -> Result<()> {
-            let acc = self.db.account_mut(addr);
-            acc.code = code;
-            if acc.nonce == 0 {
-                acc.nonce = 1;
-            }
-            Ok(())
-        }
-
-        fn tombstone_code(&mut self, addr: &Address) -> Result<()> {
-            let acc = self.db.account_mut(addr);
-            acc.code = Vec::new();
-            // Preserve nonce >= 1 to defeat EIP-161 pruning.
-            if acc.nonce == 0 {
-                acc.nonce = 1;
-            }
-            Ok(())
-        }
-
-        fn storage(&mut self, addr: &Address, slot: B256) -> Result<B256> {
-            Ok(self
-                .db
-                .account(addr)
-                .and_then(|a| a.storage.get(&slot).copied())
-                .unwrap_or_default())
-        }
-
-        fn set_storage(&mut self, addr: &Address, slot: B256, value: B256) -> Result<()> {
-            self.db.account_mut(addr).storage.insert(slot, value);
-            Ok(())
-        }
-
-        fn ensure_account_persists(&mut self, addr: &Address) -> Result<()> {
-            let acc = self.db.account_mut(addr);
-            if acc.nonce == 0 {
-                acc.nonce = 1;
-            }
-            Ok(())
-        }
-    }
+    state.get_entity(&entity_addr)
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────
@@ -961,7 +590,7 @@ pub mod test_utils {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{InMemoryStateAdapter, InMemoryStateDb};
+    use crate::test_utils::MemStore;
     use alloy_primitives::U256;
     use alloy_primitives::b256;
 
@@ -993,66 +622,7 @@ mod tests {
         assert_eq!(a.to_bytes(), b.to_bytes());
     }
 
-    #[test]
-    fn entity_rlp_roundtrip_via_code() {
-        let original = EntityRlp {
-            payload: b"hello".to_vec(),
-            creator: Address::repeat_byte(0xaa),
-            created_at_block: 1234,
-            owner: Address::repeat_byte(0xbb),
-            expires_at: 99_999,
-            content_type: b"application/json".to_vec(),
-            key: b256!("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
-            attributes: vec![
-                Attribute {
-                    key: b"title".to_vec(),
-                    value_type: ATTR_STRING,
-                    value: b"the answer".to_vec(),
-                },
-                Attribute {
-                    key: b"priority".to_vec(),
-                    value_type: ATTR_UINT,
-                    value: U256::from(42).to_be_bytes::<32>().to_vec(),
-                },
-                Attribute {
-                    key: b"replyTo".to_vec(),
-                    value_type: ATTR_ENTITY_KEY,
-                    value: vec![0xab; 32],
-                },
-            ],
-            last_modified_at_block: 1234,
-        };
-        let code = original.encode_as_code();
-        assert_eq!(code[0], ENTITY_CODE_PREFIX);
-        assert_eq!(
-            EntityRlp::decode_from_code(&code).expect("decode"),
-            original
-        );
-    }
-
-    #[test]
-    fn entity_rlp_decode_requires_fe_prefix() {
-        let entity = EntityRlp {
-            payload: vec![],
-            creator: Address::ZERO,
-            created_at_block: 0,
-            owner: Address::ZERO,
-            expires_at: 0,
-            content_type: vec![],
-            key: B256::ZERO,
-            attributes: vec![],
-            last_modified_at_block: 0,
-        };
-        let mut bad = entity.encode_as_code();
-        bad[0] = 0x00;
-        assert!(EntityRlp::decode_from_code(&bad).is_err());
-    }
-
-    // ─── Op handlers (against InMemoryStateAdapter) ───────────────────────
-
-    fn fresh_db() -> InMemoryStateDb {
-        InMemoryStateDb::default()
-    }
+    // ─── Op handlers (against MemStore) ─────────────────────────────
 
     fn alice() -> Address {
         Address::repeat_byte(0xaa)
@@ -1064,236 +634,191 @@ mod tests {
         B256::from([n; 32])
     }
 
-    #[track_caller]
-    fn read_bitmap(db: &InMemoryStateDb, annot_key: &[u8], annot_val: &[u8]) -> Bitmap {
-        let addr = pair_address(annot_key, annot_val);
-        let code = db
-            .account(&addr)
-            .map(|a| a.code.clone())
-            .unwrap_or_default();
-        if code.is_empty() {
-            Bitmap::new()
-        } else {
-            Bitmap::from_bytes(&code).expect("decode bitmap")
-        }
-    }
-
     #[test]
     fn create_writes_entity_and_all_bitmaps() {
-        let mut db = fresh_db();
+        let mut state = MemStore::new();
         let key = entity_key_n(0x42);
-        {
-            let mut state = InMemoryStateAdapter::new(&mut db);
-            create(
-                &mut state,
-                alice(),
-                key,
-                100,
-                10,
-                b"hello".to_vec(),
-                b"text/plain".to_vec(),
-                vec![
-                    Attribute {
-                        key: b"tag".to_vec(),
-                        value_type: ATTR_STRING,
-                        value: b"music".to_vec(),
-                    },
-                    Attribute {
-                        key: b"score".to_vec(),
-                        value_type: ATTR_UINT,
-                        value: U256::from(7).to_be_bytes::<32>().to_vec(),
-                    },
-                ],
-            )
-            .expect("create");
-        }
+        create(
+            &mut state,
+            alice(),
+            key,
+            100,
+            10,
+            b"hello".to_vec(),
+            b"text/plain".to_vec(),
+            vec![
+                Attribute {
+                    key: b"tag".to_vec(),
+                    value_type: ATTR_STRING,
+                    value: b"music".to_vec(),
+                },
+                Attribute {
+                    key: b"score".to_vec(),
+                    value_type: ATTR_UINT,
+                    value: U256::from(7).to_be_bytes::<32>().to_vec(),
+                },
+            ],
+        )
+        .expect("create");
 
-        // Entity-account code written; round-trips through EntityRlp.
-        let entity_addr = entity_address(key);
-        let code = db.account(&entity_addr).expect("entity acc").code.clone();
-        let entity = EntityRlp::decode_from_code(&code).expect("decode");
+        // Entity present with the expected fields.
+        let entity = state
+            .get_entity(&entity_address(key))
+            .unwrap()
+            .expect("entity present");
         assert_eq!(entity.owner, alice());
         assert_eq!(entity.creator, alice());
         assert_eq!(entity.expires_at, 100);
         assert_eq!(entity.created_at_block, 10);
 
         // System counter advanced to 1; this entity got id=0.
-        let count = db
-            .account(&SYSTEM_ACCOUNT_ADDRESS)
-            .expect("system acc")
-            .storage
-            .get(&slot_entity_count())
-            .copied()
-            .unwrap_or_default();
-        assert_eq!(storage_to_u64(count), 1);
+        assert_eq!(state.entity_count, 1);
 
         // All built-ins + user annotations contain entity_id=0.
-        assert!(read_bitmap(&db, ANNOT_ALL, b"").contains(0));
-        assert!(read_bitmap(&db, ANNOT_OWNER, alice().as_slice()).contains(0));
-        assert!(read_bitmap(&db, ANNOT_EXPIRATION, &100u64.to_be_bytes()).contains(0));
-        assert!(read_bitmap(&db, ANNOT_CONTENT_TYPE, b"text/plain").contains(0));
-        assert!(read_bitmap(&db, b"tag", b"music").contains(0));
-        assert!(read_bitmap(&db, b"score", &U256::from(7).to_be_bytes::<32>()).contains(0));
+        assert!(state.get_pair_bitmap(ANNOT_ALL, b"").unwrap().contains(0));
+        assert!(state
+            .get_pair_bitmap(ANNOT_OWNER, alice().as_slice())
+            .unwrap()
+            .contains(0));
+        assert!(state
+            .get_pair_bitmap(ANNOT_EXPIRATION, &100u64.to_be_bytes())
+            .unwrap()
+            .contains(0));
+        assert!(state
+            .get_pair_bitmap(ANNOT_CONTENT_TYPE, b"text/plain")
+            .unwrap()
+            .contains(0));
+        assert!(state.get_pair_bitmap(b"tag", b"music").unwrap().contains(0));
+        assert!(state
+            .get_pair_bitmap(b"score", &U256::from(7).to_be_bytes::<32>())
+            .unwrap()
+            .contains(0));
     }
 
     #[test]
     fn transfer_moves_owner_bitmap() {
-        let mut db = fresh_db();
+        let mut state = MemStore::new();
         let key = entity_key_n(1);
-        {
-            let mut state = InMemoryStateAdapter::new(&mut db);
-            create(
-                &mut state,
-                alice(),
-                key,
-                100,
-                10,
-                vec![],
-                vec![],
-                vec![],
-            )
-            .unwrap();
-            transfer(&mut state, key, 20, bob()).unwrap();
-        }
-        assert!(!read_bitmap(&db, ANNOT_OWNER, alice().as_slice()).contains(0));
-        assert!(read_bitmap(&db, ANNOT_OWNER, bob().as_slice()).contains(0));
+        create(&mut state, alice(), key, 100, 10, vec![], vec![], vec![]).unwrap();
+        transfer(&mut state, key, 20, bob()).unwrap();
 
-        // Entity RLP reflects the new owner.
-        let entity_addr = entity_address(key);
-        let entity = EntityRlp::decode_from_code(&db.account(&entity_addr).unwrap().code).unwrap();
+        assert!(!state
+            .get_pair_bitmap(ANNOT_OWNER, alice().as_slice())
+            .unwrap()
+            .contains(0));
+        assert!(state
+            .get_pair_bitmap(ANNOT_OWNER, bob().as_slice())
+            .unwrap()
+            .contains(0));
+
+        let entity = state.get_entity(&entity_address(key)).unwrap().unwrap();
         assert_eq!(entity.owner, bob());
     }
 
     #[test]
     fn extend_moves_expiration_bitmap() {
-        let mut db = fresh_db();
+        let mut state = MemStore::new();
         let key = entity_key_n(2);
-        {
-            let mut state = InMemoryStateAdapter::new(&mut db);
-            create(
-                &mut state,
-                alice(),
-                key,
-                100,
-                10,
-                vec![],
-                vec![],
-                vec![],
-            )
-            .unwrap();
-            extend(&mut state, key, 20, 500).unwrap();
-        }
-        assert!(!read_bitmap(&db, ANNOT_EXPIRATION, &100u64.to_be_bytes()).contains(0));
-        assert!(read_bitmap(&db, ANNOT_EXPIRATION, &500u64.to_be_bytes()).contains(0));
+        create(&mut state, alice(), key, 100, 10, vec![], vec![], vec![]).unwrap();
+        extend(&mut state, key, 20, 500).unwrap();
 
-        let entity_addr = entity_address(key);
-        let entity = EntityRlp::decode_from_code(&db.account(&entity_addr).unwrap().code).unwrap();
+        assert!(!state
+            .get_pair_bitmap(ANNOT_EXPIRATION, &100u64.to_be_bytes())
+            .unwrap()
+            .contains(0));
+        assert!(state
+            .get_pair_bitmap(ANNOT_EXPIRATION, &500u64.to_be_bytes())
+            .unwrap()
+            .contains(0));
+
+        let entity = state.get_entity(&entity_address(key)).unwrap().unwrap();
         assert_eq!(entity.expires_at, 500);
     }
 
     #[test]
     fn update_diffs_only_changed_annotations() {
-        let mut db = fresh_db();
+        let mut state = MemStore::new();
         let key = entity_key_n(3);
-        {
-            let mut state = InMemoryStateAdapter::new(&mut db);
-            create(
-                &mut state,
-                alice(),
-                key,
-                100,
-                10,
-                vec![],
-                b"text/plain".to_vec(),
-                vec![Attribute {
-                    key: b"tag".to_vec(),
-                    value_type: ATTR_STRING,
-                    value: b"a".to_vec(),
-                }],
-            )
-            .unwrap();
-            // Change the tag value; keep content type the same.
-            update(
-                &mut state,
-                key,
-                20,
-                vec![0xff],
-                b"text/plain".to_vec(),
-                vec![Attribute {
-                    key: b"tag".to_vec(),
-                    value_type: ATTR_STRING,
-                    value: b"b".to_vec(),
-                }],
-            )
-            .unwrap();
-        }
+        create(
+            &mut state,
+            alice(),
+            key,
+            100,
+            10,
+            vec![],
+            b"text/plain".to_vec(),
+            vec![Attribute {
+                key: b"tag".to_vec(),
+                value_type: ATTR_STRING,
+                value: b"a".to_vec(),
+            }],
+        )
+        .unwrap();
+        // Change the tag value; keep content type the same.
+        update(
+            &mut state,
+            key,
+            20,
+            vec![0xff],
+            b"text/plain".to_vec(),
+            vec![Attribute {
+                key: b"tag".to_vec(),
+                value_type: ATTR_STRING,
+                value: b"b".to_vec(),
+            }],
+        )
+        .unwrap();
+
         // tag=a bitmap loses the entity, tag=b gains it.
-        assert!(!read_bitmap(&db, b"tag", b"a").contains(0));
-        assert!(read_bitmap(&db, b"tag", b"b").contains(0));
+        assert!(!state.get_pair_bitmap(b"tag", b"a").unwrap().contains(0));
+        assert!(state.get_pair_bitmap(b"tag", b"b").unwrap().contains(0));
         // content type unchanged → bitmap still contains it.
-        assert!(read_bitmap(&db, ANNOT_CONTENT_TYPE, b"text/plain").contains(0));
+        assert!(state
+            .get_pair_bitmap(ANNOT_CONTENT_TYPE, b"text/plain")
+            .unwrap()
+            .contains(0));
         // Owner/expiration untouched.
-        assert!(read_bitmap(&db, ANNOT_OWNER, alice().as_slice()).contains(0));
+        assert!(state
+            .get_pair_bitmap(ANNOT_OWNER, alice().as_slice())
+            .unwrap()
+            .contains(0));
     }
 
     #[test]
     fn delete_clears_bitmaps_and_tombstones_account() {
-        let mut db = fresh_db();
+        let mut state = MemStore::new();
         let key = entity_key_n(4);
         let entity_addr = entity_address(key);
-        {
-            let mut state = InMemoryStateAdapter::new(&mut db);
-            create(
-                &mut state,
-                alice(),
-                key,
-                100,
-                10,
-                vec![],
-                b"text/plain".to_vec(),
-                vec![],
-            )
-            .unwrap();
-            delete(&mut state, key).unwrap();
-        }
+        create(
+            &mut state,
+            alice(),
+            key,
+            100,
+            10,
+            vec![],
+            b"text/plain".to_vec(),
+            vec![],
+        )
+        .unwrap();
+        delete(&mut state, key).unwrap();
+
         // Bitmaps drop the entity.
-        assert!(!read_bitmap(&db, ANNOT_ALL, b"").contains(0));
-        assert!(!read_bitmap(&db, ANNOT_OWNER, alice().as_slice()).contains(0));
+        assert!(!state.get_pair_bitmap(ANNOT_ALL, b"").unwrap().contains(0));
+        assert!(!state
+            .get_pair_bitmap(ANNOT_OWNER, alice().as_slice())
+            .unwrap()
+            .contains(0));
 
-        // ID-map slots cleared.
-        let count_slot = slot_entity_count();
-        let _ = count_slot; // counter NOT decremented — only ID maps cleared.
-        let id_to_addr_slot = slot_id_to_addr(0);
-        assert_eq!(
-            db.account(&SYSTEM_ACCOUNT_ADDRESS)
-                .unwrap()
-                .storage
-                .get(&id_to_addr_slot)
-                .copied()
-                .unwrap_or_default(),
-            B256::ZERO
-        );
+        // ID maps cleared (counter not decremented — only the mapping
+        // for the deleted ID).
+        assert_eq!(state.get_id_to_addr(0).unwrap(), Address::ZERO);
+        assert_eq!(state.get_addr_to_id(&entity_addr).unwrap(), 0);
 
-        // Entity account tombstoned: code empty, nonce=1.
-        let acc = db.account(&entity_addr).expect("entity acc still exists");
-        assert!(acc.code.is_empty());
-        assert_eq!(acc.nonce, 1);
+        // Entity tombstoned.
+        assert!(state.get_entity(&entity_addr).unwrap().is_none());
     }
 
     // ─── IndexTree ───────────────────────────────────────────────────
-
-    fn read_art_raw(db: &InMemoryStateDb, attr_key: &[u8]) -> IndexTree {
-        let addr = index_address(attr_key);
-        let code = db
-            .account(&addr)
-            .map(|a| a.code.clone())
-            .unwrap_or_default();
-        if code.is_empty() {
-            IndexTree::new()
-        } else {
-            IndexTree::from_bytes(&code).expect("decode IndexTree")
-        }
-    }
 
     #[test]
     fn index_tree_round_trip() {
@@ -1341,13 +866,11 @@ mod tests {
 
     #[test]
     fn insert_pair_bitmap_writes_index_on_first_entity() {
-        let mut db = fresh_db();
+        let mut state = MemStore::new();
         let val = b"hello".to_vec();
-        {
-            let mut state = InMemoryStateAdapter::new(&mut db);
-            insert_into_pair_bitmap(&mut state, b"tag", &val, 0).unwrap();
-        }
-        let tree = read_art_raw(&db, b"tag");
+        insert_into_pair_bitmap(&mut state, b"tag", &val, 0).unwrap();
+
+        let tree = state.get_index_tree(b"tag").unwrap();
         let vals: Vec<Vec<u8>> = tree.iter_gte(b"").collect();
         assert_eq!(
             vals,
@@ -1356,54 +879,41 @@ mod tests {
         );
 
         // Second insert of same value — bitmap was non-empty, ART unchanged.
-        {
-            let mut state = InMemoryStateAdapter::new(&mut db);
-            insert_into_pair_bitmap(&mut state, b"tag", &val, 1).unwrap();
-        }
-        let tree2 = read_art_raw(&db, b"tag");
+        insert_into_pair_bitmap(&mut state, b"tag", &val, 1).unwrap();
+        let tree2 = state.get_index_tree(b"tag").unwrap();
         assert_eq!(tree2.iter_gte(b"").count(), 1);
     }
 
     #[test]
     fn remove_pair_bitmap_removes_index_on_last_entity() {
-        let mut db = fresh_db();
+        let mut state = MemStore::new();
         let val = b"hello".to_vec();
-        {
-            let mut state = InMemoryStateAdapter::new(&mut db);
-            insert_into_pair_bitmap(&mut state, b"tag", &val, 0).unwrap();
-            insert_into_pair_bitmap(&mut state, b"tag", &val, 1).unwrap();
-        }
+        insert_into_pair_bitmap(&mut state, b"tag", &val, 0).unwrap();
+        insert_into_pair_bitmap(&mut state, b"tag", &val, 1).unwrap();
 
         // Remove first entity — bitmap still has entity 1, ART unchanged.
-        {
-            let mut state = InMemoryStateAdapter::new(&mut db);
-            remove_from_pair_bitmap(&mut state, b"tag", &val, 0).unwrap();
-        }
+        remove_from_pair_bitmap(&mut state, b"tag", &val, 0).unwrap();
         assert!(
-            !read_art_raw(&db, b"tag").is_empty(),
+            !state.get_index_tree(b"tag").unwrap().is_empty(),
             "index should survive while entity 1 remains"
         );
 
         // Remove last entity — bitmap is now empty, index account tombstoned.
-        {
-            let mut state = InMemoryStateAdapter::new(&mut db);
-            remove_from_pair_bitmap(&mut state, b"tag", &val, 1).unwrap();
-        }
+        remove_from_pair_bitmap(&mut state, b"tag", &val, 1).unwrap();
         assert!(
-            read_art_raw(&db, b"tag").is_empty(),
+            state.get_index_tree(b"tag").unwrap().is_empty(),
             "index should be empty after last entity removed"
         );
     }
 
     #[test]
     fn expire_has_same_state_path_as_delete() {
-        let mut db_a = fresh_db();
-        let mut db_b = fresh_db();
+        let mut state_a = MemStore::new();
+        let mut state_b = MemStore::new();
         let key = entity_key_n(5);
-        for db in [&mut db_a, &mut db_b] {
-            let mut state = InMemoryStateAdapter::new(db);
+        for state in [&mut state_a, &mut state_b] {
             create(
-                &mut state,
+                state,
                 alice(),
                 key,
                 100,
@@ -1414,25 +924,29 @@ mod tests {
             )
             .unwrap();
         }
-        {
-            let mut state = InMemoryStateAdapter::new(&mut db_a);
-            delete(&mut state, key).unwrap();
-        }
-        {
-            let mut state = InMemoryStateAdapter::new(&mut db_b);
-            expire(&mut state, key).unwrap();
-        }
-        // Equal: both paths produce the same account map.
-        for addr in [
-            entity_address(key),
-            SYSTEM_ACCOUNT_ADDRESS,
-            pair_address(ANNOT_ALL, b""),
-            pair_address(ANNOT_OWNER, alice().as_slice()),
+        delete(&mut state_a, key).unwrap();
+        expire(&mut state_b, key).unwrap();
+
+        // Equal: both paths produce the same typed state.
+        let entity_addr = entity_address(key);
+        assert_eq!(
+            state_a.get_entity(&entity_addr).unwrap(),
+            state_b.get_entity(&entity_addr).unwrap(),
+        );
+        assert_eq!(state_a.entity_count, state_b.entity_count);
+        assert_eq!(
+            state_a.get_addr_to_id(&entity_addr).unwrap(),
+            state_b.get_addr_to_id(&entity_addr).unwrap(),
+        );
+        for (k, v) in [
+            (ANNOT_ALL, b"".as_slice()),
+            (ANNOT_OWNER, alice().as_slice()),
         ] {
             assert_eq!(
-                db_a.account(&addr),
-                db_b.account(&addr),
-                "mismatch at {addr}"
+                state_a.get_pair_bitmap(k, v).unwrap().to_bytes(),
+                state_b.get_pair_bitmap(k, v).unwrap().to_bytes(),
+                "mismatch on pair {:?}",
+                std::str::from_utf8(k).unwrap_or("?")
             );
         }
     }

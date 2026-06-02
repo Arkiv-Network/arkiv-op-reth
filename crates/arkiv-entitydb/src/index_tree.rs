@@ -51,7 +51,7 @@ const N48_NIL: u8 = 0xFF;
 
 // ─── Node ───────────────────────────────────────────────────────────────────
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 enum Node {
     #[default]
     Empty,
@@ -65,6 +65,7 @@ enum Node {
 
 // ─── Inner node structs ─────────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct N4 {
     prefix: Vec<u8>,
     has_end: bool,
@@ -73,6 +74,7 @@ struct N4 {
     ch: [Node; 4],
 }
 
+#[derive(Clone)]
 struct N16 {
     prefix: Vec<u8>,
     has_end: bool,
@@ -81,6 +83,7 @@ struct N16 {
     ch: [Node; 16],
 }
 
+#[derive(Clone)]
 struct N48 {
     prefix: Vec<u8>,
     has_end: bool,
@@ -89,6 +92,7 @@ struct N48 {
     ch: [Node; 48],
 }
 
+#[derive(Clone)]
 struct N256 {
     prefix: Vec<u8>,
     has_end: bool,
@@ -245,7 +249,7 @@ fn n256_to_n48(n256: N256) -> N48 {
 
 // ─── IndexTree ──────────────────────────────────────────────────────────────
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct IndexTree {
     root: Node,
     len: usize,

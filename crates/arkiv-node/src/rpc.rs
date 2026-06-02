@@ -8,7 +8,7 @@ use alloy_consensus::BlockHeader;
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{Address, B256, Bytes, U256};
 use arkiv_entitydb::query::{Page, PageParams, execute};
-use arkiv_entitydb::{ATTR_ENTITY_KEY, ATTR_STRING, ATTR_UINT, EntityRlp, all_entities};
+use arkiv_entitydb::{ATTR_ENTITY_KEY, ATTR_STRING, ATTR_UINT, Entity, all_entities};
 use async_trait::async_trait;
 use eyre::Result;
 use jsonrpsee::core::RpcResult;
@@ -17,7 +17,7 @@ use jsonrpsee::types::error::{ErrorObject, ErrorObjectOwned, INTERNAL_ERROR_CODE
 use reth_storage_api::{HeaderProvider, StateProviderBox, StateProviderFactory};
 use serde::{Deserialize, Serialize};
 
-use crate::state_adapter::ReadOnlyStateAdapter;
+use crate::state_adapter::ReadOnlyStore;
 
 const DEFAULT_PAGE_SIZE: u64 = 100;
 const MAX_PAGE_SIZE: u64 = 200;
@@ -188,7 +188,7 @@ where
     async fn get_entity_count(&self) -> RpcResult<u64> {
         let provider = self.provider.clone();
         tokio::task::spawn_blocking(move || -> Result<u64> {
-            let mut adapter = ReadOnlyStateAdapter::new(provider.latest()?);
+            let mut adapter = ReadOnlyStore::new(provider.latest()?);
             Ok(all_entities(&mut adapter)?.len())
         })
         .await
@@ -232,7 +232,7 @@ fn run_query<P: StateProviderFactory>(
     options: &QueryOptions,
 ) -> Result<QueryResponse> {
     let (state, block_number) = snapshot_for(&provider, options.at_block)?;
-    let mut adapter = ReadOnlyStateAdapter::new(state);
+    let mut adapter = ReadOnlyStore::new(state);
 
     let params = PageParams {
         page_size: options
@@ -329,7 +329,7 @@ impl ResolvedIncludeData {
     }
 }
 
-fn entity_data_from(e: EntityRlp, inc: &ResolvedIncludeData) -> EntityData {
+fn entity_data_from(e: Entity, inc: &ResolvedIncludeData) -> EntityData {
     let attributes = if inc.attributes {
         e.attributes
             .into_iter()
