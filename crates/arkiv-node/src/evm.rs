@@ -83,6 +83,7 @@ use reth_primitives_traits::{NodePrimitives, SealedBlock, SealedHeader};
 use arkiv_genesis::ARKIV_ADDRESS;
 
 use crate::precompile::arkiv_precompile;
+use crate::store::{ArkivOpBlockExecutorFactory, SessionCacheMap, new_session_cache_map};
 
 // ─────────────────────────────────────────────────────────────────────
 // ArkivOpEvmFactory — wraps OpEvmFactory<OpTx>; installs the precompile
@@ -91,21 +92,45 @@ use crate::precompile::arkiv_precompile;
 /// EVM factory that defers to the default OP factory and inserts the
 /// Arkiv precompile at [`ARKIV_ADDRESS`] on every fresh EVM
 /// (both canonical execution and inspector-instrumented contexts).
-#[derive(Debug, Clone, Default)]
+///
+/// Carries a clone of the per-node [`SessionCacheMap`] so each
+/// precompile closure can look up its [`crate::store::CacheStore`] by
+/// the session id beaconed via [`crate::store::ARKIV_SCRATCH_ADDRESS`].
+#[derive(Debug, Clone)]
 pub struct ArkivOpEvmFactory {
     inner: OpEvmFactory<OpTx>,
+    sessions: SessionCacheMap,
+}
+
+impl Default for ArkivOpEvmFactory {
+    fn default() -> Self {
+        Self {
+            inner: OpEvmFactory::<OpTx>::default(),
+            sessions: new_session_cache_map(),
+        }
+    }
 }
 
 impl ArkivOpEvmFactory {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(sessions: SessionCacheMap) -> Self {
+        Self {
+            inner: OpEvmFactory::<OpTx>::default(),
+            sessions,
+        }
+    }
+
+    /// Handle to the shared session-cache map. Cloned into the
+    /// BlockExecutor wrapper so it can insert / remove `CacheStore`s
+    /// under the session id minted at `apply_pre_execution_changes`.
+    pub fn sessions(&self) -> &SessionCacheMap {
+        &self.sessions
     }
 
     fn install<E>(&self, evm: &mut E)
     where
         E: Evm<Precompiles = PrecompilesMap>,
     {
-        let precompile = arkiv_precompile();
+        let precompile = arkiv_precompile(self.sessions.clone());
         evm.precompiles_mut()
             .apply_precompile(&ARKIV_ADDRESS, |_existing| Some(precompile));
     }
@@ -284,26 +309,54 @@ pub struct ArkivOpEvmConfig {
     /// constructed on the fly so the iterator returned by
     /// `tx_iterator_for_payload` can outlive the call.
     inner_default: DefaultEvmConfig,
+    /// Shared with the precompile closure and the BlockExecutor
+    /// wrapper. Cloning the EvmConfig clones the `Arc`, so
+    /// payload-build / canonical-exec / validation lanes all share
+    /// one registry of live `CacheStore`s per node.
+    sessions: SessionCacheMap,
+    /// The Arkiv BlockExecutor factory — wraps the inner
+    /// `OpBlockExecutorFactory` and layers session-id minting plus
+    /// (eventually) cache flushing. Owned here so
+    /// [`ConfigureEvm::block_executor_factory`] can hand out a
+    /// reference.
+    executor_factory: ArkivOpBlockExecutorFactory<InnerExecutorFactory>,
 }
+
+type InnerExecutorFactory = OpBlockExecutorFactory<
+    OpRethReceiptBuilder,
+    Arc<OpChainSpec>,
+    PostExecEvmFactoryAdapter<ArkivOpEvmFactory>,
+>;
 
 impl ArkivOpEvmConfig {
     pub fn new(chain_spec: Arc<OpChainSpec>) -> Self {
-        let executor_factory = OpBlockExecutorFactory::new(
+        let sessions = new_session_cache_map();
+        let inner_factory = OpBlockExecutorFactory::new(
             OpRethReceiptBuilder::default(),
             chain_spec.clone(),
-            PostExecEvmFactoryAdapter::new(ArkivOpEvmFactory::new()),
+            PostExecEvmFactoryAdapter::new(ArkivOpEvmFactory::new(sessions.clone())),
         );
         let inner = OpEvmConfig {
             block_assembler: OpBlockAssembler::new(chain_spec.clone()),
-            executor_factory,
+            executor_factory: inner_factory.clone(),
             sdm_enabled: false,
             _pd: core::marker::PhantomData,
         };
         let inner_default = OpEvmConfig::new(chain_spec, OpRethReceiptBuilder::default());
+        let executor_factory = ArkivOpBlockExecutorFactory::new(inner_factory, sessions.clone());
         Self {
             inner,
             inner_default,
+            sessions,
+            executor_factory,
         }
+    }
+
+    /// Handle to the shared session-cache map. Used by the
+    /// BlockExecutor wrapper to mint sessions and flush typed caches
+    /// at `finish`.
+    pub fn sessions(&self) -> &SessionCacheMap {
+        &self.sessions
     }
 }
 
@@ -317,15 +370,11 @@ impl ConfigureEvm for ArkivOpEvmConfig {
     type Primitives = OpPrimitives;
     type Error = EIP1559ParamError;
     type NextBlockEnvCtx = OpNextBlockEnvAttributes;
-    type BlockExecutorFactory = OpBlockExecutorFactory<
-        OpRethReceiptBuilder,
-        Arc<OpChainSpec>,
-        PostExecEvmFactoryAdapter<ArkivOpEvmFactory>,
-    >;
+    type BlockExecutorFactory = ArkivOpBlockExecutorFactory<InnerExecutorFactory>;
     type BlockAssembler = OpBlockAssembler<OpChainSpec>;
 
     fn block_executor_factory(&self) -> &Self::BlockExecutorFactory {
-        self.inner.block_executor_factory()
+        &self.executor_factory
     }
 
     fn block_assembler(&self) -> &Self::BlockAssembler {

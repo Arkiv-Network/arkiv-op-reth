@@ -37,7 +37,10 @@ use revm::precompile::{
     PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult,
 };
 
-use crate::store::ReadWriteStore;
+use crate::store::{
+    ARKIV_SESSION_CALLER, ReadWriteStore, SESSION_CLEAR_SELECTOR, SESSION_SET_SELECTOR,
+    SessionCacheMap, SessionKind, clear_session_slot, derive_session, write_session_slot,
+};
 
 // ─── ABI mirror of `EntityRegistry.sol` ──────────────────────────────
 //
@@ -139,10 +142,19 @@ const G_ART_INDEXED_ANNOTATION: u64 = 6_000;
 
 const PRECOMPILE_NAME: &str = "ARKIV";
 
-pub fn arkiv_precompile() -> DynPrecompile {
+pub fn arkiv_precompile(_sessions: SessionCacheMap) -> DynPrecompile {
     let id = PrecompileId::custom(PRECOMPILE_NAME);
     let call = move |mut input: PrecompileInput<'_>| -> PrecompileResult {
         let _call_span = tracing::debug_span!("precompile_call").entered();
+
+        // System-only branch: the BlockExecutor wrapper invokes the
+        // precompile with ARKIV_SESSION_CALLER at apply_pre / finish
+        // to journal the session-id slot transition. Gated by caller
+        // (no EOA can spoof ARKIV_SESSION_CALLER) AND by reserved
+        // selectors that don't collide with execute / nonces.
+        if input.caller == ARKIV_SESSION_CALLER {
+            return dispatch_system(&mut input);
+        }
 
         // Reject DELEGATECALL / CALLCODE. Defensive: the precompile
         // does not currently mutate state at its own address, but if
@@ -172,6 +184,53 @@ pub fn arkiv_precompile() -> DynPrecompile {
         }
     };
     DynPrecompile::new_stateful(id, call)
+}
+
+// ─── Dispatch: system-only session beacon ────────────────────────────
+//
+// Reached only when `input.caller == ARKIV_SESSION_CALLER`. Recognises
+// two reserved selectors:
+//
+//   SESSION_SET_SELECTOR    — body is 32 bytes (session id), SSTORE'd
+//                             to slot 0 of ARKIV_ADDRESS.
+//   SESSION_CLEAR_SELECTOR  — no body, SSTORE'd back to zero.
+//
+// Anything else from the system caller is a hard error (a bug in the
+// wrapper rather than a user-recoverable revert).
+
+fn dispatch_system(input: &mut PrecompileInput<'_>) -> PrecompileResult {
+    if input.data.len() < 4 {
+        return Err(PrecompileError::Fatal(
+            "arkiv precompile: system call with empty selector".into(),
+        ));
+    }
+    let (selector_bytes, body) = input.data.split_at(4);
+    let selector: [u8; 4] = selector_bytes.try_into().expect("split_at(4) on len>=4");
+
+    match selector {
+        SESSION_SET_SELECTOR => {
+            if body.len() != 32 {
+                return Err(PrecompileError::Fatal(format!(
+                    "arkiv precompile: SESSION_SET body must be 32 bytes, got {}",
+                    body.len()
+                )));
+            }
+            let sid = B256::from_slice(body);
+            write_session_slot(&mut input.internals, sid).map_err(|e| {
+                PrecompileError::Fatal(format!("arkiv precompile: write session: {e}"))
+            })?;
+            Ok(PrecompileOutput::new(0, Bytes::new(), input.reservoir))
+        }
+        SESSION_CLEAR_SELECTOR => {
+            clear_session_slot(&mut input.internals).map_err(|e| {
+                PrecompileError::Fatal(format!("arkiv precompile: clear session: {e}"))
+            })?;
+            Ok(PrecompileOutput::new(0, Bytes::new(), input.reservoir))
+        }
+        _ => Err(PrecompileError::Fatal(format!(
+            "arkiv precompile: unknown system selector {selector:02x?}"
+        ))),
+    }
 }
 
 // ─── Dispatch: nonces(address) ───────────────────────────────────────
@@ -212,6 +271,25 @@ fn dispatch_execute(body: &[u8], input: &mut PrecompileInput<'_>) -> PrecompileR
             "arkiv precompile: execute() not allowed in STATICCALL".into(),
         ));
     }
+
+    // Read the session beacon (slot 0 of ARKIV_ADDRESS). Canonical
+    // passes inserted a non-zero session id at apply_pre; speculative
+    // lanes (no BlockExecutor wrapper) see zero. Logged for
+    // observability; no cache effect until the cache is wired into
+    // the Store path (later steps). Only relevant on the write path —
+    // nonces() is a read-only view that skips the cache entirely.
+    match derive_session(&mut input.internals) {
+        Ok(SessionKind::Canonical(sid)) => {
+            tracing::trace!(target: "arkiv::cache", session = ?sid, "canonical session");
+        }
+        Ok(SessionKind::Speculative) => {
+            tracing::trace!(target: "arkiv::cache", "speculative lane (no session)");
+        }
+        Err(e) => {
+            tracing::warn!(target: "arkiv::cache", "derive_session failed: {e}");
+        }
+    }
+
     let ops = match executeCall::abi_decode_raw(body) {
         Ok(d) => d.ops,
         Err(e) => {
@@ -913,7 +991,7 @@ mod tests {
 
     #[test]
     fn arkiv_precompile_constructs() {
-        let _ = arkiv_precompile();
+        let _ = arkiv_precompile(crate::store::new_session_cache_map());
     }
 
     #[test]
