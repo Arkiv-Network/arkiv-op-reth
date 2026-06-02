@@ -1,4 +1,4 @@
-//! HashMap-backed [`Store`] that mirrors the on-trie layout, for tests
+//! HashMap-backed [`StateAdapter`] that mirrors the on-trie layout, for tests
 //! that want to verify the trie encoding without booting a full reth
 //! node.
 
@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use alloy_primitives::{Address, B256};
 use arkiv_entitydb::{
-    Bitmap, Entity, IndexTree, Store, index_address, pair_address,
+    Bitmap, Entity, IndexTree, StateAdapter, index_address, pair_address,
 };
 use eyre::Result;
 
@@ -25,7 +25,7 @@ pub struct AccountState {
 }
 
 /// Toy state DB: account address → [`AccountState`]. Stand-in for
-/// revm's State<DB> in tests that want to drive a [`Store`] without
+/// revm's State<DB> in tests that want to drive a [`StateAdapter`] without
 /// booting reth.
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryStateDb {
@@ -46,14 +46,14 @@ impl InMemoryStateDb {
     }
 }
 
-/// Thin [`Store`] over a borrowed [`InMemoryStateDb`]. Same trie
-/// encoding as [`super::ReadWriteStore`] — values go through the slot
+/// Thin [`StateAdapter`] over a borrowed [`InMemoryStateDb`]. Same trie
+/// encoding as [`super::ReadWriteStateAdapter`] — values go through the slot
 /// derivations and packed encodings in [`super::trie_layout`].
-pub struct InMemoryStore<'a> {
+pub struct InMemoryStateAdapter<'a> {
     db: &'a mut InMemoryStateDb,
 }
 
-impl<'a> InMemoryStore<'a> {
+impl<'a> InMemoryStateAdapter<'a> {
     pub fn new(db: &'a mut InMemoryStateDb) -> Self {
         Self { db }
     }
@@ -89,7 +89,7 @@ impl<'a> InMemoryStore<'a> {
     }
 }
 
-impl Store for InMemoryStore<'_> {
+impl StateAdapter for InMemoryStateAdapter<'_> {
     // ── System-account slots ────────────────────────────────────────
 
     fn get_entity_count(&mut self) -> Result<u64> {

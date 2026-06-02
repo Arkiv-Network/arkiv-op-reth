@@ -1,17 +1,17 @@
-//! In-memory test backend for the [`Store`] trait.
+//! In-memory test backend for the [`StateAdapter`] trait.
 //!
-//! [`MemStore`] is a pure typed cache: every category of state the
+//! [`MemStateAdapter`] is a pure typed cache: every category of state the
 //! trait exposes (system counter, ID maps, nonces, entities, pair
 //! bitmaps, ART indexes) is held directly as the typed value, in a
 //! plain [`HashMap`]. There is no slot derivation, no byte packing,
 //! no `SYSTEM_ACCOUNT_ADDRESS` — those are trie-encoding details and
-//! they belong to the trie-backed [`Store`] impls in `arkiv-node`,
+//! they belong to the trie-backed [`StateAdapter`] impls in `arkiv-node`,
 //! not to entitydb's tests.
 //!
-//! Op handlers go through the [`Store`] trait, so anything they do
-//! against [`MemStore`] is logically identical to what they do against
+//! Op handlers go through the [`StateAdapter`] trait, so anything they do
+//! against [`MemStateAdapter`] is logically identical to what they do against
 //! the production adapters. Tests can both drive the op handlers and
-//! inspect [`MemStore`]'s public fields directly to assert on the
+//! inspect [`MemStateAdapter`]'s public fields directly to assert on the
 //! resulting state.
 
 use std::collections::HashMap;
@@ -19,9 +19,9 @@ use std::collections::HashMap;
 use alloy_primitives::Address;
 use eyre::Result;
 
-use super::{Bitmap, Entity, IndexTree, Store};
+use super::{Bitmap, Entity, IndexTree, StateAdapter};
 
-/// Test-only [`Store`] implementation. All state is held as typed
+/// Test-only [`StateAdapter`] implementation. All state is held as typed
 /// values; no serialisation or trie-layout concerns.
 ///
 /// Fields are `pub` so tests can read/assert on internal state
@@ -29,7 +29,7 @@ use super::{Bitmap, Entity, IndexTree, Store};
 /// should still go through the trait so that op handlers and the
 /// store agree on semantics.
 #[derive(Default, Clone)]
-pub struct MemStore {
+pub struct MemStateAdapter {
     pub entity_count: u64,
     pub id_to_addr: HashMap<u64, Address>,
     pub addr_to_id: HashMap<Address, u64>,
@@ -41,13 +41,13 @@ pub struct MemStore {
     pub index_trees: HashMap<Vec<u8>, IndexTree>,
 }
 
-impl MemStore {
+impl MemStateAdapter {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl Store for MemStore {
+impl StateAdapter for MemStateAdapter {
     // ── System-account slots ────────────────────────────────────────
 
     fn get_entity_count(&mut self) -> Result<u64> {

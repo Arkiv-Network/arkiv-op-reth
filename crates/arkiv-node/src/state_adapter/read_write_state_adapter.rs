@@ -1,9 +1,9 @@
-//! revm-backed [`Store`] used by the precompile during block execution.
+//! revm-backed [`StateAdapter`] used by the precompile during block execution.
 
 use alloy_evm::EvmInternals;
 use alloy_primitives::{Address, B256, Bytes, U256};
 use arkiv_entitydb::{
-    Bitmap, Entity, IndexTree, Store, index_address, pair_address,
+    Bitmap, Entity, IndexTree, StateAdapter, index_address, pair_address,
 };
 use eyre::Result;
 use revm::state::Bytecode;
@@ -14,11 +14,11 @@ use super::trie_layout::{
     storage_to_u32, storage_to_u64, u32_to_storage, u64_to_storage,
 };
 
-pub struct ReadWriteStore<'a, 'b> {
+pub struct ReadWriteStateAdapter<'a, 'b> {
     internals: &'a mut EvmInternals<'b>,
 }
 
-impl<'a, 'b> ReadWriteStore<'a, 'b> {
+impl<'a, 'b> ReadWriteStateAdapter<'a, 'b> {
     pub fn new(internals: &'a mut EvmInternals<'b>) -> Self {
         Self { internals }
     }
@@ -90,7 +90,7 @@ impl<'a, 'b> ReadWriteStore<'a, 'b> {
     }
 }
 
-impl Store for ReadWriteStore<'_, '_> {
+impl StateAdapter for ReadWriteStateAdapter<'_, '_> {
     // ── System-account slots ────────────────────────────────────────
 
     fn get_entity_count(&mut self) -> Result<u64> {

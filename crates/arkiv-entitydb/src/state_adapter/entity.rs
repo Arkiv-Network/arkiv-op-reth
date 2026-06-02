@@ -18,7 +18,7 @@ pub const ATTR_STRING: u8 = 2;
 pub const ATTR_ENTITY_KEY: u8 = 3;
 
 /// Typed representation of an entity. The RLP form is what gets
-/// committed to chain state by trie-backed [`Store`](crate::Store)
+/// committed to chain state by trie-backed [`StateAdapter`](crate::StateAdapter)
 /// impls; the typed form is what op handlers and queries work with.
 #[derive(Debug, Clone, PartialEq, Eq, RlpEncodable, RlpDecodable)]
 pub struct Entity {

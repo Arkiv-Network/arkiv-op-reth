@@ -1,4 +1,4 @@
-//! Op handlers and read-side helpers that run against a [`Store`].
+//! Op handlers and read-side helpers that run against a [`StateAdapter`].
 //!
 //! Each handler assumes the contract has already validated ownership /
 //! liveness. It performs all the state mutations: system-account
@@ -11,7 +11,7 @@ use eyre::Result;
 use super::addresses::{encode_address, encode_b256, encode_u64_be};
 use super::{
     ANNOT_ALL, ANNOT_CONTENT_TYPE, ANNOT_CREATED_AT_BLOCK, ANNOT_CREATOR, ANNOT_EXPIRATION,
-    ANNOT_KEY, ANNOT_OWNER, Attribute, Bitmap, Entity, IndexTree, Store, entity_address,
+    ANNOT_KEY, ANNOT_OWNER, Attribute, Bitmap, Entity, IndexTree, StateAdapter, entity_address,
 };
 
 // ─── Op handlers ──────────────────────────────────────────────────────
@@ -29,7 +29,7 @@ use super::{
         n_attrs = attributes.len(),
     ),
 )]
-pub fn create<S: Store>(
+pub fn create<S: StateAdapter>(
     state: &mut S,
     sender: Address,
     entity_key: B256,
@@ -94,7 +94,7 @@ pub fn create<S: Store>(
         n_attrs = attributes.len(),
     ),
 )]
-pub fn update<S: Store>(
+pub fn update<S: StateAdapter>(
     state: &mut S,
     entity_key: B256,
     current_block: u64,
@@ -127,7 +127,7 @@ pub fn update<S: Store>(
 /// Extend an entity's `expires_at`. Updates the `$expiration` bitmap
 /// and re-encodes the RLP with the new value.
 #[tracing::instrument(name = "entitydb_extend", level = "debug", skip_all)]
-pub fn extend<S: Store>(
+pub fn extend<S: StateAdapter>(
     state: &mut S,
     entity_key: B256,
     current_block: u64,
@@ -160,7 +160,7 @@ pub fn extend<S: Store>(
 /// Hand an entity's ownership to `new_owner`. Updates the `$owner`
 /// bitmap and re-encodes the RLP.
 #[tracing::instrument(name = "entitydb_transfer", level = "debug", skip_all)]
-pub fn transfer<S: Store>(
+pub fn transfer<S: StateAdapter>(
     state: &mut S,
     entity_key: B256,
     current_block: u64,
@@ -184,7 +184,7 @@ pub fn transfer<S: Store>(
 /// clears both ID-map slots on the Arkiv account, and tombstones the
 /// entity account (`code = nil`, `nonce = 1`).
 #[tracing::instrument(name = "entitydb_delete", level = "debug", skip_all)]
-pub fn delete<S: Store>(state: &mut S, entity_key: B256) -> Result<()> {
+pub fn delete<S: StateAdapter>(state: &mut S, entity_key: B256) -> Result<()> {
     let entity_addr = entity_address(entity_key);
     let entity_id = state.get_addr_to_id(&entity_addr)?;
     let entity = read_entity(state, entity_addr)?;
@@ -216,7 +216,7 @@ pub fn delete<S: Store>(state: &mut S, entity_key: B256) -> Result<()> {
 /// Identical state path to [`delete`]. The contract has already
 /// validated `block.number > expiresAt`.
 #[tracing::instrument(name = "entitydb_expire", level = "debug", skip_all)]
-pub fn expire<S: Store>(state: &mut S, entity_key: B256) -> Result<()> {
+pub fn expire<S: StateAdapter>(state: &mut S, entity_key: B256) -> Result<()> {
     delete(state, entity_key)
 }
 
@@ -225,8 +225,8 @@ pub fn expire<S: Store>(state: &mut S, entity_key: B256) -> Result<()> {
 /// Read the pair-account bitmap for `(annot_key, annot_val)`. An
 /// account with empty code (never written, or tombstoned) decodes to
 /// an empty [`Bitmap`] — not an error. Thin wrapper around
-/// [`Store::get_pair_bitmap`] for ergonomic call sites.
-pub fn read_pair_bitmap<S: Store>(
+/// [`StateAdapter::get_pair_bitmap`] for ergonomic call sites.
+pub fn read_pair_bitmap<S: StateAdapter>(
     state: &mut S,
     annot_key: &[u8],
     annot_val: &[u8],
@@ -235,13 +235,13 @@ pub fn read_pair_bitmap<S: Store>(
 }
 
 /// Bitmap of every live entity ID — the `$all` built-in bitmap.
-pub fn all_entities<S: Store>(state: &mut S) -> Result<Bitmap> {
+pub fn all_entities<S: StateAdapter>(state: &mut S) -> Result<Bitmap> {
     state.get_pair_bitmap(ANNOT_ALL, b"")
 }
 
 /// Read the Tier-2 [`IndexTree`] for `attr_key`. An absent or
 /// tombstoned index account decodes to an empty tree — not an error.
-pub fn read_index_tree<S: Store>(state: &mut S, attr_key: &[u8]) -> Result<IndexTree> {
+pub fn read_index_tree<S: StateAdapter>(state: &mut S, attr_key: &[u8]) -> Result<IndexTree> {
     state.get_index_tree(attr_key)
 }
 
@@ -251,7 +251,7 @@ pub fn read_index_tree<S: Store>(state: &mut S, attr_key: &[u8]) -> Result<Index
 /// written, or cleared by `delete` / `expire`) or if the entity
 /// account has empty code (tombstoned). Returns `Err` only on
 /// underlying state errors or malformed entity bytes.
-pub fn resolve_id<S: Store>(state: &mut S, id: u64) -> Result<Option<Entity>> {
+pub fn resolve_id<S: StateAdapter>(state: &mut S, id: u64) -> Result<Option<Entity>> {
     let entity_addr = state.get_id_to_addr(id)?;
     if entity_addr == Address::ZERO {
         return Ok(None);
@@ -261,7 +261,7 @@ pub fn resolve_id<S: Store>(state: &mut S, id: u64) -> Result<Option<Entity>> {
 
 // ─── Internal helpers ─────────────────────────────────────────────────
 
-fn read_entity<S: Store>(state: &mut S, entity_addr: Address) -> Result<Entity> {
+fn read_entity<S: StateAdapter>(state: &mut S, entity_addr: Address) -> Result<Entity> {
     state
         .get_entity(&entity_addr)?
         .ok_or_else(|| eyre::eyre!("no entity at {entity_addr}"))
@@ -317,7 +317,7 @@ fn updatable_pairs(content_type: &[u8], attributes: &[Attribute]) -> Vec<(Vec<u8
 
 /// Diff two `(key, value)` pair sets and apply removals + insertions
 /// to the corresponding pair bitmaps.
-fn apply_pair_diff<S: Store>(
+fn apply_pair_diff<S: StateAdapter>(
     state: &mut S,
     old: &[(Vec<u8>, Vec<u8>)],
     new: &[(Vec<u8>, Vec<u8>)],
@@ -335,7 +335,7 @@ fn apply_pair_diff<S: Store>(
     Ok(())
 }
 
-fn insert_into_pair_bitmap<S: Store>(
+fn insert_into_pair_bitmap<S: StateAdapter>(
     state: &mut S,
     annot_key: &[u8],
     annot_val: &[u8],
@@ -354,7 +354,7 @@ fn insert_into_pair_bitmap<S: Store>(
     Ok(())
 }
 
-fn remove_from_pair_bitmap<S: Store>(
+fn remove_from_pair_bitmap<S: StateAdapter>(
     state: &mut S,
     annot_key: &[u8],
     annot_val: &[u8],
@@ -385,7 +385,7 @@ fn remove_from_pair_bitmap<S: Store>(
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_utils::MemStore;
+    use super::super::test_utils::MemStateAdapter;
     use super::super::{ATTR_STRING, ATTR_UINT};
     use super::*;
     use alloy_primitives::U256;
@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn create_writes_entity_and_all_bitmaps() {
-        let mut state = MemStore::new();
+        let mut state = MemStateAdapter::new();
         let key = entity_key_n(0x42);
         create(
             &mut state,
@@ -463,7 +463,7 @@ mod tests {
 
     #[test]
     fn transfer_moves_owner_bitmap() {
-        let mut state = MemStore::new();
+        let mut state = MemStateAdapter::new();
         let key = entity_key_n(1);
         create(&mut state, alice(), key, 100, 10, vec![], vec![], vec![]).unwrap();
         transfer(&mut state, key, 20, bob()).unwrap();
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn extend_moves_expiration_bitmap() {
-        let mut state = MemStore::new();
+        let mut state = MemStateAdapter::new();
         let key = entity_key_n(2);
         create(&mut state, alice(), key, 100, 10, vec![], vec![], vec![]).unwrap();
         extend(&mut state, key, 20, 500).unwrap();
@@ -503,7 +503,7 @@ mod tests {
 
     #[test]
     fn update_diffs_only_changed_annotations() {
-        let mut state = MemStore::new();
+        let mut state = MemStateAdapter::new();
         let key = entity_key_n(3);
         create(
             &mut state,
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn delete_clears_bitmaps_and_tombstones_account() {
-        let mut state = MemStore::new();
+        let mut state = MemStateAdapter::new();
         let key = entity_key_n(4);
         let entity_addr = entity_address(key);
         create(
@@ -586,7 +586,7 @@ mod tests {
 
     #[test]
     fn insert_pair_bitmap_writes_index_on_first_entity() {
-        let mut state = MemStore::new();
+        let mut state = MemStateAdapter::new();
         let val = b"hello".to_vec();
         insert_into_pair_bitmap(&mut state, b"tag", &val, 0).unwrap();
 
@@ -606,7 +606,7 @@ mod tests {
 
     #[test]
     fn remove_pair_bitmap_removes_index_on_last_entity() {
-        let mut state = MemStore::new();
+        let mut state = MemStateAdapter::new();
         let val = b"hello".to_vec();
         insert_into_pair_bitmap(&mut state, b"tag", &val, 0).unwrap();
         insert_into_pair_bitmap(&mut state, b"tag", &val, 1).unwrap();
@@ -628,8 +628,8 @@ mod tests {
 
     #[test]
     fn expire_has_same_state_path_as_delete() {
-        let mut state_a = MemStore::new();
-        let mut state_b = MemStore::new();
+        let mut state_a = MemStateAdapter::new();
+        let mut state_b = MemStateAdapter::new();
         let key = entity_key_n(5);
         for state in [&mut state_a, &mut state_b] {
             create(

@@ -1,4 +1,4 @@
-//! State adapter (the [`Store`] trait), op handlers, and the typed
+//! State adapter (the [`StateAdapter`] trait), op handlers, and the typed
 //! primitives the handlers operate on.
 //!
 //! Submodules:
@@ -49,8 +49,8 @@ pub use index_tree::IndexTree;
 
 /// Abstract state interface the op handlers run against.
 ///
-/// In production, `arkiv_node::store` implements this over revm's
-/// `EvmInternals`. For tests, [`crate::test_utils::MemStore`]
+/// In production, `arkiv_node::state_adapter` implements this over revm's
+/// `EvmInternals`. For tests, [`crate::test_utils::MemStateAdapter`]
 /// implements it over a plain `HashMap`-backed cache.
 ///
 /// The trait is typed end-to-end — op handlers never see raw bytes or
@@ -94,7 +94,7 @@ pub use index_tree::IndexTree;
 /// - `tombstone_*` clears the code but preserves `nonce = 1`. Pair
 ///   accounts are never tombstoned — an empty bitmap is serialised
 ///   normally.
-pub trait Store {
+pub trait StateAdapter {
     // ── System-account slots ───────────────────────────────────────
 
     fn get_entity_count(&mut self) -> Result<u64>;

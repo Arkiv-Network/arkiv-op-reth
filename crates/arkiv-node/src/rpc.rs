@@ -17,7 +17,7 @@ use jsonrpsee::types::error::{ErrorObject, ErrorObjectOwned, INTERNAL_ERROR_CODE
 use reth_storage_api::{HeaderProvider, StateProviderBox, StateProviderFactory};
 use serde::{Deserialize, Serialize};
 
-use crate::store::ReadOnlyStore;
+use crate::state_adapter::ReadOnlyStateAdapter;
 
 const DEFAULT_PAGE_SIZE: u64 = 100;
 const MAX_PAGE_SIZE: u64 = 200;
@@ -188,7 +188,7 @@ where
     async fn get_entity_count(&self) -> RpcResult<u64> {
         let provider = self.provider.clone();
         tokio::task::spawn_blocking(move || -> Result<u64> {
-            let mut adapter = ReadOnlyStore::new(provider.latest()?);
+            let mut adapter = ReadOnlyStateAdapter::new(provider.latest()?);
             Ok(all_entities(&mut adapter)?.len())
         })
         .await
@@ -232,7 +232,7 @@ fn run_query<P: StateProviderFactory>(
     options: &QueryOptions,
 ) -> Result<QueryResponse> {
     let (state, block_number) = snapshot_for(&provider, options.at_block)?;
-    let mut adapter = ReadOnlyStore::new(state);
+    let mut adapter = ReadOnlyStateAdapter::new(state);
 
     let params = PageParams {
         page_size: options

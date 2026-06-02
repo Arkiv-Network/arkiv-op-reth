@@ -1,14 +1,14 @@
 //! Integration tests for the query interpreter.
 //!
 //! Each test builds state via the public op handlers (`create`,
-//! `delete`, `transfer`) against a [`MemStore`], then parses
+//! `delete`, `transfer`) against a [`MemStateAdapter`], then parses
 //! and evaluates a query and asserts on the resulting ID set.
 //! Mirrors `arkiv-storage-service/query/evaluate_test.go` for the
 //! grammar subset.
 
 use alloy_primitives::{Address, B256, U256};
 use arkiv_entitydb::query::parse;
-use arkiv_entitydb::test_utils::MemStore;
+use arkiv_entitydb::test_utils::MemStateAdapter;
 use arkiv_entitydb::{
     ATTR_ENTITY_KEY, ATTR_STRING, ATTR_UINT, Attribute, create, delete, resolve_id, transfer,
     update,
@@ -28,7 +28,7 @@ fn key_n(n: u8) -> B256 {
 }
 
 #[track_caller]
-fn ids(state: &mut MemStore, q: &str) -> Vec<u64> {
+fn ids(state: &mut MemStateAdapter, q: &str) -> Vec<u64> {
     let parsed = parse(q).unwrap_or_else(|e| panic!("parse {q:?}: {e}"));
     let bm = parsed
         .evaluate(state)
@@ -39,7 +39,7 @@ fn ids(state: &mut MemStore, q: &str) -> Vec<u64> {
 }
 
 fn create_simple(
-    state: &mut MemStore,
+    state: &mut MemStateAdapter,
     owner: Address,
     key: B256,
     content_type: &[u8],
@@ -70,7 +70,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 #[test]
 fn star_and_dollar_all_return_every_live_entity() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_simple(&mut s, alice(), key_n(1), b"text/plain", 100);
     create_simple(&mut s, bob(), key_n(2), b"text/plain", 200);
     assert_eq!(ids(&mut s, "*"), vec![0, 1]);
@@ -79,7 +79,7 @@ fn star_and_dollar_all_return_every_live_entity() {
 
 #[test]
 fn equality_owner_address() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_simple(&mut s, alice(), key_n(1), b"text/plain", 100);
     create_simple(&mut s, bob(), key_n(2), b"text/plain", 200);
     let q = format!("$owner = 0x{}", hex_lower(alice().as_slice()));
@@ -88,7 +88,7 @@ fn equality_owner_address() {
 
 #[test]
 fn equality_content_type() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_simple(&mut s, alice(), key_n(1), b"text/plain", 100);
     create_simple(&mut s, alice(), key_n(2), b"text/html", 200);
     assert_eq!(ids(&mut s, r#"$contentType = "text/html""#), vec![1]);
@@ -96,7 +96,7 @@ fn equality_content_type() {
 
 #[test]
 fn equality_user_string_annotation() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create(
         &mut s,
         alice(),
@@ -132,7 +132,7 @@ fn equality_user_string_annotation() {
 
 #[test]
 fn equality_user_numeric_annotation() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create(
         &mut s,
         alice(),
@@ -168,7 +168,7 @@ fn equality_user_numeric_annotation() {
 
 #[test]
 fn equality_user_entity_key_annotation() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     let ref_a = key_n(0xaa);
     let ref_b = key_n(0xbb);
     create(
@@ -207,7 +207,7 @@ fn equality_user_entity_key_annotation() {
 
 #[test]
 fn inclusion_user_entity_key_annotation() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     let ref_a = key_n(0xaa);
     let ref_b = key_n(0xbb);
     let ref_c = key_n(0xcc);
@@ -238,7 +238,7 @@ fn inclusion_user_entity_key_annotation() {
 
 #[test]
 fn inequality_excludes_match() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_simple(&mut s, alice(), key_n(1), b"text/plain", 100);
     create_simple(&mut s, bob(), key_n(2), b"text/plain", 200);
     create_simple(&mut s, bob(), key_n(3), b"text/plain", 300);
@@ -248,7 +248,7 @@ fn inequality_excludes_match() {
 
 #[test]
 fn and_intersects() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_simple(&mut s, alice(), key_n(1), b"text/plain", 100);
     create_simple(&mut s, bob(), key_n(2), b"text/plain", 200);
     create_simple(&mut s, alice(), key_n(3), b"text/html", 300);
@@ -261,7 +261,7 @@ fn and_intersects() {
 
 #[test]
 fn or_unions() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_simple(&mut s, alice(), key_n(1), b"text/plain", 100);
     create_simple(&mut s, bob(), key_n(2), b"text/html", 200);
     create_simple(&mut s, carol(), key_n(3), b"text/xml", 300);
@@ -275,7 +275,7 @@ fn or_unions() {
 
 #[test]
 fn inclusion_unions() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_simple(&mut s, alice(), key_n(1), b"text/plain", 100);
     create_simple(&mut s, bob(), key_n(2), b"text/plain", 200);
     create_simple(&mut s, carol(), key_n(3), b"text/plain", 300);
@@ -289,7 +289,7 @@ fn inclusion_unions() {
 
 #[test]
 fn not_inclusion_subtracts() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_simple(&mut s, alice(), key_n(1), b"text/plain", 100);
     create_simple(&mut s, bob(), key_n(2), b"text/plain", 200);
     create_simple(&mut s, carol(), key_n(3), b"text/plain", 300);
@@ -299,7 +299,7 @@ fn not_inclusion_subtracts() {
 
 #[test]
 fn not_around_paren_subtracts() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_simple(&mut s, alice(), key_n(1), b"text/plain", 100);
     create_simple(&mut s, bob(), key_n(2), b"text/html", 200);
     create_simple(&mut s, carol(), key_n(3), b"text/plain", 300);
@@ -312,7 +312,7 @@ fn not_around_paren_subtracts() {
 
 #[test]
 fn delete_removes_from_results() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_simple(&mut s, alice(), key_n(1), b"text/plain", 100);
     create_simple(&mut s, bob(), key_n(2), b"text/plain", 200);
     delete(&mut s, key_n(1)).expect("delete");
@@ -321,7 +321,7 @@ fn delete_removes_from_results() {
 
 #[test]
 fn transfer_moves_owner_match() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_simple(&mut s, alice(), key_n(1), b"text/plain", 100);
     transfer(&mut s, key_n(1), 20, bob()).expect("transfer");
 
@@ -333,7 +333,7 @@ fn transfer_moves_owner_match() {
 
 #[test]
 fn expiration_numeric_equality() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_simple(&mut s, alice(), key_n(1), b"text/plain", 100);
     create_simple(&mut s, alice(), key_n(2), b"text/plain", 200);
     assert_eq!(ids(&mut s, "$expiration = 100"), vec![0]);
@@ -342,7 +342,7 @@ fn expiration_numeric_equality() {
 
 #[test]
 fn resolve_id_returns_entity_rlp() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_simple(&mut s, alice(), key_n(1), b"text/plain", 100);
     let entity = resolve_id(&mut s, 0).expect("resolve").expect("some");
     assert_eq!(entity.owner, alice());
@@ -352,7 +352,7 @@ fn resolve_id_returns_entity_rlp() {
 
 #[test]
 fn resolve_id_returns_none_after_delete() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_simple(&mut s, alice(), key_n(1), b"text/plain", 100);
     delete(&mut s, key_n(1)).expect("delete");
     assert!(resolve_id(&mut s, 0).expect("resolve").is_none());
@@ -360,7 +360,7 @@ fn resolve_id_returns_none_after_delete() {
 
 // ── Range and glob query tests ────────────────────────────────────────
 
-fn create_with_price(state: &mut MemStore, owner: Address, key: B256, price: u64) {
+fn create_with_price(state: &mut MemStateAdapter, owner: Address, key: B256, price: u64) {
     create(
         state,
         owner,
@@ -380,7 +380,7 @@ fn create_with_price(state: &mut MemStore, owner: Address, key: B256, price: u64
 
 #[test]
 fn range_gt_returns_matching_entities() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_with_price(&mut s, alice(), key_n(1), 50);
     create_with_price(&mut s, alice(), key_n(2), 100);
     create_with_price(&mut s, alice(), key_n(3), 200);
@@ -389,7 +389,7 @@ fn range_gt_returns_matching_entities() {
 
 #[test]
 fn range_lte_returns_matching_entities() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_with_price(&mut s, alice(), key_n(1), 50);
     create_with_price(&mut s, alice(), key_n(2), 100);
     create_with_price(&mut s, alice(), key_n(3), 200);
@@ -398,7 +398,7 @@ fn range_lte_returns_matching_entities() {
 
 #[test]
 fn range_between_exclusive() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_with_price(&mut s, alice(), key_n(1), 50);
     create_with_price(&mut s, alice(), key_n(2), 100);
     create_with_price(&mut s, alice(), key_n(3), 200);
@@ -409,7 +409,7 @@ fn range_between_exclusive() {
 
 #[test]
 fn range_and_equality_combined() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     // id=0: image/png, price=20
     create(
         &mut s,
@@ -466,7 +466,7 @@ fn range_and_equality_combined() {
 
 #[test]
 fn glob_prefix_match() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_simple(&mut s, alice(), key_n(1), b"image/png", 100);
     create_simple(&mut s, alice(), key_n(2), b"image/jpeg", 100);
     create_simple(&mut s, alice(), key_n(3), b"text/plain", 100);
@@ -475,7 +475,7 @@ fn glob_prefix_match() {
 
 #[test]
 fn not_glob_excludes_prefix() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create_simple(&mut s, alice(), key_n(1), b"image/png", 100);
     create_simple(&mut s, alice(), key_n(2), b"image/jpeg", 100);
     create_simple(&mut s, alice(), key_n(3), b"text/plain", 100);
@@ -484,7 +484,7 @@ fn not_glob_excludes_prefix() {
 
 #[test]
 fn update_moves_index_value() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create(
         &mut s,
         alice(),
@@ -519,7 +519,7 @@ fn update_moves_index_value() {
 
 #[test]
 fn delete_removes_index_entry() {
-    let mut s = MemStore::new();
+    let mut s = MemStateAdapter::new();
     create(
         &mut s,
         alice(),
@@ -543,10 +543,10 @@ fn delete_removes_index_entry() {
 #[test]
 fn range_historical_query() {
     // Simulate querying at two different block heights by cloning the
-    // MemStore between writes. block-1 has price=100; block-2 has
+    // MemStateAdapter between writes. block-1 has price=100; block-2 has
     // price=200 after an update.
     let key = key_n(42);
-    let mut s1 = MemStore::new();
+    let mut s1 = MemStateAdapter::new();
     create(
         &mut s1,
         alice(),

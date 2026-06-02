@@ -20,7 +20,7 @@
 //!    constraints) — failures are returned as Solidity-style reverts
 //!    so SDK error decoders resolve them.
 //! 4. State mutation via [`arkiv_entitydb`]'s op handlers, threaded
-//!    through a [`ReadWriteStore`](crate::store::ReadWriteStore)
+//!    through a [`ReadWriteStateAdapter`](crate::state_adapter::ReadWriteStateAdapter)
 //!    over revm's `EvmInternals`.
 //! 5. Log emission (`EntityOperation`) — addressed at `ARKIV_ADDRESS`
 //!    so the SDK's `eth_getLogs` filter on that address resolves
@@ -30,15 +30,15 @@ use alloy_evm::precompiles::{DynPrecompile, PrecompileInput};
 use alloy_primitives::{Address, B256, Bytes, FixedBytes, Log, U256, keccak256};
 use alloy_sol_types::{SolCall, SolError, SolEvent, sol};
 use arkiv_entitydb::{
-    ATTR_ENTITY_KEY, ATTR_STRING, ATTR_UINT, Attribute as EntityAttribute, Store,
+    ATTR_ENTITY_KEY, ATTR_STRING, ATTR_UINT, Attribute as EntityAttribute, StateAdapter,
 };
 use arkiv_genesis::ARKIV_ADDRESS;
 use revm::precompile::{
     PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult,
 };
 
-use crate::store::{
-    ARKIV_SESSION_CALLER, CacheStore, CachedReadWriteStore, ReadWriteStore,
+use crate::state_adapter::{
+    ARKIV_SESSION_CALLER, CacheStore, CachedReadWriteStateAdapter, ReadWriteStateAdapter,
     SESSION_CLEAR_SELECTOR, SESSION_FLUSH_SELECTOR, SESSION_SET_SELECTOR, SessionCacheMap,
     SessionKind, clear_session_slot, derive_session, write_session_slot,
 };
@@ -274,10 +274,10 @@ fn dispatch_session_flush(
         }
     };
 
-    // Construct a CachedReadWriteStore around the live `EvmInternals`
+    // Construct a CachedReadWriteStateAdapter around the live `EvmInternals`
     // and the just-removed cache; `flush()` drains `block_dirty` and
-    // emits byte-level writes through the inner ReadWriteStore.
-    let mut adapter = CachedReadWriteStore::new(&mut input.internals, Some(&mut cache));
+    // emits byte-level writes through the inner ReadWriteStateAdapter.
+    let mut adapter = CachedReadWriteStateAdapter::new(&mut input.internals, Some(&mut cache));
     adapter
         .flush()
         .map_err(|e| PrecompileError::Fatal(format!("arkiv precompile: flush: {e}")))?;
@@ -306,7 +306,7 @@ fn dispatch_nonces(body: &[u8], input: &mut PrecompileInput<'_>) -> PrecompileRe
         }
     };
     let nonce = {
-        let mut adapter = ReadWriteStore::new(&mut input.internals);
+        let mut adapter = ReadWriteStateAdapter::new(&mut input.internals);
         adapter
             .get_nonce(&decoded.owner)
             .map_err(|e| PrecompileError::Fatal(format!("arkiv precompile: read nonce: {e}")))?
@@ -378,8 +378,8 @@ fn dispatch_execute(
     // Check out the per-block CacheStore for canonical lanes; the
     // outer mutex is held only across the HashMap remove. Speculative
     // lanes proceed with `cache = None`, which makes
-    // `CachedReadWriteStore` a straight passthrough to the inner
-    // `ReadWriteStore` — same behaviour as today's non-caching path.
+    // `CachedReadWriteStateAdapter` a straight passthrough to the inner
+    // `ReadWriteStateAdapter` — same behaviour as today's non-caching path.
     let mut cache: Option<CacheStore> = match session_kind {
         SessionKind::Canonical(sid) => {
             sessions.lock().expect("session map poisoned").remove(&sid)
@@ -482,7 +482,7 @@ fn apply_create(
     let expires_at = current_block.saturating_add(op.btl as u64);
     let attributes = convert_attributes(&op.attributes)?;
     let entity_key = {
-        let mut adapter = CachedReadWriteStore::new(&mut input.internals, cache.as_mut());
+        let mut adapter = CachedReadWriteStateAdapter::new(&mut input.internals, cache.as_mut());
         let current_nonce = adapter
             .get_nonce(&caller)
             .map_err(|e| ApplyError::Fatal(format!("read nonce: {e}")))?;
@@ -520,7 +520,7 @@ fn apply_update(
     let entity = load_entity_for_owner(input, caller, current_block, op.entityKey, false, cache)?;
     let attributes = convert_attributes(&op.attributes)?;
     {
-        let mut adapter = CachedReadWriteStore::new(&mut input.internals, cache.as_mut());
+        let mut adapter = CachedReadWriteStateAdapter::new(&mut input.internals, cache.as_mut());
         arkiv_entitydb::update(
             &mut adapter,
             op.entityKey,
@@ -564,7 +564,7 @@ fn apply_extend(
         ));
     }
     {
-        let mut adapter = CachedReadWriteStore::new(&mut input.internals, cache.as_mut());
+        let mut adapter = CachedReadWriteStateAdapter::new(&mut input.internals, cache.as_mut());
         arkiv_entitydb::extend(&mut adapter, op.entityKey, current_block, new_expires_at)?;
     }
     emit_entity_op(input, op.entityKey, OP_EXTEND, entity.owner, new_expires_at);
@@ -598,7 +598,7 @@ fn apply_transfer(
         ));
     }
     {
-        let mut adapter = CachedReadWriteStore::new(&mut input.internals, cache.as_mut());
+        let mut adapter = CachedReadWriteStateAdapter::new(&mut input.internals, cache.as_mut());
         arkiv_entitydb::transfer(&mut adapter, op.entityKey, current_block, op.newOwner)?;
     }
     emit_entity_op(
@@ -620,7 +620,7 @@ fn apply_delete(
 ) -> Result<(), ApplyError> {
     let entity = load_entity_for_owner(input, caller, current_block, op.entityKey, false, cache)?;
     {
-        let mut adapter = CachedReadWriteStore::new(&mut input.internals, cache.as_mut());
+        let mut adapter = CachedReadWriteStateAdapter::new(&mut input.internals, cache.as_mut());
         arkiv_entitydb::delete(&mut adapter, op.entityKey)?;
     }
     emit_entity_op(
@@ -655,7 +655,7 @@ fn apply_expire(
         ));
     }
     {
-        let mut adapter = CachedReadWriteStore::new(&mut input.internals, cache.as_mut());
+        let mut adapter = CachedReadWriteStateAdapter::new(&mut input.internals, cache.as_mut());
         arkiv_entitydb::expire(&mut adapter, op.entityKey)?;
     }
     emit_entity_op(
@@ -750,7 +750,7 @@ fn load_entity(
     cache: &mut Option<CacheStore>,
 ) -> Result<Option<ExistingEntity>, ApplyError> {
     let entity_addr = arkiv_entitydb::entity_address(entity_key);
-    let mut adapter = CachedReadWriteStore::new(&mut input.internals, cache.as_mut());
+    let mut adapter = CachedReadWriteStateAdapter::new(&mut input.internals, cache.as_mut());
     let rlp = adapter
         .get_entity(&entity_addr)
         .map_err(|e| ApplyError::Fatal(format!("get_entity({entity_addr}): {e}")))?;
@@ -1014,7 +1014,7 @@ fn convert_attributes(attrs: &[Attribute]) -> Result<Vec<EntityAttribute>, Apply
             let key = ident32_to_bytes(a.name);
             let value = match a.valueType {
                 // SDK packs the uint256 left-aligned into value[0]; the
-                // remaining three words are zero. Store the 32 raw
+                // remaining three words are zero. StateAdapter the 32 raw
                 // big-endian bytes verbatim.
                 ATTR_UINT => {
                     reject_non_zero_upper_words(a)?;
@@ -1082,7 +1082,7 @@ mod tests {
 
     #[test]
     fn arkiv_precompile_constructs() {
-        let _ = arkiv_precompile(crate::store::new_session_cache_map());
+        let _ = arkiv_precompile(crate::state_adapter::new_session_cache_map());
     }
 
     #[test]

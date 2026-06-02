@@ -1,38 +1,38 @@
-//! Cache-aware revm-backed [`Store`] used during canonical execution.
+//! Cache-aware revm-backed [`StateAdapter`] used during canonical execution.
 //!
-//! Sibling to [`super::ReadWriteStore`]. Wraps a `ReadWriteStore`
+//! Sibling to [`super::ReadWriteStateAdapter`]. Wraps a `ReadWriteStateAdapter`
 //! together with an optional `&mut CacheStore`. With the cache
 //! present, typed reads and writes go through the cache; the
 //! underlying byte-level writes are deferred to
 //! [`Self::flush`] at `BlockExecutor::finish`. With the cache absent
 //! (`None`, e.g. speculative lanes), behavior collapses to the same
-//! passthrough that `ReadWriteStore` performs today.
+//! passthrough that `ReadWriteStateAdapter` performs today.
 //!
 //! See `account-cache-design.md` §6 for the layered semantics.
 
 use alloy_evm::EvmInternals;
 use alloy_primitives::Address;
 use arkiv_entitydb::{
-    Bitmap, Entity, IndexTree, Store, index_address, pair_address,
+    Bitmap, Entity, IndexTree, StateAdapter, index_address, pair_address,
 };
 use eyre::Result;
 
 use super::cache_store::{CacheStore, Cached};
-use super::read_write_store::ReadWriteStore;
+use super::read_write_state_adapter::ReadWriteStateAdapter;
 use super::trie_layout::entity_to_code;
 
-pub struct CachedReadWriteStore<'a, 'b, 'c> {
-    inner: ReadWriteStore<'a, 'b>,
+pub struct CachedReadWriteStateAdapter<'a, 'b, 'c> {
+    inner: ReadWriteStateAdapter<'a, 'b>,
     cache: Option<&'c mut CacheStore>,
 }
 
-impl<'a, 'b, 'c> CachedReadWriteStore<'a, 'b, 'c> {
+impl<'a, 'b, 'c> CachedReadWriteStateAdapter<'a, 'b, 'c> {
     pub fn new(
         internals: &'a mut EvmInternals<'b>,
         cache: Option<&'c mut CacheStore>,
     ) -> Self {
         Self {
-            inner: ReadWriteStore::new(internals),
+            inner: ReadWriteStateAdapter::new(internals),
             cache,
         }
     }
@@ -60,7 +60,7 @@ impl<'a, 'b, 'c> CachedReadWriteStore<'a, 'b, 'c> {
     }
 }
 
-impl Store for CachedReadWriteStore<'_, '_, '_> {
+impl StateAdapter for CachedReadWriteStateAdapter<'_, '_, '_> {
     // ── System-account slots — passthrough, not cached ────────────────
 
     fn get_entity_count(&mut self) -> Result<u64> {

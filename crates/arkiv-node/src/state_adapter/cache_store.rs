@@ -7,7 +7,7 @@
 //!
 //! Pure data structure: no I/O, no `EvmInternals` handle. The reads
 //! and the deferred flushes happen in
-//! [`super::cached_read_write_store::CachedReadWriteStore`], which
+//! [`super::cached_read_write_state_adapter::CachedReadWriteStateAdapter`], which
 //! borrows a `&mut CacheStore` for the duration of a precompile call.
 //!
 //! See `account-cache-design.md` §3 for the layering rationale.

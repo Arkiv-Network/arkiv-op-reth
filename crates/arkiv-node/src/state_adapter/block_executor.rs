@@ -155,7 +155,7 @@ where
         self.session_id = Some(sid);
 
         // Insert an empty CacheStore under this session so the
-        // precompile / CachedReadWriteStore can find it once wired.
+        // precompile / CachedReadWriteStateAdapter can find it once wired.
         self.sessions
             .lock()
             .expect("session map poisoned")

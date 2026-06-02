@@ -1,9 +1,9 @@
-//! reth-backed [`Store`] used by the `arkiv_*` RPC namespace against a
+//! reth-backed [`StateAdapter`] used by the `arkiv_*` RPC namespace against a
 //! committed-state snapshot.
 
 use alloy_primitives::{Address, B256, U256};
 use arkiv_entitydb::{
-    Bitmap, Entity, IndexTree, Store, index_address, pair_address,
+    Bitmap, Entity, IndexTree, StateAdapter, index_address, pair_address,
 };
 use eyre::Result;
 use reth_storage_api::{StateProvider, StateProviderBox};
@@ -13,11 +13,11 @@ use super::trie_layout::{
     slot_id_to_addr, slot_nonces, storage_to_address, storage_to_u32, storage_to_u64,
 };
 
-pub struct ReadOnlyStore {
+pub struct ReadOnlyStateAdapter {
     state: StateProviderBox,
 }
 
-impl ReadOnlyStore {
+impl ReadOnlyStateAdapter {
     pub fn new(state: StateProviderBox) -> Self {
         Self { state }
     }
@@ -41,7 +41,7 @@ impl ReadOnlyStore {
     }
 }
 
-impl Store for ReadOnlyStore {
+impl StateAdapter for ReadOnlyStateAdapter {
     // ── System-account slots (reads only) ──────────────────────────
 
     fn get_entity_count(&mut self) -> Result<u64> {
@@ -69,19 +69,19 @@ impl Store for ReadOnlyStore {
     }
 
     fn set_entity_count(&mut self, _count: u64) -> Result<()> {
-        eyre::bail!("ReadOnlyStore: set_entity_count called from query path")
+        eyre::bail!("ReadOnlyStateAdapter: set_entity_count called from query path")
     }
 
     fn set_id_to_addr(&mut self, _id: u64, _addr: Address) -> Result<()> {
-        eyre::bail!("ReadOnlyStore: set_id_to_addr called from query path")
+        eyre::bail!("ReadOnlyStateAdapter: set_id_to_addr called from query path")
     }
 
     fn set_addr_to_id(&mut self, _addr: &Address, _id: u64) -> Result<()> {
-        eyre::bail!("ReadOnlyStore: set_addr_to_id called from query path")
+        eyre::bail!("ReadOnlyStateAdapter: set_addr_to_id called from query path")
     }
 
     fn set_nonce(&mut self, _caller: &Address, _nonce: u32) -> Result<()> {
-        eyre::bail!("ReadOnlyStore: set_nonce called from query path")
+        eyre::bail!("ReadOnlyStateAdapter: set_nonce called from query path")
     }
 
     // ── Entity accounts ─────────────────────────────────────────────
@@ -96,11 +96,11 @@ impl Store for ReadOnlyStore {
     }
 
     fn set_entity(&mut self, _addr: &Address, _entity: Entity) -> Result<()> {
-        eyre::bail!("ReadOnlyStore: set_entity called from query path")
+        eyre::bail!("ReadOnlyStateAdapter: set_entity called from query path")
     }
 
     fn tombstone_entity(&mut self, _addr: &Address) -> Result<()> {
-        eyre::bail!("ReadOnlyStore: tombstone_entity called from query path")
+        eyre::bail!("ReadOnlyStateAdapter: tombstone_entity called from query path")
     }
 
     // ── Tier-1 pair-bitmap accounts ─────────────────────────────────
@@ -120,7 +120,7 @@ impl Store for ReadOnlyStore {
         _annot_val: &[u8],
         _bitmap: Bitmap,
     ) -> Result<()> {
-        eyre::bail!("ReadOnlyStore: set_pair_bitmap called from query path")
+        eyre::bail!("ReadOnlyStateAdapter: set_pair_bitmap called from query path")
     }
 
     // ── Tier-2 ART index accounts ───────────────────────────────────
@@ -135,10 +135,10 @@ impl Store for ReadOnlyStore {
     }
 
     fn set_index_tree(&mut self, _attr_key: &[u8], _tree: IndexTree) -> Result<()> {
-        eyre::bail!("ReadOnlyStore: set_index_tree called from query path")
+        eyre::bail!("ReadOnlyStateAdapter: set_index_tree called from query path")
     }
 
     fn tombstone_index_tree(&mut self, _attr_key: &[u8]) -> Result<()> {
-        eyre::bail!("ReadOnlyStore: tombstone_index_tree called from query path")
+        eyre::bail!("ReadOnlyStateAdapter: tombstone_index_tree called from query path")
     }
 }

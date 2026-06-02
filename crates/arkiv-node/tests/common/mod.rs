@@ -15,7 +15,7 @@ use alloy_primitives::{Address, FixedBytes, U256};
 use alloy_sol_types::sol;
 use arkiv_genesis::{dev_signers, genesis_alloc};
 use arkiv_node::evm::{ArkivOpEvm, ArkivOpEvmFactory};
-use arkiv_node::store::new_session_cache_map;
+use arkiv_node::state_adapter::new_session_cache_map;
 use eyre::Result;
 use revm::bytecode::Bytecode;
 use revm::database::{CacheDB, EmptyDB};

@@ -83,7 +83,7 @@ use reth_primitives_traits::{NodePrimitives, SealedBlock, SealedHeader};
 use arkiv_genesis::ARKIV_ADDRESS;
 
 use crate::precompile::arkiv_precompile;
-use crate::store::{ArkivOpBlockExecutorFactory, SessionCacheMap, new_session_cache_map};
+use crate::state_adapter::{ArkivOpBlockExecutorFactory, SessionCacheMap, new_session_cache_map};
 
 // ─────────────────────────────────────────────────────────────────────
 // ArkivOpEvmFactory — wraps OpEvmFactory<OpTx>; installs the precompile
@@ -94,8 +94,8 @@ use crate::store::{ArkivOpBlockExecutorFactory, SessionCacheMap, new_session_cac
 /// (both canonical execution and inspector-instrumented contexts).
 ///
 /// Carries a clone of the per-node [`SessionCacheMap`] so each
-/// precompile closure can look up its [`crate::store::CacheStore`] by
-/// the session id beaconed via [`crate::store::ARKIV_SCRATCH_ADDRESS`].
+/// precompile closure can look up its [`crate::state_adapter::CacheStore`] by
+/// the session id beaconed via [`crate::state_adapter::ARKIV_SCRATCH_ADDRESS`].
 #[derive(Debug, Clone)]
 pub struct ArkivOpEvmFactory {
     inner: OpEvmFactory<OpTx>,

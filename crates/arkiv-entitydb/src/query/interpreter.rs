@@ -3,7 +3,7 @@
 //!
 //! `Query::evaluate` recursively turns a [`Query`] into a [`Bitmap`] of
 //! matching entity IDs by issuing point reads against a
-//! [`Store`]. No normalization pass — `Not` is evaluated as
+//! [`StateAdapter`]. No normalization pass — `Not` is evaluated as
 //! `$all \ eval(inner)`, which means each `Not` (or `!=` / `NOT IN`)
 //! costs one extra `$all` read. Acceptable for the small queries we
 //! expect; can revisit if profiling says otherwise.
@@ -19,18 +19,18 @@ use eyre::Result;
 
 use super::parser::{AnnotKey, AnnotVal, Query, parse};
 use crate::{
-    Bitmap, Entity, Store, all_entities, read_index_tree, read_pair_bitmap, resolve_id,
+    Bitmap, Entity, StateAdapter, all_entities, read_index_tree, read_pair_bitmap, resolve_id,
 };
 
 impl Query {
     /// Evaluate the AST against `state`, returning the bitmap of
     /// matching entity IDs.
-    pub fn evaluate<S: Store>(&self, state: &mut S) -> Result<Bitmap> {
+    pub fn evaluate<S: StateAdapter>(&self, state: &mut S) -> Result<Bitmap> {
         eval(self, state)
     }
 }
 
-fn eval<S: Store>(query: &Query, state: &mut S) -> Result<Bitmap> {
+fn eval<S: StateAdapter>(query: &Query, state: &mut S) -> Result<Bitmap> {
     match query {
         Query::All => all_entities(state),
 
@@ -134,12 +134,12 @@ fn eval<S: Store>(query: &Query, state: &mut S) -> Result<Bitmap> {
     }
 }
 
-fn read_eq<S: Store>(state: &mut S, key: &AnnotKey, value: &AnnotVal) -> Result<Bitmap> {
+fn read_eq<S: StateAdapter>(state: &mut S, key: &AnnotKey, value: &AnnotVal) -> Result<Bitmap> {
     read_pair_bitmap(state, key.pair_key_bytes(), &value.0)
 }
 
 /// OR-union of the bitmaps for each value in an `IN (...)` list.
-fn read_in<S: Store>(state: &mut S, key: &AnnotKey, values: &[AnnotVal]) -> Result<Bitmap> {
+fn read_in<S: StateAdapter>(state: &mut S, key: &AnnotKey, values: &[AnnotVal]) -> Result<Bitmap> {
     let mut acc = Bitmap::new();
     for v in values {
         let bm = read_pair_bitmap(state, key.pair_key_bytes(), &v.0)?;
@@ -185,7 +185,7 @@ pub struct Page {
 /// IDs that fail to resolve (e.g. entity tombstoned between the
 /// bitmap read and the resolve — possible under concurrent writes)
 /// are skipped silently and don't count toward `page_size`.
-pub fn execute<S: Store>(state: &mut S, query: &str, params: PageParams) -> Result<Page> {
+pub fn execute<S: StateAdapter>(state: &mut S, query: &str, params: PageParams) -> Result<Page> {
     eyre::ensure!(params.page_size > 0, "page_size must be > 0");
 
     let parsed = parse(query)?;

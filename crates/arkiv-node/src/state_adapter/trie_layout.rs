@@ -1,19 +1,19 @@
 //! On-trie encoding for Arkiv's system-account slots.
 //!
 //! Centralises the constants and value encodings every trie-backed
-//! [`Store`](arkiv_entitydb::Store) impl in this crate (read-write,
+//! [`StateAdapter`](arkiv_entitydb::StateAdapter) impl in this crate (read-write,
 //! read-only, in-memory) needs to agree on so that all impls produce
 //! the same canonical bytes for the same logical state. Drift here
 //! would mean two honest nodes computing different state roots for
 //! the same block — a consensus bug.
 //!
-//! Layered above this module are the three [`Store`] impls. Layered
+//! Layered above this module are the three [`StateAdapter`] impls. Layered
 //! below is the raw account / storage I/O each impl gets from its
 //! backing store (revm `EvmInternals`, reth `StateProvider`, or a
 //! plain `HashMap`).
 //!
 //! `arkiv-entitydb` deliberately knows nothing about this module —
-//! its [`Store`] trait is typed end-to-end, and op handlers never see
+//! its [`StateAdapter`] trait is typed end-to-end, and op handlers never see
 //! a slot key or a packed encoding.
 
 use alloy_primitives::{Address, B256, keccak256};
@@ -25,7 +25,7 @@ use eyre::{Result, ensure};
 
 /// Singleton account that hosts the global entity counter, ID ↔
 /// address maps, and per-EOA minting nonces as storage slots.
-/// Materialised lazily on the first write by each [`Store`] impl
+/// Materialised lazily on the first write by each [`StateAdapter`] impl
 /// (raising the nonce to ≥ 1 so EIP-161 doesn't prune it). No genesis
 /// allocation required.
 pub const SYSTEM_ACCOUNT_ADDRESS: Address = Address::new([
@@ -115,7 +115,7 @@ pub fn storage_to_address(b: B256) -> Address {
 //
 // Entity accounts carry `0xFE || RLP(entity)` as their `code`. The
 // `0xFE` is the EVM `INVALID` opcode — any stray `CALL` to an entity
-// address halts immediately. Trie-backed [`Store`](arkiv_entitydb::Store)
+// address halts immediately. Trie-backed [`StateAdapter`](arkiv_entitydb::StateAdapter)
 // impls wrap the RLP form here on write and strip it on read so that
 // `arkiv-entitydb` never has to know.
 
