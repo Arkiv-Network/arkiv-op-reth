@@ -37,7 +37,8 @@ pub use in_memory_store::{AccountState, InMemoryStateDb, InMemoryStore};
 pub use read_only_store::ReadOnlyStore;
 pub use read_write_store::ReadWriteStore;
 pub use session::{
-    ARKIV_SESSION_CALLER, SESSION_CLEAR_SELECTOR, SESSION_SET_SELECTOR, SessionCacheMap,
-    SessionId, SessionKind, clear_session_slot, derive_session, encode_clear_session,
-    encode_set_session, new_session_cache_map, write_session_slot,
+    ARKIV_SESSION_CALLER, SESSION_CLEAR_SELECTOR, SESSION_FLUSH_SELECTOR, SESSION_SET_SELECTOR,
+    SessionCacheMap, SessionId, SessionKind, clear_session_slot, derive_session,
+    encode_clear_session, encode_flush_session, encode_set_session, new_session_cache_map,
+    write_session_slot,
 };

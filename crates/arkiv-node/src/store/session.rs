@@ -60,6 +60,13 @@ pub const SESSION_SET_SELECTOR: [u8; 4] = [0xFF, 0xFE, 0x00, 0x01];
 /// system call that clears the slot.
 pub const SESSION_CLEAR_SELECTOR: [u8; 4] = [0xFF, 0xFE, 0x00, 0x02];
 
+/// `finish`-time system call that drains the cached `block_dirty`
+/// entries to revm's `State<DB>` via byte-level `set_code` /
+/// `tombstone_code`. Issued by the
+/// [`BlockExecutor`](crate::store::ArkivOpBlockExecutor) wrapper
+/// before [`SESSION_CLEAR_SELECTOR`].
+pub const SESSION_FLUSH_SELECTOR: [u8; 4] = [0xFF, 0xFE, 0x00, 0x03];
+
 /// What [`derive_session`] returned. Speculative lanes (gas
 /// estimation, pending-state `eth_call`) read a zero slot because no
 /// BlockExecutor wrapper ran `apply_pre`; they get
@@ -132,4 +139,10 @@ pub fn encode_set_session(sid: SessionId) -> Bytes {
 /// the session id.
 pub fn encode_clear_session() -> Bytes {
     Bytes::from(SESSION_CLEAR_SELECTOR.to_vec())
+}
+
+/// Calldata the BlockExecutor wrapper passes at `finish` to ask the
+/// precompile to flush the per-block cache before the slot is cleared.
+pub fn encode_flush_session() -> Bytes {
+    Bytes::from(SESSION_FLUSH_SELECTOR.to_vec())
 }

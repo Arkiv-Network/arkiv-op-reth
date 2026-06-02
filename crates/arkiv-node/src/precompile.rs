@@ -38,8 +38,9 @@ use revm::precompile::{
 };
 
 use crate::store::{
-    ARKIV_SESSION_CALLER, ReadWriteStore, SESSION_CLEAR_SELECTOR, SESSION_SET_SELECTOR,
-    SessionCacheMap, SessionKind, clear_session_slot, derive_session, write_session_slot,
+    ARKIV_SESSION_CALLER, CacheStore, CachedReadWriteStore, ReadWriteStore,
+    SESSION_CLEAR_SELECTOR, SESSION_FLUSH_SELECTOR, SESSION_SET_SELECTOR, SessionCacheMap,
+    SessionKind, clear_session_slot, derive_session, write_session_slot,
 };
 
 // ─── ABI mirror of `EntityRegistry.sol` ──────────────────────────────
@@ -142,18 +143,19 @@ const G_ART_INDEXED_ANNOTATION: u64 = 6_000;
 
 const PRECOMPILE_NAME: &str = "ARKIV";
 
-pub fn arkiv_precompile(_sessions: SessionCacheMap) -> DynPrecompile {
+pub fn arkiv_precompile(sessions: SessionCacheMap) -> DynPrecompile {
     let id = PrecompileId::custom(PRECOMPILE_NAME);
     let call = move |mut input: PrecompileInput<'_>| -> PrecompileResult {
         let _call_span = tracing::debug_span!("precompile_call").entered();
 
         // System-only branch: the BlockExecutor wrapper invokes the
         // precompile with ARKIV_SESSION_CALLER at apply_pre / finish
-        // to journal the session-id slot transition. Gated by caller
-        // (no EOA can spoof ARKIV_SESSION_CALLER) AND by reserved
-        // selectors that don't collide with execute / nonces.
+        // to journal the session-id slot transition and to drain the
+        // per-block cache. Gated by caller (no EOA can spoof
+        // ARKIV_SESSION_CALLER) AND by reserved selectors that don't
+        // collide with execute / nonces.
         if input.caller == ARKIV_SESSION_CALLER {
-            return dispatch_system(&mut input);
+            return dispatch_system(&mut input, &sessions);
         }
 
         // Reject DELEGATECALL / CALLCODE. Defensive: the precompile
@@ -179,7 +181,7 @@ pub fn arkiv_precompile(_sessions: SessionCacheMap) -> DynPrecompile {
 
         match selector {
             noncesCall::SELECTOR => dispatch_nonces(body, &mut input),
-            executeCall::SELECTOR => dispatch_execute(body, &mut input),
+            executeCall::SELECTOR => dispatch_execute(body, &mut input, &sessions),
             _ => Ok(revert(unknown_selector_revert(selector), input.reservoir)),
         }
     };
@@ -189,16 +191,22 @@ pub fn arkiv_precompile(_sessions: SessionCacheMap) -> DynPrecompile {
 // ─── Dispatch: system-only session beacon ────────────────────────────
 //
 // Reached only when `input.caller == ARKIV_SESSION_CALLER`. Recognises
-// two reserved selectors:
+// three reserved selectors:
 //
 //   SESSION_SET_SELECTOR    — body is 32 bytes (session id), SSTORE'd
 //                             to slot 0 of ARKIV_ADDRESS.
 //   SESSION_CLEAR_SELECTOR  — no body, SSTORE'd back to zero.
+//   SESSION_FLUSH_SELECTOR  — no body, drains the per-block CacheStore
+//                             for the current session to State<DB>
+//                             via byte-level set_code / tombstone_code.
 //
 // Anything else from the system caller is a hard error (a bug in the
 // wrapper rather than a user-recoverable revert).
 
-fn dispatch_system(input: &mut PrecompileInput<'_>) -> PrecompileResult {
+fn dispatch_system(
+    input: &mut PrecompileInput<'_>,
+    sessions: &SessionCacheMap,
+) -> PrecompileResult {
     if input.data.len() < 4 {
         return Err(PrecompileError::Fatal(
             "arkiv precompile: system call with empty selector".into(),
@@ -227,10 +235,54 @@ fn dispatch_system(input: &mut PrecompileInput<'_>) -> PrecompileResult {
             })?;
             Ok(PrecompileOutput::new(0, Bytes::new(), input.reservoir))
         }
+        SESSION_FLUSH_SELECTOR => dispatch_session_flush(input, sessions),
         _ => Err(PrecompileError::Fatal(format!(
             "arkiv precompile: unknown system selector {selector:02x?}"
         ))),
     }
+}
+
+fn dispatch_session_flush(
+    input: &mut PrecompileInput<'_>,
+    sessions: &SessionCacheMap,
+) -> PrecompileResult {
+    // Discover the current session from slot 0. Speculative lanes
+    // never see this path (no wrapper, no system caller), but if some
+    // future code path issues FLUSH on a zero slot we have nothing to
+    // do.
+    let sid = match derive_session(&mut input.internals) {
+        Ok(SessionKind::Canonical(sid)) => sid,
+        Ok(SessionKind::Speculative) => {
+            return Ok(PrecompileOutput::new(0, Bytes::new(), input.reservoir));
+        }
+        Err(e) => {
+            return Err(PrecompileError::Fatal(format!(
+                "arkiv precompile: derive_session in flush: {e}"
+            )));
+        }
+    };
+
+    // Take the cache out of the session map under a brief lock; the
+    // remaining work runs unlocked on a locally-owned `CacheStore`.
+    // The wrapper's `finish` defensively drops the entry again, so
+    // this `remove` is the canonical reclaim point.
+    let mut cache = match sessions.lock().expect("session map poisoned").remove(&sid) {
+        Some(c) => c,
+        None => {
+            tracing::warn!(target: "arkiv::cache", session = ?sid, "flush: cache absent");
+            return Ok(PrecompileOutput::new(0, Bytes::new(), input.reservoir));
+        }
+    };
+
+    // Construct a CachedReadWriteStore around the live `EvmInternals`
+    // and the just-removed cache; `flush()` drains `block_dirty` and
+    // emits byte-level writes through the inner ReadWriteStore.
+    let mut adapter = CachedReadWriteStore::new(&mut input.internals, Some(&mut cache));
+    adapter
+        .flush()
+        .map_err(|e| PrecompileError::Fatal(format!("arkiv precompile: flush: {e}")))?;
+
+    Ok(PrecompileOutput::new(0, Bytes::new(), input.reservoir))
 }
 
 // ─── Dispatch: nonces(address) ───────────────────────────────────────
@@ -265,28 +317,34 @@ fn dispatch_nonces(body: &[u8], input: &mut PrecompileInput<'_>) -> PrecompileRe
 
 // ─── Dispatch: execute(Operation[]) ──────────────────────────────────
 
-fn dispatch_execute(body: &[u8], input: &mut PrecompileInput<'_>) -> PrecompileResult {
+fn dispatch_execute(
+    body: &[u8],
+    input: &mut PrecompileInput<'_>,
+    sessions: &SessionCacheMap,
+) -> PrecompileResult {
     if input.is_static {
         return Err(PrecompileError::Fatal(
             "arkiv precompile: execute() not allowed in STATICCALL".into(),
         ));
     }
 
-    // Read the session beacon (slot 0 of ARKIV_ADDRESS). Canonical
+    // Discover the session id at slot 0 of ARKIV_ADDRESS. Canonical
     // passes inserted a non-zero session id at apply_pre; speculative
-    // lanes (no BlockExecutor wrapper) see zero. Logged for
-    // observability; no cache effect until the cache is wired into
-    // the Store path (later steps). Only relevant on the write path —
-    // nonces() is a read-only view that skips the cache entirely.
-    match derive_session(&mut input.internals) {
-        Ok(SessionKind::Canonical(sid)) => {
-            tracing::trace!(target: "arkiv::cache", session = ?sid, "canonical session");
-        }
-        Ok(SessionKind::Speculative) => {
-            tracing::trace!(target: "arkiv::cache", "speculative lane (no session)");
-        }
+    // lanes (no BlockExecutor wrapper) see zero and fall through with
+    // `cache = None` (behaviour identical to the no-cache path).
+    let session_kind = match derive_session(&mut input.internals) {
+        Ok(k) => k,
         Err(e) => {
             tracing::warn!(target: "arkiv::cache", "derive_session failed: {e}");
+            SessionKind::Speculative
+        }
+    };
+    match session_kind {
+        SessionKind::Canonical(sid) => {
+            tracing::trace!(target: "arkiv::cache", session = ?sid, "canonical session");
+        }
+        SessionKind::Speculative => {
+            tracing::trace!(target: "arkiv::cache", "speculative lane (no session)");
         }
     }
 
@@ -317,32 +375,54 @@ fn dispatch_execute(body: &[u8], input: &mut PrecompileInput<'_>) -> PrecompileR
     let caller = input.caller;
     let chain_id: u64 = input.internals.chain_id();
 
+    // Check out the per-block CacheStore for canonical lanes; the
+    // outer mutex is held only across the HashMap remove. Speculative
+    // lanes proceed with `cache = None`, which makes
+    // `CachedReadWriteStore` a straight passthrough to the inner
+    // `ReadWriteStore` — same behaviour as today's non-caching path.
+    let mut cache: Option<CacheStore> = match session_kind {
+        SessionKind::Canonical(sid) => {
+            sessions.lock().expect("session map poisoned").remove(&sid)
+        }
+        SessionKind::Speculative => None,
+    };
+
     // Apply ops one at a time. A validation failure encodes a
     // Solidity-style revert payload that the SDK can decode (rolls
     // back the whole batch atomically — revm reverts on the precompile
-    // boundary).
+    // boundary). Successful batches commit the tx-layer into the
+    // block-layer; reverted / fatal batches drop the tx-layer.
     let dispatch_span = tracing::debug_span!("precompile_dispatch", n_ops = ops.len()).entered();
-    for (i, op) in ops.iter().enumerate() {
-        match apply_op(input, caller, chain_id, current_block, op) {
-            Ok(()) => {}
-            Err(ApplyError::Revert(payload)) => {
-                drop(dispatch_span);
-                tracing::debug!(op_index = i, "arkiv precompile: op reverted");
-                return Ok(revert(payload, input.reservoir));
-            }
-            Err(ApplyError::Fatal(msg)) => {
-                drop(dispatch_span);
-                return Err(PrecompileError::Fatal(msg));
+    let batch_result: Result<(), ApplyError> = (|| {
+        for (i, op) in ops.iter().enumerate() {
+            if let Err(e) = apply_op(input, caller, chain_id, current_block, op, &mut cache) {
+                if matches!(e, ApplyError::Revert(_)) {
+                    tracing::debug!(op_index = i, "arkiv precompile: op reverted");
+                }
+                return Err(e);
             }
         }
-    }
+        Ok(())
+    })();
     drop(dispatch_span);
 
-    Ok(PrecompileOutput::new(
-        gas_used,
-        Bytes::new(),
-        input.reservoir,
-    ))
+    if let Some(c) = cache.as_mut() {
+        match &batch_result {
+            Ok(()) => c.commit_tx(),
+            Err(_) => c.rollback_tx(),
+        }
+    }
+    if let SessionKind::Canonical(sid) = session_kind
+        && let Some(c) = cache
+    {
+        sessions.lock().expect("session map poisoned").insert(sid, c);
+    }
+
+    match batch_result {
+        Ok(()) => Ok(PrecompileOutput::new(gas_used, Bytes::new(), input.reservoir)),
+        Err(ApplyError::Revert(payload)) => Ok(revert(payload, input.reservoir)),
+        Err(ApplyError::Fatal(msg)) => Err(PrecompileError::Fatal(msg)),
+    }
 }
 
 // ─── Per-op application ──────────────────────────────────────────────
@@ -371,14 +451,15 @@ fn apply_op(
     chain_id: u64,
     current_block: u64,
     op: &Operation,
+    cache: &mut Option<CacheStore>,
 ) -> Result<(), ApplyError> {
     match op.operationType {
-        OP_CREATE => apply_create(input, caller, chain_id, current_block, op),
-        OP_UPDATE => apply_update(input, caller, current_block, op),
-        OP_EXTEND => apply_extend(input, caller, current_block, op),
-        OP_TRANSFER => apply_transfer(input, caller, current_block, op),
-        OP_DELETE => apply_delete(input, caller, current_block, op),
-        OP_EXPIRE => apply_expire(input, current_block, op),
+        OP_CREATE => apply_create(input, caller, chain_id, current_block, op, cache),
+        OP_UPDATE => apply_update(input, caller, current_block, op, cache),
+        OP_EXTEND => apply_extend(input, caller, current_block, op, cache),
+        OP_TRANSFER => apply_transfer(input, caller, current_block, op, cache),
+        OP_DELETE => apply_delete(input, caller, current_block, op, cache),
+        OP_EXPIRE => apply_expire(input, current_block, op, cache),
         t => Err(ApplyError::Revert(
             InvalidOpType { operationType: t }.abi_encode().into(),
         )),
@@ -391,6 +472,7 @@ fn apply_create(
     chain_id: u64,
     current_block: u64,
     op: &Operation,
+    cache: &mut Option<CacheStore>,
 ) -> Result<(), ApplyError> {
     if op.btl == 0 {
         return Err(ApplyError::Revert(ZeroBtl {}.abi_encode().into()));
@@ -400,7 +482,7 @@ fn apply_create(
     let expires_at = current_block.saturating_add(op.btl as u64);
     let attributes = convert_attributes(&op.attributes)?;
     let entity_key = {
-        let mut adapter = ReadWriteStore::new(&mut input.internals);
+        let mut adapter = CachedReadWriteStore::new(&mut input.internals, cache.as_mut());
         let current_nonce = adapter
             .get_nonce(&caller)
             .map_err(|e| ApplyError::Fatal(format!("read nonce: {e}")))?;
@@ -432,12 +514,13 @@ fn apply_update(
     caller: Address,
     current_block: u64,
     op: &Operation,
+    cache: &mut Option<CacheStore>,
 ) -> Result<(), ApplyError> {
     validate_attribute_names(&op.attributes)?;
-    let entity = load_entity_for_owner(input, caller, current_block, op.entityKey, false)?;
+    let entity = load_entity_for_owner(input, caller, current_block, op.entityKey, false, cache)?;
     let attributes = convert_attributes(&op.attributes)?;
     {
-        let mut adapter = ReadWriteStore::new(&mut input.internals);
+        let mut adapter = CachedReadWriteStore::new(&mut input.internals, cache.as_mut());
         arkiv_entitydb::update(
             &mut adapter,
             op.entityKey,
@@ -462,11 +545,12 @@ fn apply_extend(
     caller: Address,
     current_block: u64,
     op: &Operation,
+    cache: &mut Option<CacheStore>,
 ) -> Result<(), ApplyError> {
     if op.btl == 0 {
         return Err(ApplyError::Revert(ZeroBtl {}.abi_encode().into()));
     }
-    let entity = load_entity_for_owner(input, caller, current_block, op.entityKey, false)?;
+    let entity = load_entity_for_owner(input, caller, current_block, op.entityKey, false, cache)?;
     let new_expires_at = current_block.saturating_add(op.btl as u64);
     if new_expires_at <= entity.expires_at {
         return Err(ApplyError::Revert(
@@ -480,7 +564,7 @@ fn apply_extend(
         ));
     }
     {
-        let mut adapter = ReadWriteStore::new(&mut input.internals);
+        let mut adapter = CachedReadWriteStore::new(&mut input.internals, cache.as_mut());
         arkiv_entitydb::extend(&mut adapter, op.entityKey, current_block, new_expires_at)?;
     }
     emit_entity_op(input, op.entityKey, OP_EXTEND, entity.owner, new_expires_at);
@@ -492,8 +576,9 @@ fn apply_transfer(
     caller: Address,
     current_block: u64,
     op: &Operation,
+    cache: &mut Option<CacheStore>,
 ) -> Result<(), ApplyError> {
-    let entity = load_entity_for_owner(input, caller, current_block, op.entityKey, false)?;
+    let entity = load_entity_for_owner(input, caller, current_block, op.entityKey, false, cache)?;
     if op.newOwner == Address::ZERO {
         return Err(ApplyError::Revert(
             TransferToZeroAddress {
@@ -513,7 +598,7 @@ fn apply_transfer(
         ));
     }
     {
-        let mut adapter = ReadWriteStore::new(&mut input.internals);
+        let mut adapter = CachedReadWriteStore::new(&mut input.internals, cache.as_mut());
         arkiv_entitydb::transfer(&mut adapter, op.entityKey, current_block, op.newOwner)?;
     }
     emit_entity_op(
@@ -531,10 +616,11 @@ fn apply_delete(
     caller: Address,
     current_block: u64,
     op: &Operation,
+    cache: &mut Option<CacheStore>,
 ) -> Result<(), ApplyError> {
-    let entity = load_entity_for_owner(input, caller, current_block, op.entityKey, false)?;
+    let entity = load_entity_for_owner(input, caller, current_block, op.entityKey, false, cache)?;
     {
-        let mut adapter = ReadWriteStore::new(&mut input.internals);
+        let mut adapter = CachedReadWriteStore::new(&mut input.internals, cache.as_mut());
         arkiv_entitydb::delete(&mut adapter, op.entityKey)?;
     }
     emit_entity_op(
@@ -551,11 +637,13 @@ fn apply_expire(
     input: &mut PrecompileInput<'_>,
     current_block: u64,
     op: &Operation,
+    cache: &mut Option<CacheStore>,
 ) -> Result<(), ApplyError> {
     // EXPIRE doesn't require ownership; only that the entity exists
     // and is past its expiry. `load_entity_for_owner(..., allow_expired=true)`
     // skips the expiry guard but still rejects missing entities.
-    let entity = load_entity(input, op.entityKey)?.ok_or_else(|| not_found_revert(op.entityKey))?;
+    let entity =
+        load_entity(input, op.entityKey, cache)?.ok_or_else(|| not_found_revert(op.entityKey))?;
     if entity.expires_at > current_block {
         return Err(ApplyError::Revert(
             EntityNotExpired {
@@ -567,7 +655,7 @@ fn apply_expire(
         ));
     }
     {
-        let mut adapter = ReadWriteStore::new(&mut input.internals);
+        let mut adapter = CachedReadWriteStore::new(&mut input.internals, cache.as_mut());
         arkiv_entitydb::expire(&mut adapter, op.entityKey)?;
     }
     emit_entity_op(
@@ -659,9 +747,10 @@ struct ExistingEntity {
 fn load_entity(
     input: &mut PrecompileInput<'_>,
     entity_key: B256,
+    cache: &mut Option<CacheStore>,
 ) -> Result<Option<ExistingEntity>, ApplyError> {
     let entity_addr = arkiv_entitydb::entity_address(entity_key);
-    let mut adapter = ReadWriteStore::new(&mut input.internals);
+    let mut adapter = CachedReadWriteStore::new(&mut input.internals, cache.as_mut());
     let rlp = adapter
         .get_entity(&entity_addr)
         .map_err(|e| ApplyError::Fatal(format!("get_entity({entity_addr}): {e}")))?;
@@ -681,8 +770,10 @@ fn load_entity_for_owner(
     current_block: u64,
     entity_key: B256,
     allow_expired: bool,
+    cache: &mut Option<CacheStore>,
 ) -> Result<ExistingEntity, ApplyError> {
-    let entity = load_entity(input, entity_key)?.ok_or_else(|| not_found_revert(entity_key))?;
+    let entity =
+        load_entity(input, entity_key, cache)?.ok_or_else(|| not_found_revert(entity_key))?;
     if !allow_expired && entity.expires_at <= current_block {
         return Err(ApplyError::Revert(
             EntityExpired {

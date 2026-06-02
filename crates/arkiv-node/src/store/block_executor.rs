@@ -22,7 +22,8 @@ use arkiv_genesis::ARKIV_ADDRESS;
 
 use super::cache_store::CacheStore;
 use super::session::{
-    ARKIV_SESSION_CALLER, SessionCacheMap, SessionId, encode_clear_session, encode_set_session,
+    ARKIV_SESSION_CALLER, SessionCacheMap, SessionId, encode_clear_session, encode_flush_session,
+    encode_set_session,
 };
 
 /// Wraps any [`BlockExecutorFactory`] to layer Arkiv's per-pass cache
@@ -118,6 +119,21 @@ impl<Inner> ArkivOpBlockExecutor<Inner> {
         evm.db_mut().commit(result.state);
         Ok(())
     }
+
+    fn issue_session_flush<E>(evm: &mut E) -> Result<(), BlockExecutionError>
+    where
+        E: Evm,
+        E::DB: DatabaseCommit,
+    {
+        let calldata = encode_flush_session();
+        let result = evm
+            .transact_system_call(ARKIV_SESSION_CALLER, ARKIV_ADDRESS, calldata)
+            .map_err(|e| {
+                BlockExecutionError::msg(format!("arkiv session flush system call: {e:?}"))
+            })?;
+        evm.db_mut().commit(result.state);
+        Ok(())
+    }
 }
 
 impl<Inner> BlockExecutor for ArkivOpBlockExecutor<Inner>
@@ -168,13 +184,21 @@ where
         mut self,
     ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
         // Tear down BEFORE inner.finish consumes the executor — we
-        // need self.inner.evm_mut() to issue the clear system call,
-        // and finish takes self by value.
+        // need self.inner.evm_mut() to issue the system calls, and
+        // finish takes self by value.
         if let Some(sid) = self.session_id.take() {
+            // Flush first: the precompile drains the per-block dirty
+            // entries out of the CacheStore and writes them to
+            // `State<DB>` via byte-level set_code / tombstone_code.
+            // The cache is removed from the session map as a side
+            // effect, so the subsequent `remove` below is a no-op on
+            // the canonical path.
+            Self::issue_session_flush(self.inner.evm_mut())?;
+            // Then clear the session-id slot so the merged bundle
+            // records no net transition on slot 0 of ARKIV_ADDRESS.
             Self::issue_session_clear(self.inner.evm_mut())?;
-            // For now the cache holds nothing (no CachedReadWriteStore
-            // wired into the precompile yet); just drop it. The flush
-            // call site comes with later steps.
+            // Defensive: if FLUSH didn't reach the precompile (e.g.
+            // a future bypass path), reclaim the cache slot here.
             self.sessions
                 .lock()
                 .expect("session map poisoned")
