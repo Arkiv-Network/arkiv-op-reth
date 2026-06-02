@@ -95,12 +95,13 @@ Two components inside `arkiv-op-reth`:
    `arkiv-entitydb` via a `StateAdapter` impl over `EvmInternals`;
    `EntityOperation` event emission.
 2. The **`arkiv-entitydb` crate** — canonical home of the state
-   model. Owns the entity / pair / index / system-account layout,
-   RLP, roaring bitmap, the ART index implementation, the six op
-   handlers, the system-account slot layout (`pub(crate)`) with
-   `read_nonce` / `bump_nonce` as the public surface, and the query
-   language. No `revm` deps; runs against an abstract `StateAdapter`
-   trait.
+   model. Owns the typed primitives (`Entity`, `Bitmap`,
+   `IndexTree`), the address derivations
+   (`entity_address` / `pair_address` / `index_address`), the six op
+   handlers, and the query language. Exposes the abstract
+   `StateAdapter` trait with typed accessors; the system-account
+   slot derivations are an `arkiv-node` implementation detail. No
+   `revm` deps.
 
 Every state-dependent mutation that affects consensus — entity
 account writes, pair account writes (bitmaps), index account writes
@@ -109,12 +110,23 @@ revm's journaled state and is committed in the L3 `stateRoot`.
 
 ### Reth Integration
 
-A single integration point on op-reth's standard extension surface:
-an Arkiv precompile registered into `PrecompilesMap` via a custom
-`EvmFactory` wrapping `OpEvmFactory<OpTx>`. The custom factory
-inserts the precompile in both `create_evm` and
-`create_evm_with_inspector` so simulation, tracing, payload-building,
-validation, and canonical execution all see the same set.
+Two integration points on op-reth's standard extension surface:
+
+1. An Arkiv precompile registered into `PrecompilesMap` via a custom
+   `EvmFactory` (`ArkivOpEvmFactory`) wrapping `OpEvmFactory<OpTx>`.
+   The custom factory inserts the precompile in both `create_evm` and
+   `create_evm_with_inspector` so simulation, tracing,
+   payload-building, validation, and canonical execution all see the
+   same set.
+2. A `BlockExecutorFactory` wrapper (`ArkivOpBlockExecutorFactory`)
+   layered on top of `OpBlockExecutorFactory`. Its
+   `ArkivOpBlockExecutor` mints a per-pass `SessionId` at
+   `apply_pre_execution_changes`, inserts an empty `CacheStore` under
+   it into a shared session map, and drives the cache flush at
+   `finish` — the per-block account cache that turns repeated
+   touches on the same entity / pair / index account into a single
+   round-trip per `(addr, block)`. See [`5_cache.md`](5_cache.md) for
+   the full design.
 
 ### Arkiv Precompile
 
@@ -145,14 +157,21 @@ The user-facing entry point and the EVM-side adapter to
   `input.caller` is by construction the EOA that signed the tx.
 - **Gas accounting.** Computed from calldata only (§4). Charged
   up-front; halt `OutOfGas` if the budget doesn't cover the batch.
-- **Dispatch.** Wraps `EvmInternals` in a `ReadWriteStateAdapter`
-  implementing `arkiv_entitydb::StateAdapter`, converts ABI types
-  into entitydb's value types, and calls the matching
+- **Dispatch.** Wraps `EvmInternals` in a `StateAdapter` impl and
+  calls the matching
   `arkiv_entitydb::{create, update, extend, transfer, delete, expire}`.
-  Nonce reads for entity-key derivation go through
-  `arkiv_entitydb::bump_nonce`; the `nonces(address)` view goes
-  through `arkiv_entitydb::read_nonce`. The precompile never
-  touches system-account slots directly.
+  On canonical lanes the impl is `CachedReadWriteStateAdapter`,
+  which checks the per-block `CacheStore` out of the session map
+  (keyed by the session id beaconed on slot 0 of `ARKIV_ADDRESS`) so
+  reads and writes go through the cache; on success / revert the
+  precompile calls `cache.commit_tx()` / `cache.rollback_tx()` before
+  putting the cache back. On speculative lanes (no
+  `ArkivOpBlockExecutor` running, slot 0 reads zero) the impl
+  collapses to bare `ReadWriteStateAdapter`, byte-identical to the
+  no-cache path. Nonce reads for entity-key derivation go through
+  the trait's `get_nonce` / `set_nonce`; the `nonces(address)` view
+  goes through `get_nonce`. The precompile never touches
+  system-account slots directly.
 - **Event emission.** One `EntityOperation` log per validated op,
   emitted from `ARKIV_ADDRESS` so the SDK's `eth_getLogs` filter on
   that address resolves every event.
@@ -163,55 +182,84 @@ its inputs.
 ### arkiv-entitydb crate
 
 Canonical home of the state model. No `revm` deps, no DB deps. Runs
-against an abstract trait:
+against an abstract typed trait — every method returns the typed
+value the op handlers care about, not raw bytes:
 
 ```rust
 pub trait StateAdapter {
-    fn code(&mut self, addr: &Address) -> Result<Vec<u8>>;
-    fn set_code(&mut self, addr: &Address, code: Vec<u8>) -> Result<()>;
-    fn tombstone_code(&mut self, addr: &Address) -> Result<()>;
-    fn storage(&mut self, addr: &Address, slot: B256) -> Result<B256>;
-    fn set_storage(&mut self, addr: &Address, slot: B256, value: B256) -> Result<()>;
-    fn ensure_account_persists(&mut self, addr: &Address) -> Result<()>;
+    // System-account slots
+    fn get_entity_count(&mut self) -> Result<u64>;
+    fn set_entity_count(&mut self, count: u64) -> Result<()>;
+    fn get_id_to_addr(&mut self, id: u64) -> Result<Address>;
+    fn set_id_to_addr(&mut self, id: u64, addr: Address) -> Result<()>;
+    fn get_addr_to_id(&mut self, addr: &Address) -> Result<u64>;
+    fn set_addr_to_id(&mut self, addr: &Address, id: u64) -> Result<()>;
+    fn get_nonce(&mut self, caller: &Address) -> Result<u32>;
+    fn set_nonce(&mut self, caller: &Address, nonce: u32) -> Result<()>;
+
+    // Entity accounts
+    fn get_entity(&mut self, addr: &Address) -> Result<Option<Entity>>;
+    fn set_entity(&mut self, addr: &Address, entity: Entity) -> Result<()>;
+    fn tombstone_entity(&mut self, addr: &Address) -> Result<()>;
+
+    // Tier-1 pair-bitmap accounts
+    fn get_pair_bitmap(&mut self, annot_key: &[u8], annot_val: &[u8]) -> Result<Bitmap>;
+    fn set_pair_bitmap(&mut self, annot_key: &[u8], annot_val: &[u8], bitmap: Bitmap) -> Result<()>;
+
+    // Tier-2 ART index accounts
+    fn get_index_tree(&mut self, attr_key: &[u8]) -> Result<IndexTree>;
+    fn set_index_tree(&mut self, attr_key: &[u8], tree: IndexTree) -> Result<()>;
+    fn tombstone_index_tree(&mut self, attr_key: &[u8]) -> Result<()>;
 }
 ```
 
-`ensure_account_persists` bumps the account's nonce to ≥ 1 so EIP-161
-doesn't prune it at end-of-tx (the empty-account check ignores
-storage). Idempotent. Used by `bump_nonce` to lazily materialise the
-system account on its first storage write — no genesis allocation
-required.
+Typed accessors give the per-block cache ([`5_cache.md`](5_cache.md))
+the address-class signal it needs to deserialise the right variant on
+read and to flush the right kind of bytes on commit. Each setter
+materialises the underlying account if needed (raising `nonce` to ≥ 1
+so EIP-161 doesn't prune it at end-of-tx); `tombstone_*` clears the
+code but preserves `nonce = 1`. Pair accounts are never tombstoned —
+an empty bitmap is serialised normally.
 
-The trait has two production implementations and one test
+The trait has three production implementations and one test
 implementation:
 
 - `arkiv_node::state_adapter::ReadWriteStateAdapter` — write path.
   Wraps `&mut EvmInternals` and goes through the journal so reverts
-  roll back cleanly on dispatch failure.
+  roll back cleanly on dispatch failure. Used directly by speculative
+  lanes (gas estimation, pending-state `eth_call`).
+- `arkiv_node::state_adapter::CachedReadWriteStateAdapter` — write
+  path on the canonical lane. Wraps a `ReadWriteStateAdapter` plus an
+  optional `&mut CacheStore` checked out of the per-block session map;
+  reads consult the cache before falling through to revm, writes
+  stage into the cache's tx layer. With no cache attached, behaviour
+  is identical to the bare `ReadWriteStateAdapter`. See
+  [`5_cache.md`](5_cache.md) §5.
 - `arkiv_node::state_adapter::ReadOnlyStateAdapter` — read path. Wraps
   a `StateProviderBox` from reth; mutating methods bail (unreachable
   from the read path).
-- `arkiv_entitydb::test_utils::InMemoryStateAdapter` — `cfg(test-utils)`.
+- `arkiv_entitydb::test_utils::MemStateAdapter` — `cfg(test-utils)`.
   Drives the op handlers in unit tests without a revm context.
 
 The op handlers (`create` / `update` / `extend` / `transfer` /
 `delete` / `expire`) all take `&mut S: StateAdapter` and do the
 indexing math.
 
-System-state access goes through the public API:
+System-state access goes through the trait's typed accessors:
+`get_nonce` / `set_nonce` for the per-EOA entity-key minting nonces,
+`get_entity_count` / `set_entity_count` for the global counter, and
+`get_id_to_addr` / `set_id_to_addr` / `get_addr_to_id` /
+`set_addr_to_id` for the ID ↔ address map. The precompile's
+`nonces(address)` view calls `get_nonce`; the CREATE path calls
+`get_nonce` then `set_nonce(caller, n + 1)` and derives the entity
+key from the pre-bump value.
 
-- `read_nonce(state, caller) -> Result<u32>` — current nonce for
-  the caller. Used by the precompile's `nonces(address)` dispatch
-  and by clients computing entity keys locally.
-- `bump_nonce(state, caller) -> Result<u32>` — read-then-increment.
-  Returns the pre-bump value (the nonce that should be used for the
-  entity key about to be derived). Used by the precompile's CREATE
-  path.
-
-The underlying `slot_*` helpers (`slot_entity_count`,
-`slot_id_to_addr`, `slot_addr_to_id`, `slot_nonces`) are
-`pub(crate)` — the storage layout is an entitydb implementation
-detail, not part of the public API.
+The underlying slot derivations (`slot_entity_count`,
+`slot_id_to_addr`, `slot_addr_to_id`, `slot_nonces`) live in
+`arkiv_node::state_adapter::trie_layout` and are the StateAdapter
+impls' private business — the abstract trait is bytes-free and the
+storage layout is an implementation detail of the trie-backed
+impls.
 
 ---
 
@@ -222,7 +270,7 @@ detail, not part of the public API.
 | Address | What | Genesis presence |
 |---|---|---|
 | `ARKIV_ADDRESS = 0x4400000000000000000000000000000000000044` | Precompile registration target. EOAs `CALL` here with `execute(Operation[])` / `nonces(address)` calldata. | None. The custom `EvmFactory` registers the precompile programmatically; no contract bytecode is deployed. |
-| System account (entitydb-internal, `pub(crate)` in `arkiv-entitydb`, address `0x4400…0046`) | Singleton account hosting the precompile's consensus storage: per-caller `nonces`, the global `entity_count`, and the ID ↔ address maps. | None. Materialised lazily on the first write via `StateAdapter::ensure_account_persists`, which bumps the nonce to 1 so EIP-161 doesn't prune the account. |
+| System account (`arkiv-node`-internal, address `0x4400…0046`) | Singleton account hosting the precompile's consensus storage: per-caller `nonces`, the global `entity_count`, and the ID ↔ address maps. | None. Materialised lazily on the first write — the StateAdapter impls bump the nonce to 1 inside `set_storage` / `set_nonce` so EIP-161 doesn't prune the account at end-of-tx. |
 
 All other Arkiv state lives on accounts whose addresses are derived
 from content: entity accounts at `entityKey[:20]`, pair accounts at
@@ -239,8 +287,9 @@ entity_address = entityKey[:20]
 ```
 
 `nonces[msg.sender]` is held on the system account, incremented once
-per `Create` op via `arkiv_entitydb::bump_nonce`. The address is a
-pure identity anchor; content commitment is via `codeHash`.
+per `Create` op via the StateAdapter trait's `get_nonce` /
+`set_nonce`. The address is a pure identity anchor; content
+commitment is via `codeHash`.
 
 Clients holding the sender's current `nonces` value (via the
 `nonces(address)` view) can compute the entity key locally before
@@ -312,14 +361,14 @@ address can recover the complete key.
 
 ### System Account
 
-A singleton account at a fixed address (entitydb-internal — both the
-address constant and the `slot_*` helpers are `pub(crate)` in
-`arkiv-entitydb`; external code goes through `read_nonce` /
-`bump_nonce` and the op handlers). Empty code, empty storage at
+A singleton account at a fixed address. The address constant and the
+`slot_*` helpers live in `arkiv_node::state_adapter::trie_layout` —
+private to the StateAdapter impls. External code goes through the
+typed accessors on the trait. Empty code, empty storage at
 genesis-time *(if anything were there at all — there is no genesis
-allocation)*. The first `bump_nonce` call materialises the account by
-bumping its nonce to 1 via `StateAdapter::ensure_account_persists`,
-keeping EIP-161 from pruning the account at end-of-tx.
+allocation)*. The first `set_nonce` / `set_entity_count` call
+materialises the account by bumping its nonce to 1, keeping EIP-161
+from pruning it at end-of-tx.
 
 The precompile writes the following slots over the life of the chain:
 
@@ -629,12 +678,20 @@ Op-reth's standard reorg machinery handles every piece of Arkiv
 state: entity accounts, pair accounts, index accounts, and the
 system account all revert via the trie. There is no journal table,
 no Arkiv-side revert handler, no notification stream the precompile
-subscribes to, no out-of-trie state to worry about.
+subscribes to.
 
 The design is reorg-safe by construction: every consensus-critical
-write goes through `EvmInternals` (`set_code` / `set_storage` /
+write goes through `EvmInternals` (`set_code` / `sstore` /
 `bump_nonce`) and lands in the journal, so reverts roll back cleanly.
 No fix-up code required.
+
+The per-block account cache ([`5_cache.md`](5_cache.md)) is the
+only out-of-trie state, but it's per-pass and transient: every
+`CacheStore` lives in `Arc<Mutex<HashMap<SessionId, CacheStore>>>`
+for the duration of one `State<DB>` instance, and is drained into
+the bundle at `BlockExecutor::finish` (or dropped along with the
+`State<DB>` when its pass is discarded by reorg). No reconciliation
+required.
 
 ---
 
@@ -647,7 +704,7 @@ Trie (committed in stateRoot):
     No genesis entry. Programmatic registration via custom EvmFactory.
     All CALLs to this address land on the native precompile, not on bytecode.
 
-  System account  (entitydb-internal, address = 0x4400…0046):
+  System account  (arkiv-node-internal, address = 0x4400…0046):
     nonce                                                   → 1   (lazily set on first write)
     storage:
       slot[keccak256("entity_count")]                       → uint64

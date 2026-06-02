@@ -3,14 +3,14 @@
 //! Sits between an op-handler call and revm's `State<DB>` for the
 //! cacheable account categories (entity, Tier-1 pair-bitmap, Tier-2
 //! index-tree). System-account slots and the scratch account are
-//! deliberately not cached — see `account-cache-design.md` §7.
+//! deliberately not cached — see `docs/5_cache.md` §6.
 //!
 //! Pure data structure: no I/O, no `EvmInternals` handle. The reads
 //! and the deferred flushes happen in
 //! [`super::cached_read_write_state_adapter::CachedReadWriteStateAdapter`], which
 //! borrows a `&mut CacheStore` for the duration of a precompile call.
 //!
-//! See `account-cache-design.md` §3 for the layering rationale.
+//! See `docs/5_cache.md` §3 for the layering rationale.
 
 use std::collections::{HashMap, HashSet};
 

@@ -10,7 +10,7 @@
 //!
 //! All other `BlockExecutor` methods delegate to the inner executor.
 //!
-//! See `account-cache-design.md` §4.
+//! See `docs/5_cache.md` §4.
 
 use alloy_evm::{
     Evm,

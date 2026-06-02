@@ -8,7 +8,7 @@
 //! (`None`, e.g. speculative lanes), behavior collapses to the same
 //! passthrough that `ReadWriteStateAdapter` performs today.
 //!
-//! See `account-cache-design.md` §6 for the layered semantics.
+//! See `docs/5_cache.md` §5 for the layered semantics.
 
 use alloy_evm::EvmInternals;
 use alloy_primitives::Address;
