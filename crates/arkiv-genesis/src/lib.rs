@@ -22,7 +22,9 @@ use std::collections::BTreeMap;
 /// EOAs / SDKs `CALL` this address with the `execute(Operation[])` /
 /// `nonces(address)` ABI declared by `IEntityRegistry`. No genesis
 /// allocation is required — registration is programmatic.
-pub use arkiv_entitydb::ARKIV_ADDRESS;
+pub const ARKIV_ADDRESS: Address = Address::new([
+    0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x44,
+]);
 
 /// First account derived from [`ARKIV_DEV_MNEMONIC`] at standard BIP-44
 /// path `m/44'/60'/0'/0/0`. Kept as a `const` so callers that only need

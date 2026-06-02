@@ -15,6 +15,7 @@ use alloy_primitives::{Address, FixedBytes, U256};
 use alloy_sol_types::sol;
 use arkiv_genesis::{dev_signers, genesis_alloc};
 use arkiv_node::evm::{ArkivOpEvm, ArkivOpEvmFactory};
+use arkiv_node::evm::new_session_cache_map;
 use eyre::Result;
 use revm::bytecode::Bytecode;
 use revm::database::{CacheDB, EmptyDB};
@@ -80,7 +81,7 @@ pub fn boot_direct_evm() -> Result<(DirectEvm, Address)> {
         }
     }
 
-    let factory = ArkivOpEvmFactory::new();
+    let factory = ArkivOpEvmFactory::new(new_session_cache_map());
     let env = EvmEnv::default(); // OpSpecId default = JOVIAN; cfg.chain_id = 1
     let evm = factory.create_evm(db, env);
 

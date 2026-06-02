@@ -19,7 +19,7 @@ use eyre::Result;
 
 use super::parser::{AnnotKey, AnnotVal, Query, parse};
 use crate::{
-    Bitmap, EntityRlp, StateAdapter, all_entities, read_index_tree, read_pair_bitmap, resolve_id,
+    Bitmap, Entity, StateAdapter, all_entities, read_index_tree, read_pair_bitmap, resolve_id,
 };
 
 impl Query {
@@ -168,8 +168,8 @@ pub struct PageParams {
 #[derive(Debug, Clone)]
 pub struct Page {
     /// The matching entities — already resolved through the
-    /// `id_to_addr` system slot + `EntityRlp::decode_from_code`.
-    pub entries: Vec<EntityRlp>,
+    /// `id_to_addr` system slot + `Entity::decode_from_code`.
+    pub entries: Vec<Entity>,
     /// Set when more pages remain. Pass it as the next call's
     /// `cursor` to walk forward.
     pub next_cursor: Option<u64>,

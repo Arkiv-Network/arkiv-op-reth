@@ -8,7 +8,7 @@ use alloy_consensus::BlockHeader;
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{Address, B256, Bytes, U256};
 use arkiv_entitydb::query::{Page, PageParams, execute};
-use arkiv_entitydb::{ATTR_ENTITY_KEY, ATTR_STRING, ATTR_UINT, EntityRlp, all_entities};
+use arkiv_entitydb::{ATTR_ENTITY_KEY, ATTR_STRING, ATTR_UINT, Entity, all_entities};
 use async_trait::async_trait;
 use eyre::Result;
 use jsonrpsee::core::RpcResult;
@@ -329,7 +329,7 @@ impl ResolvedIncludeData {
     }
 }
 
-fn entity_data_from(e: EntityRlp, inc: &ResolvedIncludeData) -> EntityData {
+fn entity_data_from(e: Entity, inc: &ResolvedIncludeData) -> EntityData {
     let attributes = if inc.attributes {
         e.attributes
             .into_iter()

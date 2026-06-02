@@ -51,7 +51,7 @@ const N48_NIL: u8 = 0xFF;
 
 // ─── Node ───────────────────────────────────────────────────────────────────
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 enum Node {
     #[default]
     Empty,
@@ -65,6 +65,7 @@ enum Node {
 
 // ─── Inner node structs ─────────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct N4 {
     prefix: Vec<u8>,
     has_end: bool,
@@ -73,6 +74,7 @@ struct N4 {
     ch: [Node; 4],
 }
 
+#[derive(Clone)]
 struct N16 {
     prefix: Vec<u8>,
     has_end: bool,
@@ -81,6 +83,7 @@ struct N16 {
     ch: [Node; 16],
 }
 
+#[derive(Clone)]
 struct N48 {
     prefix: Vec<u8>,
     has_end: bool,
@@ -89,6 +92,7 @@ struct N48 {
     ch: [Node; 48],
 }
 
+#[derive(Clone)]
 struct N256 {
     prefix: Vec<u8>,
     has_end: bool,
@@ -245,7 +249,7 @@ fn n256_to_n48(n256: N256) -> N48 {
 
 // ─── IndexTree ──────────────────────────────────────────────────────────────
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct IndexTree {
     root: Node,
     len: usize,
@@ -1566,5 +1570,49 @@ mod tests {
         let mut bytes = tree(&[b"hello"]).to_bytes();
         bytes.push(0x00);
         assert!(IndexTree::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn index_tree_round_trip() {
+        let mut tree = IndexTree::new();
+        tree.insert(b"apple".to_vec());
+        tree.insert(b"banana".to_vec());
+        tree.insert(b"cherry".to_vec());
+        let decoded = IndexTree::from_bytes(&tree.to_bytes()).expect("decode");
+        let vals: Vec<Vec<u8>> = decoded.iter_gte(b"").collect();
+        assert_eq!(
+            vals,
+            [b"apple".to_vec(), b"banana".to_vec(), b"cherry".to_vec()]
+        );
+    }
+
+    #[test]
+    fn index_tree_serialization_is_deterministic() {
+        let vals = [b"z".to_vec(), b"a".to_vec(), b"m".to_vec()];
+        let mut a = IndexTree::new();
+        let mut b = IndexTree::new();
+        for v in &vals {
+            a.insert(v.clone());
+        }
+        for v in vals.iter().rev() {
+            b.insert(v.clone());
+        }
+        assert_eq!(a.to_bytes(), b.to_bytes());
+    }
+
+    #[test]
+    fn index_tree_range_and_prefix_ops() {
+        let mut tree = IndexTree::new();
+        for v in [b"aaa", b"aab", b"abc", b"bbb", b"ccc"] {
+            tree.insert(v.to_vec());
+        }
+        let gt: Vec<Vec<u8>> = tree.iter_gt(b"aab").collect();
+        assert_eq!(gt, [b"abc".to_vec(), b"bbb".to_vec(), b"ccc".to_vec()]);
+
+        let lte: Vec<Vec<u8>> = tree.iter_lte(b"aab").collect();
+        assert_eq!(lte, [b"aaa".to_vec(), b"aab".to_vec()]);
+
+        let prefix: Vec<Vec<u8>> = tree.iter_prefix(b"aa").collect();
+        assert_eq!(prefix, [b"aaa".to_vec(), b"aab".to_vec()]);
     }
 }
