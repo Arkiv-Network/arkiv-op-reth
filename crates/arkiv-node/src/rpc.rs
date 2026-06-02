@@ -17,7 +17,7 @@ use jsonrpsee::types::error::{ErrorObject, ErrorObjectOwned, INTERNAL_ERROR_CODE
 use reth_storage_api::{HeaderProvider, StateProviderBox, StateProviderFactory};
 use serde::{Deserialize, Serialize};
 
-use crate::state_adapter::ReadOnlyStore;
+use crate::store::ReadOnlyStore;
 
 const DEFAULT_PAGE_SIZE: u64 = 100;
 const MAX_PAGE_SIZE: u64 = 200;

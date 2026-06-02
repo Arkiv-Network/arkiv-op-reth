@@ -20,7 +20,7 @@
 //!    constraints) — failures are returned as Solidity-style reverts
 //!    so SDK error decoders resolve them.
 //! 4. State mutation via [`arkiv_entitydb`]'s op handlers, threaded
-//!    through a [`ReadWriteStore`](crate::state_adapter::ReadWriteStore)
+//!    through a [`ReadWriteStore`](crate::store::ReadWriteStore)
 //!    over revm's `EvmInternals`.
 //! 5. Log emission (`EntityOperation`) — addressed at `ARKIV_ADDRESS`
 //!    so the SDK's `eth_getLogs` filter on that address resolves
@@ -37,7 +37,7 @@ use revm::precompile::{
     PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult,
 };
 
-use crate::state_adapter::ReadWriteStore;
+use crate::store::ReadWriteStore;
 
 // ─── ABI mirror of `EntityRegistry.sol` ──────────────────────────────
 //

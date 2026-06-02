@@ -80,3 +80,23 @@ impl FromIterator<u64> for Bitmap {
         Self(RoaringTreemap::from_iter(iter))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bitmap_serialization_is_deterministic() {
+        // Same set inserted in different orders → identical bytes.
+        let ids = [3u64, 1, 2, 42, 1_000_001, 1_000_000];
+        let mut a = Bitmap::new();
+        let mut b = Bitmap::new();
+        for id in ids {
+            a.insert(id);
+        }
+        for id in ids.iter().rev() {
+            b.insert(*id);
+        }
+        assert_eq!(a.to_bytes(), b.to_bytes());
+    }
+}

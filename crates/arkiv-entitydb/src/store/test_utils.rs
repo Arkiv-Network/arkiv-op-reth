@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use alloy_primitives::Address;
 use eyre::Result;
 
-use crate::{Bitmap, Entity, IndexTree, Store};
+use super::{Bitmap, Entity, IndexTree, Store};
 
 /// Test-only [`Store`] implementation. All state is held as typed
 /// values; no serialisation or trie-layout concerns.

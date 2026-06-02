@@ -1571,4 +1571,48 @@ mod tests {
         bytes.push(0x00);
         assert!(IndexTree::from_bytes(&bytes).is_err());
     }
+
+    #[test]
+    fn index_tree_round_trip() {
+        let mut tree = IndexTree::new();
+        tree.insert(b"apple".to_vec());
+        tree.insert(b"banana".to_vec());
+        tree.insert(b"cherry".to_vec());
+        let decoded = IndexTree::from_bytes(&tree.to_bytes()).expect("decode");
+        let vals: Vec<Vec<u8>> = decoded.iter_gte(b"").collect();
+        assert_eq!(
+            vals,
+            [b"apple".to_vec(), b"banana".to_vec(), b"cherry".to_vec()]
+        );
+    }
+
+    #[test]
+    fn index_tree_serialization_is_deterministic() {
+        let vals = [b"z".to_vec(), b"a".to_vec(), b"m".to_vec()];
+        let mut a = IndexTree::new();
+        let mut b = IndexTree::new();
+        for v in &vals {
+            a.insert(v.clone());
+        }
+        for v in vals.iter().rev() {
+            b.insert(v.clone());
+        }
+        assert_eq!(a.to_bytes(), b.to_bytes());
+    }
+
+    #[test]
+    fn index_tree_range_and_prefix_ops() {
+        let mut tree = IndexTree::new();
+        for v in [b"aaa", b"aab", b"abc", b"bbb", b"ccc"] {
+            tree.insert(v.to_vec());
+        }
+        let gt: Vec<Vec<u8>> = tree.iter_gt(b"aab").collect();
+        assert_eq!(gt, [b"abc".to_vec(), b"bbb".to_vec(), b"ccc".to_vec()]);
+
+        let lte: Vec<Vec<u8>> = tree.iter_lte(b"aab").collect();
+        assert_eq!(lte, [b"aaa".to_vec(), b"aab".to_vec()]);
+
+        let prefix: Vec<Vec<u8>> = tree.iter_prefix(b"aa").collect();
+        assert_eq!(prefix, [b"aaa".to_vec(), b"aab".to_vec()]);
+    }
 }
