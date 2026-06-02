@@ -37,7 +37,7 @@ impl<'a, 'b> ReadWriteStore<'a, 'b> {
             .unwrap_or_default())
     }
 
-    fn set_code(&mut self, addr: &Address, code: Vec<u8>) -> Result<()> {
+    pub(super) fn set_code(&mut self, addr: &Address, code: Vec<u8>) -> Result<()> {
         let bytecode = Bytecode::new_raw(Bytes::from(code));
         self.internals
             .set_code(*addr, bytecode)
@@ -45,7 +45,7 @@ impl<'a, 'b> ReadWriteStore<'a, 'b> {
         self.ensure_nonce_at_least_one(*addr)
     }
 
-    fn tombstone_code(&mut self, addr: &Address) -> Result<()> {
+    pub(super) fn tombstone_code(&mut self, addr: &Address) -> Result<()> {
         let bytecode = Bytecode::new_raw(Bytes::new());
         self.internals
             .set_code(*addr, bytecode)

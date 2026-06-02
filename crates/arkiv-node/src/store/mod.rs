@@ -21,11 +21,15 @@
 //! cache (`arkiv_entitydb::test_utils::MemStore`) that has nothing
 //! to do with the trie layout — see that module for the rationale.
 
+mod cache_store;
+mod cached_read_write_store;
 mod in_memory_store;
 mod read_only_store;
 mod read_write_store;
 mod trie_layout;
 
+pub use cache_store::{CacheStore, Cached};
+pub use cached_read_write_store::CachedReadWriteStore;
 pub use in_memory_store::{AccountState, InMemoryStateDb, InMemoryStore};
 pub use read_only_store::ReadOnlyStore;
 pub use read_write_store::ReadWriteStore;
