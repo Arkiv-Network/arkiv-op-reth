@@ -9,7 +9,7 @@
 //! the same precompile registration target. Storing it on the
 //! precompile's own account keeps everything Arkiv-related in one
 //! well-known address: the
-//! [`BlockExecutor`](crate::state_adapter::ArkivOpBlockExecutor) wrapper
+//! [`BlockExecutor`](crate::evm::ArkivOpBlockExecutor) wrapper
 //! invokes the precompile with [`ARKIV_SESSION_CALLER`] as caller
 //! and a `SESSION_SET` / `SESSION_CLEAR` selector to journal the
 //! slot transition; the precompile reads the slot on every
@@ -28,17 +28,17 @@ use alloy_primitives::{B256, Bytes, U256};
 use arkiv_genesis::ARKIV_ADDRESS;
 use eyre::Result;
 
-use super::cache_store::CacheStore;
+use crate::state_adapter::CacheStore;
 
 /// Standard EIP-4788 system caller used for journaled block-level
 /// state mutations. The
-/// [`BlockExecutor`](crate::state_adapter::ArkivOpBlockExecutor) wrapper
+/// [`BlockExecutor`](crate::evm::ArkivOpBlockExecutor) wrapper
 /// passes this as the caller to `transact_system_call`; the
 /// precompile gates its session-write branch on this address.
 pub use alloy_eips::eip4788::SYSTEM_ADDRESS as ARKIV_SESSION_CALLER;
 
 /// Per-pass identity for a `State<DB>` instance. Minted by the
-/// [`BlockExecutor`](crate::state_adapter::ArkivOpBlockExecutor) wrapper at
+/// [`BlockExecutor`](crate::evm::ArkivOpBlockExecutor) wrapper at
 /// `apply_pre_execution_changes`; used by the precompile (via
 /// [`derive_session`]) to look up its [`CacheStore`] in the shared
 /// map.
@@ -48,7 +48,7 @@ pub type SessionId = B256;
 pub(crate) const SESSION_SLOT: U256 = U256::ZERO;
 
 /// Magic selector the
-/// [`BlockExecutor`](crate::state_adapter::ArkivOpBlockExecutor) wrapper uses
+/// [`BlockExecutor`](crate::evm::ArkivOpBlockExecutor) wrapper uses
 /// on its `apply_pre` system call to ask the precompile to SSTORE
 /// the session id into slot 0 of [`ARKIV_ADDRESS`]. Picked to be
 /// unambiguously non-ABI: real Solidity selectors are
@@ -63,7 +63,7 @@ pub const SESSION_CLEAR_SELECTOR: [u8; 4] = [0xFF, 0xFE, 0x00, 0x02];
 /// `finish`-time system call that drains the cached `block_dirty`
 /// entries to revm's `State<DB>` via byte-level `set_code` /
 /// `tombstone_code`. Issued by the
-/// [`BlockExecutor`](crate::state_adapter::ArkivOpBlockExecutor) wrapper
+/// [`BlockExecutor`](crate::evm::ArkivOpBlockExecutor) wrapper
 /// before [`SESSION_CLEAR_SELECTOR`].
 pub const SESSION_FLUSH_SELECTOR: [u8; 4] = [0xFF, 0xFE, 0x00, 0x03];
 

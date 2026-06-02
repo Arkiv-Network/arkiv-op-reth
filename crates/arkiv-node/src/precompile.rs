@@ -37,11 +37,11 @@ use revm::precompile::{
     PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult,
 };
 
-use crate::state_adapter::{
-    ARKIV_SESSION_CALLER, CacheStore, CachedReadWriteStateAdapter, ReadWriteStateAdapter,
-    SESSION_CLEAR_SELECTOR, SESSION_FLUSH_SELECTOR, SESSION_SET_SELECTOR, SessionCacheMap,
-    SessionKind, clear_session_slot, derive_session, write_session_slot,
+use crate::evm::{
+    ARKIV_SESSION_CALLER, SESSION_CLEAR_SELECTOR, SESSION_FLUSH_SELECTOR, SESSION_SET_SELECTOR,
+    SessionCacheMap, SessionKind, clear_session_slot, derive_session, write_session_slot,
 };
+use crate::state_adapter::{CacheStore, CachedReadWriteStateAdapter, ReadWriteStateAdapter};
 
 // ─── ABI mirror of `EntityRegistry.sol` ──────────────────────────────
 //
@@ -1082,7 +1082,7 @@ mod tests {
 
     #[test]
     fn arkiv_precompile_constructs() {
-        let _ = arkiv_precompile(crate::state_adapter::new_session_cache_map());
+        let _ = arkiv_precompile(crate::evm::new_session_cache_map());
     }
 
     #[test]

@@ -20,11 +20,11 @@ use alloy_evm::{
 use alloy_primitives::B256;
 use arkiv_genesis::ARKIV_ADDRESS;
 
-use super::cache_store::CacheStore;
 use super::session::{
     ARKIV_SESSION_CALLER, SessionCacheMap, SessionId, encode_clear_session, encode_flush_session,
     encode_set_session,
 };
+use crate::state_adapter::CacheStore;
 
 /// Wraps any [`BlockExecutorFactory`] to layer Arkiv's per-pass cache
 /// lifecycle on top. Construct via [`Self::new`] from the inner
