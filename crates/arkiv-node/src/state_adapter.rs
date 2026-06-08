@@ -16,10 +16,11 @@
 //! backing store.
 
 use alloy_evm::EvmInternals;
-use alloy_primitives::{Address, B256, Bytes, U256};
-use arkiv_entitydb::StateAdapter;
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+use arkiv_entitydb::{StateAdapter, iter_storage_asc_impl};
 use eyre::Result;
 use reth_storage_api::{StateProvider, StateProviderBox};
+use revm::bytecode::JumpTable;
 use revm::state::Bytecode;
 
 // ─── ReadWriteStateAdapter — revm-backed (write path) ────────────────
@@ -65,9 +66,21 @@ impl StateAdapter for ReadWriteStateAdapter<'_, '_> {
     }
 
     fn set_code(&mut self, addr: &Address, code: Vec<u8>) -> Result<()> {
-        let bytecode = Bytecode::new_raw(Bytes::from(code));
+        let bytes = Bytes::from(code);
+        let hash = keccak256(&bytes);
+        // Bypass Bytecode::new_raw → new_legacy → analyze_legacy (an O(N) byte scan
+        // that builds a jump table for EVM execution — wasted for bitmap/ART data
+        // that is never executed). All-zeros jump table is correct: no valid JUMPDEST
+        // positions, which is the intended behaviour for non-EVM account code.
+        let bytecode = if bytes.is_empty() {
+            Bytecode::new() // empty singleton, carries KECCAK_EMPTY
+        } else {
+            let n = bytes.len();
+            let table = JumpTable::from_slice(&vec![0u8; n.div_ceil(8)], n);
+            Bytecode::new_analyzed(bytes, n, table)
+        };
         self.internals
-            .set_code(*addr, bytecode)
+            .set_code_with_hash(*addr, bytecode, hash)
             .map_err(|e| eyre::eyre!("set_code({addr}): {e:?}"))?;
         self.ensure_nonce_at_least_one(*addr)
     }
@@ -100,6 +113,10 @@ impl StateAdapter for ReadWriteStateAdapter<'_, '_> {
 
     fn ensure_account_persists(&mut self, addr: &Address) -> Result<()> {
         self.ensure_nonce_at_least_one(*addr)
+    }
+
+    fn iter_storage_asc(&mut self, _addr: &Address, _from: B256) -> Result<Vec<(B256, B256)>> {
+        eyre::bail!("iter_storage_asc is not available during transaction execution")
     }
 }
 
@@ -148,5 +165,9 @@ impl StateAdapter for ReadOnlyStateAdapter {
 
     fn ensure_account_persists(&mut self, _addr: &Address) -> Result<()> {
         eyre::bail!("ReadOnlyStateAdapter: ensure_account_persists called from query path")
+    }
+
+    fn iter_storage_asc(&mut self, addr: &Address, from: B256) -> Result<Vec<(B256, B256)>> {
+        iter_storage_asc_impl(self, addr, from)
     }
 }

@@ -176,7 +176,7 @@ where
     async fn query(&self, q: String, options: Option<QueryOptions>) -> RpcResult<QueryResponse> {
         let provider = self.provider.clone();
         let options = options.unwrap_or_default();
-        // MDBX state reads are sync I/O — keep them off the tokio runtime.
+        // State reads are sync I/O — keep them off the tokio runtime.
         tokio::task::spawn_blocking(move || run_query(provider, &q, &options))
             .await
             .map_err(|e| internal_err(format!("blocking task join: {e}")))?

@@ -94,13 +94,53 @@ pub fn pair_address(annot_key: &[u8], annot_val: &[u8]) -> Address {
     Address::from_slice(&keccak256(buf).0[..20])
 }
 
-/// Index-account address. Spec: `index_address(k) =
-/// keccak256("arkiv.index" || k)[:20]` (2_state-model §2, Index
-/// Accounts). Namespace is disjoint from `"arkiv.pair"`.
-pub fn index_address(attr_key: &[u8]) -> Address {
-    let mut buf = Vec::with_capacity(b"arkiv.index".len() + attr_key.len());
-    buf.extend_from_slice(b"arkiv.index");
+/// Int-index account address. Tier-2 index for values ≤ 32 bytes.
+/// Each storage slot: key = right-padded annotation value (B256),
+/// value = `(len+1)` as u32 BE in last 4 bytes (0 = absent).
+pub fn int_index_address(attr_key: &[u8]) -> Address {
+    let mut buf = Vec::with_capacity(b"arkiv.iidx".len() + attr_key.len());
+    buf.extend_from_slice(b"arkiv.iidx");
     buf.extend_from_slice(attr_key);
+    Address::from_slice(&keccak256(buf).0[..20])
+}
+
+/// String-index account address at the given DFS level.
+/// `prefix` is the concatenation of all 32-byte chunks consumed so far.
+/// Level 0: `prefix = b""`. Level 1: `prefix = chunk0` (32 bytes). Etc.
+pub fn str_level_address(attr_key: &[u8], prefix: &[u8]) -> Address {
+    let mut buf =
+        Vec::with_capacity(b"arkiv.sidx".len() + attr_key.len() + 1 + prefix.len());
+    buf.extend_from_slice(b"arkiv.sidx");
+    buf.extend_from_slice(attr_key);
+    buf.push(0x00);
+    buf.extend_from_slice(prefix);
+    Address::from_slice(&keccak256(buf).0[..20])
+}
+
+/// Magic byte stored at offset 16 of the B+ tree header slot (slot 0 of
+/// `btree_header_address`). Distinguishes the header from a list account
+/// (whose slot 0 is a u64 count, so byte 16 is always 0).
+pub const BTREE_MAGIC: u8 = 0x42;
+
+/// Maximum number of keys per B+ tree node (leaf or internal).
+pub const BTREE_ORDER: usize = 32;
+
+/// Header address for the B+ tree Int-mode Tier-2 index for `attr_key`.
+///
+/// Slot 0 layout: `[0..7]` = root_node_id (u64 BE), `[8..15]` = next_node_id
+/// (u64 BE), `[16]` = `BTREE_MAGIC`.
+pub fn btree_header_address(attr_key: &[u8]) -> Address {
+    let mut buf = Vec::with_capacity(b"arkiv.ibth".len() + attr_key.len());
+    buf.extend_from_slice(b"arkiv.ibth");
+    buf.extend_from_slice(attr_key);
+    Address::from_slice(&keccak256(buf).0[..20])
+}
+
+fn btree_node_address(header_addr: &Address, node_id: u64) -> Address {
+    let mut buf = [0u8; 38];
+    buf[..10].copy_from_slice(b"arkiv.ibtn");
+    buf[10..30].copy_from_slice(header_addr.as_slice());
+    buf[30..].copy_from_slice(&node_id.to_be_bytes());
     Address::from_slice(&keccak256(buf).0[..20])
 }
 
@@ -231,6 +271,108 @@ fn address_to_storage(addr: Address) -> B256 {
     B256::from(buf)
 }
 
+// ─── Tier-2 index slot encodings ─────────────────────────────────────
+//
+// Slot key   = right-padded annotation value (up to 32 bytes → B256).
+// Slot value = 0 (absent) or (len + 1) as u32 big-endian in the last
+//              4 bytes of a 32-byte word. `len + 1` avoids ambiguity:
+//              0 means absent, 1 means present with len = 0 (empty
+//              value), etc. Values cannot contain null bytes (enforced
+//              by the precompile), so right-padding is unambiguous.
+
+/// Encode an annotation value (≤ 32 bytes) as a B256 slot key by
+/// right-padding with zeros.
+#[inline]
+pub fn annot_val_to_slot(val: &[u8]) -> B256 {
+    debug_assert!(val.len() <= 32, "annot_val_to_slot: value too long ({} bytes)", val.len());
+    let mut buf = [0u8; 32];
+    buf[..val.len()].copy_from_slice(val);
+    B256::from(buf)
+}
+
+/// Encode "value of length `len` is present" as a slot value.
+/// `slot_presence(0)` = `[0,…,0,0,0,0,1]` (last byte = 1).
+#[inline]
+pub fn slot_presence(len: usize) -> B256 {
+    let mut buf = [0u8; 32];
+    buf[28..].copy_from_slice(&(len as u32 + 1).to_be_bytes());
+    B256::from(buf)
+}
+
+/// Decode the original annotation value length from a slot value.
+/// Returns `None` if the slot is zero (absent).
+#[inline]
+pub fn slot_to_val_len(b: B256) -> Option<usize> {
+    let n = u32::from_be_bytes(b.0[28..].try_into().unwrap());
+    if n == 0 { None } else { Some((n - 1) as usize) }
+}
+
+/// Split an annotation value (≤ 128 bytes) into up to four 32-byte
+/// right-padded chunks (B256). An empty value produces a single
+/// `B256::ZERO` chunk.
+pub fn value_chunks(val: &[u8]) -> Vec<B256> {
+    debug_assert!(val.len() <= 128, "value_chunks: value too long ({} bytes)", val.len());
+    if val.is_empty() {
+        return vec![B256::ZERO];
+    }
+    let n = val.len().div_ceil(32);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let start = i * 32;
+        let end = (start + 32).min(val.len());
+        let mut chunk = [0u8; 32];
+        chunk[..end - start].copy_from_slice(&val[start..end]);
+        out.push(B256::from(chunk));
+    }
+    out
+}
+
+/// Address of the enumeration list for a Tier-2 index address.
+///
+/// Each Tier-2 index address (`int_index_address` or `str_level_address`)
+/// has a companion list address that records, in insertion order, every
+/// distinct slot key ever written to the index. This lets `iter_storage_asc`
+/// enumerate all live entries without needing a B-tree cursor over the
+/// underlying database.
+///
+/// List layout (storage of the list address):
+/// - Slot `B256::ZERO` → count of entries (u64 in last 8 bytes).
+/// - Slot `list_entry_slot(i)` for i ∈ 1..=count → the i-th slot key.
+pub fn list_address_for(index_addr: &Address) -> Address {
+    let mut buf = Vec::with_capacity(b"arkiv.list".len() + 20);
+    buf.extend_from_slice(b"arkiv.list");
+    buf.extend_from_slice(index_addr.as_slice());
+    Address::from_slice(&keccak256(buf).0[..20])
+}
+
+/// Slot within a list address that holds the i-th entry (1-based).
+/// Slot 0 is reserved for the count.
+#[inline]
+pub fn list_entry_slot(i: u64) -> B256 {
+    u64_to_storage(i)
+}
+
+/// Return the exclusive upper-bound B256 slot key for a prefix match:
+/// the smallest slot key that is NOT prefixed by `prefix`.
+/// Returns `None` if `prefix` is all 0xFF bytes (every slot is a match).
+pub fn next_prefix_bound_slot(prefix: &[u8]) -> Option<B256> {
+    let mut bound = [0u8; 32];
+    bound[..prefix.len()].copy_from_slice(prefix);
+    // Increment the big-endian integer formed by the prefix bytes.
+    let mut carry = true;
+    for b in bound[..prefix.len()].iter_mut().rev() {
+        if carry {
+            if *b == 0xFF {
+                *b = 0;
+            } else {
+                *b += 1;
+                carry = false;
+            }
+        }
+    }
+    if carry { None } else { Some(B256::from(bound)) }
+}
+
 // ─── Annotation value encodings (for pair-account addresses) ─────────
 //
 // Encoding choices are critical: lex order of these byte sequences
@@ -337,14 +479,21 @@ impl FromIterator<u64> for Bitmap {
     }
 }
 
-// ─── IndexTree (Tier-2 ordered value set) ─────────────────────────────
+// ─── Tier-2 index mode ────────────────────────────────────────────────
 
-mod index_tree;
-/// Adaptive Radix Tree ordered set of attribute values for a single
-/// attribute key, stored in an **index account** at [`index_address`].
-/// Provides O(log n) insert/remove, prefix-compressed deterministic
-/// serialisation, and ascending range/prefix iteration.
-pub use index_tree::IndexTree;
+/// Whether an annotation key uses the single-level **int** index
+/// (values ≤ 32 bytes, one slot per value) or the four-level **string**
+/// cascade index (values ≤ 128 bytes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnotMode {
+    /// Single-level index at `int_index_address(attr_key)`. Slot key =
+    /// right-padded 32-byte value; slot value = `(len+1)` as u32 BE in
+    /// last 4 bytes.
+    Int,
+    /// Four-level cascade at `str_level_address(attr_key, prefix)`.
+    /// Each level's slot key is the next 32-byte chunk of the value.
+    Str,
+}
 
 // ─── Entity RLP ───────────────────────────────────────────────────────
 
@@ -437,6 +586,11 @@ pub trait StateAdapter {
     fn storage(&mut self, addr: &Address, slot: B256) -> Result<B256>;
     fn set_storage(&mut self, addr: &Address, slot: B256, value: B256) -> Result<()>;
     fn ensure_account_persists(&mut self, addr: &Address) -> Result<()>;
+
+    /// Return all storage entries for `addr` with slot key ≥ `from`,
+    /// ordered ascending by slot key. Used by range queries to iterate
+    /// the Tier-2 index accounts. Write-time implementations may bail.
+    fn iter_storage_asc(&mut self, addr: &Address, from: B256) -> Result<Vec<(B256, B256)>>;
 }
 
 // ─── Op handlers ──────────────────────────────────────────────────────
@@ -494,7 +648,7 @@ pub fn create<S: StateAdapter>(
     )?;
 
     // 3) Insert into every bitmap (built-in + user).
-    for (k, v) in built_in_pairs(
+    for (k, v, m) in built_in_pairs(
         sender,
         sender,
         entity_key,
@@ -505,7 +659,7 @@ pub fn create<S: StateAdapter>(
     .into_iter()
     .chain(user_pairs(&string_annotations, &numeric_annotations))
     {
-        insert_into_pair_bitmap(state, &k, &v, entity_id)?;
+        insert_into_pair_bitmap(state, &k, &v, entity_id, m)?;
     }
 
     // 4) Write the entity RLP.
@@ -594,12 +748,14 @@ pub fn extend<S: StateAdapter>(
         ANNOT_EXPIRATION,
         &encode_u64_be(entity.expires_at),
         entity_id,
+        AnnotMode::Int,
     )?;
     insert_into_pair_bitmap(
         state,
         ANNOT_EXPIRATION,
         &encode_u64_be(new_expires_at),
         entity_id,
+        AnnotMode::Int,
     )?;
 
     entity.expires_at = new_expires_at;
@@ -622,8 +778,8 @@ pub fn transfer<S: StateAdapter>(
     let entity_id = read_entity_id(state, entity_addr)?;
     let mut entity = read_entity(state, entity_addr)?;
 
-    remove_from_pair_bitmap(state, ANNOT_OWNER, &encode_address(entity.owner), entity_id)?;
-    insert_into_pair_bitmap(state, ANNOT_OWNER, &encode_address(new_owner), entity_id)?;
+    remove_from_pair_bitmap(state, ANNOT_OWNER, &encode_address(entity.owner), entity_id, AnnotMode::Int)?;
+    insert_into_pair_bitmap(state, ANNOT_OWNER, &encode_address(new_owner), entity_id, AnnotMode::Int)?;
 
     entity.owner = new_owner;
     entity.last_modified_at_block = current_block;
@@ -641,7 +797,7 @@ pub fn delete<S: StateAdapter>(state: &mut S, entity_key: B256) -> Result<()> {
     let entity_id = read_entity_id(state, entity_addr)?;
     let entity = read_entity(state, entity_addr)?;
 
-    for (k, v) in built_in_pairs(
+    for (k, v, m) in built_in_pairs(
         entity.creator,
         entity.owner,
         entity_key,
@@ -654,7 +810,7 @@ pub fn delete<S: StateAdapter>(state: &mut S, entity_key: B256) -> Result<()> {
         &entity.string_annotations,
         &entity.numeric_annotations,
     )) {
-        remove_from_pair_bitmap(state, &k, &v, entity_id)?;
+        remove_from_pair_bitmap(state, &k, &v, entity_id, m)?;
     }
 
     // Clear ID-map slots.
@@ -697,8 +853,8 @@ fn read_entity_id<S: StateAdapter>(state: &mut S, entity_addr: Address) -> Resul
     ))
 }
 
-/// All built-in `(key, value)` pairs for an entity. Used by `create`
-/// (to insert) and `delete`/`expire` (to remove).
+/// All built-in `(key, value, mode)` triples for an entity. Used by
+/// `create` (to insert) and `delete`/`expire` (to remove).
 fn built_in_pairs(
     creator: Address,
     owner: Address,
@@ -706,67 +862,67 @@ fn built_in_pairs(
     created_at_block: u64,
     expires_at: u64,
     content_type: &[u8],
-) -> Vec<(Vec<u8>, Vec<u8>)> {
+) -> Vec<(Vec<u8>, Vec<u8>, AnnotMode)> {
     vec![
-        (ANNOT_ALL.to_vec(), Vec::new()),
-        (ANNOT_CREATOR.to_vec(), encode_address(creator)),
-        (
-            ANNOT_CREATED_AT_BLOCK.to_vec(),
-            encode_u64_be(created_at_block),
-        ),
-        (ANNOT_OWNER.to_vec(), encode_address(owner)),
-        (ANNOT_KEY.to_vec(), encode_b256(entity_key)),
-        (ANNOT_EXPIRATION.to_vec(), encode_u64_be(expires_at)),
-        (ANNOT_CONTENT_TYPE.to_vec(), content_type.to_vec()),
+        (ANNOT_ALL.to_vec(), Vec::new(), AnnotMode::Int),
+        (ANNOT_CREATOR.to_vec(), encode_address(creator), AnnotMode::Int),
+        (ANNOT_CREATED_AT_BLOCK.to_vec(), encode_u64_be(created_at_block), AnnotMode::Int),
+        (ANNOT_OWNER.to_vec(), encode_address(owner), AnnotMode::Int),
+        (ANNOT_KEY.to_vec(), encode_b256(entity_key), AnnotMode::Int),
+        (ANNOT_EXPIRATION.to_vec(), encode_u64_be(expires_at), AnnotMode::Int),
+        (ANNOT_CONTENT_TYPE.to_vec(), content_type.to_vec(), AnnotMode::Str),
     ]
 }
 
-/// User-supplied annotations flattened to `(key, value)` byte pairs.
+/// User-supplied annotations as `(key, value, mode)` triples.
 fn user_pairs<'a>(
     string_annotations: &'a [StringAnnotation],
     numeric_annotations: &'a [NumericAnnotation],
-) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> + 'a {
+) -> impl Iterator<Item = (Vec<u8>, Vec<u8>, AnnotMode)> + 'a {
     string_annotations
         .iter()
-        .map(|sa| (sa.key.clone(), sa.value.clone()))
+        .map(|sa| (sa.key.clone(), sa.value.clone(), AnnotMode::Str))
         .chain(
             numeric_annotations
                 .iter()
-                .map(|na| (na.key.clone(), encode_u256_be(na.value))),
+                .map(|na| (na.key.clone(), encode_u256_be(na.value), AnnotMode::Int)),
         )
 }
 
-/// Pairs that an UPDATE op diffs: the user annotations plus
-/// `$contentType`. Other built-ins (`$creator` / `$key` /
-/// `$createdAtBlock` / `$owner` / `$expiration` / `$all`) don't change
-/// on UPDATE and so aren't in the diff set.
+/// Pairs that an UPDATE op diffs: user annotations plus `$contentType`.
 fn updatable_pairs(
     content_type: &[u8],
     string_annotations: &[StringAnnotation],
     numeric_annotations: &[NumericAnnotation],
-) -> Vec<(Vec<u8>, Vec<u8>)> {
+) -> Vec<(Vec<u8>, Vec<u8>, AnnotMode)> {
     let mut out = Vec::with_capacity(1 + string_annotations.len() + numeric_annotations.len());
-    out.push((ANNOT_CONTENT_TYPE.to_vec(), content_type.to_vec()));
+    out.push((ANNOT_CONTENT_TYPE.to_vec(), content_type.to_vec(), AnnotMode::Str));
     out.extend(user_pairs(string_annotations, numeric_annotations));
     out
 }
 
-/// Diff two `(key, value)` pair sets and apply removals + insertions
-/// to the corresponding pair bitmaps.
+/// Diff two `(key, value, mode)` triple sets and apply removals +
+/// insertions to the corresponding pair bitmaps.
 fn apply_pair_diff<S: StateAdapter>(
     state: &mut S,
-    old: &[(Vec<u8>, Vec<u8>)],
-    new: &[(Vec<u8>, Vec<u8>)],
+    old: &[(Vec<u8>, Vec<u8>, AnnotMode)],
+    new: &[(Vec<u8>, Vec<u8>, AnnotMode)],
     entity_id: u64,
 ) -> Result<()> {
     use std::collections::BTreeSet;
-    let old_set: BTreeSet<&(Vec<u8>, Vec<u8>)> = old.iter().collect();
-    let new_set: BTreeSet<&(Vec<u8>, Vec<u8>)> = new.iter().collect();
-    for p in old.iter().filter(|p| !new_set.contains(*p)) {
-        remove_from_pair_bitmap(state, &p.0, &p.1, entity_id)?;
+    let old_set: BTreeSet<(&[u8], &[u8])> =
+        old.iter().map(|(k, v, _)| (k.as_slice(), v.as_slice())).collect();
+    let new_set: BTreeSet<(&[u8], &[u8])> =
+        new.iter().map(|(k, v, _)| (k.as_slice(), v.as_slice())).collect();
+    for (k, v, m) in old.iter() {
+        if !new_set.contains(&(k.as_slice(), v.as_slice())) {
+            remove_from_pair_bitmap(state, k, v, entity_id, *m)?;
+        }
     }
-    for p in new.iter().filter(|p| !old_set.contains(*p)) {
-        insert_into_pair_bitmap(state, &p.0, &p.1, entity_id)?;
+    for (k, v, m) in new.iter() {
+        if !old_set.contains(&(k.as_slice(), v.as_slice())) {
+            insert_into_pair_bitmap(state, k, v, entity_id, *m)?;
+        }
     }
     Ok(())
 }
@@ -776,16 +932,14 @@ fn insert_into_pair_bitmap<S: StateAdapter>(
     annot_key: &[u8],
     annot_val: &[u8],
     entity_id: u64,
+    mode: AnnotMode,
 ) -> Result<()> {
     let mut bitmap = read_pair_bitmap(state, annot_key, annot_val)?;
     let was_empty = bitmap.is_empty();
     bitmap.insert(entity_id);
     state.set_code(&pair_address(annot_key, annot_val), bitmap.to_bytes())?;
-    // Tier-2: insert the value into the index tree on first use of this pair.
     if was_empty {
-        let mut tree = read_index_tree(state, annot_key)?;
-        tree.insert(annot_val.to_vec());
-        state.set_code(&index_address(annot_key), tree.to_bytes())?;
+        tier2_insert(state, annot_key, annot_val, mode)?;
     }
     Ok(())
 }
@@ -795,24 +949,421 @@ fn remove_from_pair_bitmap<S: StateAdapter>(
     annot_key: &[u8],
     annot_val: &[u8],
     entity_id: u64,
+    mode: AnnotMode,
 ) -> Result<()> {
     let mut bitmap = read_pair_bitmap(state, annot_key, annot_val)?;
     if bitmap.is_empty() {
-        // Bitmap doesn't exist yet — nothing to remove. Shouldn't
-        // happen under well-formed ops; tolerated.
         return Ok(());
     }
     bitmap.remove(entity_id);
     state.set_code(&pair_address(annot_key, annot_val), bitmap.to_bytes())?;
-    // Tier-2: remove the value from the index tree when the last entity
-    // using this pair is gone.
     if bitmap.is_empty() {
-        let mut tree = read_index_tree(state, annot_key)?;
-        tree.remove(annot_val);
-        if tree.is_empty() {
-            state.tombstone_code(&index_address(annot_key))?;
+        tier2_remove(state, annot_key, annot_val, mode)?;
+    }
+    Ok(())
+}
+
+/// Append `entry` (a slot key) to the enumeration list for `index_addr`.
+/// Called exactly once per distinct value, either on first Int insert
+/// (guaranteed by `was_empty`) or on first appearance of a new chunk at
+/// a given Str level (guarded by a pre-read in `tier2_insert`).
+fn list_append<S: StateAdapter>(
+    state: &mut S,
+    index_addr: &Address,
+    entry: B256,
+) -> Result<()> {
+    let list_addr = list_address_for(index_addr);
+    state.ensure_account_persists(&list_addr)?;
+    let count = storage_to_u64(state.storage(&list_addr, B256::ZERO)?);
+    state.set_storage(&list_addr, list_entry_slot(count + 1), entry)?;
+    state.set_storage(&list_addr, B256::ZERO, u64_to_storage(count + 1))?;
+    Ok(())
+}
+
+// ─── In-storage B+ tree (Int-mode Tier-2 index) ──────────────────────
+
+#[inline]
+fn btree_key_slot(i: usize) -> B256 {
+    u64_to_storage(1 + i as u64)
+}
+
+#[inline]
+fn btree_value_slot(i: usize) -> B256 {
+    u64_to_storage(1 + BTREE_ORDER as u64 + i as u64)
+}
+
+struct BTreeNode {
+    is_leaf: bool,
+    right_sibling: u64,
+    keys: Vec<B256>,
+    values: Vec<B256>,
+}
+
+fn btree_read_header<S: StateAdapter>(
+    state: &mut S,
+    header_addr: &Address,
+) -> Result<(u64, u64)> {
+    let raw = state.storage(header_addr, B256::ZERO)?;
+    let root_id = u64::from_be_bytes(raw.0[0..8].try_into().unwrap());
+    let next_id = u64::from_be_bytes(raw.0[8..16].try_into().unwrap());
+    Ok((root_id, next_id))
+}
+
+fn btree_write_header<S: StateAdapter>(
+    state: &mut S,
+    header_addr: &Address,
+    root_id: u64,
+    next_id: u64,
+) -> Result<()> {
+    let mut buf = [0u8; 32];
+    buf[0..8].copy_from_slice(&root_id.to_be_bytes());
+    buf[8..16].copy_from_slice(&next_id.to_be_bytes());
+    buf[16] = BTREE_MAGIC;
+    state.ensure_account_persists(header_addr)?;
+    state.set_storage(header_addr, B256::ZERO, B256::from(buf))
+}
+
+/// Allocates a new node ID: reads current next_id from header, writes
+/// next_id+1 back (preserving root_id), returns the allocated ID.
+fn btree_alloc_node<S: StateAdapter>(
+    state: &mut S,
+    header_addr: &Address,
+) -> Result<u64> {
+    let (root_id, next_id) = btree_read_header(state, header_addr)?;
+    let node_id = if next_id == 0 { 1 } else { next_id };
+    btree_write_header(state, header_addr, root_id, node_id + 1)?;
+    Ok(node_id)
+}
+
+fn btree_read_node<S: StateAdapter>(
+    state: &mut S,
+    header_addr: &Address,
+    node_id: u64,
+) -> Result<BTreeNode> {
+    let node_addr = btree_node_address(header_addr, node_id);
+    let meta = state.storage(&node_addr, B256::ZERO)?;
+    let right_sibling = u64::from_be_bytes(meta.0[0..8].try_into().unwrap());
+    let key_count = u16::from_be_bytes(meta.0[8..10].try_into().unwrap()) as usize;
+    let is_leaf = meta.0[10] & 1 != 0;
+
+    let mut keys = Vec::with_capacity(key_count);
+    for i in 0..key_count {
+        keys.push(state.storage(&node_addr, btree_key_slot(i))?);
+    }
+    // Leaves: key_count values; internals: key_count+1 children.
+    let val_count = if is_leaf { key_count } else { key_count + 1 };
+    let mut values = Vec::with_capacity(val_count);
+    for i in 0..val_count {
+        values.push(state.storage(&node_addr, btree_value_slot(i))?);
+    }
+    Ok(BTreeNode { is_leaf, right_sibling, keys, values })
+}
+
+fn btree_write_node<S: StateAdapter>(
+    state: &mut S,
+    header_addr: &Address,
+    node_id: u64,
+    node: &BTreeNode,
+) -> Result<()> {
+    let node_addr = btree_node_address(header_addr, node_id);
+    state.ensure_account_persists(&node_addr)?;
+    let mut meta = [0u8; 32];
+    meta[0..8].copy_from_slice(&node.right_sibling.to_be_bytes());
+    meta[8..10].copy_from_slice(&(node.keys.len() as u16).to_be_bytes());
+    meta[10] = if node.is_leaf { 1 } else { 0 };
+    state.set_storage(&node_addr, B256::ZERO, B256::from(meta))?;
+    for (i, k) in node.keys.iter().enumerate() {
+        state.set_storage(&node_addr, btree_key_slot(i), *k)?;
+    }
+    for (i, v) in node.values.iter().enumerate() {
+        state.set_storage(&node_addr, btree_value_slot(i), *v)?;
+    }
+    Ok(())
+}
+
+fn btree_descend_to_leaf<S: StateAdapter>(
+    state: &mut S,
+    header_addr: &Address,
+    mut node_id: u64,
+    key: B256,
+) -> Result<u64> {
+    loop {
+        let node = btree_read_node(state, header_addr, node_id)?;
+        if node.is_leaf {
+            return Ok(node_id);
+        }
+        // Among children, `k <= key` counts how many keys precede the target
+        // child; that count is the correct child index.
+        let pos = node.keys.partition_point(|k| *k <= key);
+        node_id = u64::from_be_bytes(node.values[pos].0[24..32].try_into().unwrap());
+    }
+}
+
+enum InsertResult {
+    Done,
+    Split { push_up: B256, new_sibling_id: u64 },
+}
+
+fn insert_recursive<S: StateAdapter>(
+    state: &mut S,
+    header_addr: &Address,
+    node_id: u64,
+    key: B256,
+    value: B256,
+) -> Result<InsertResult> {
+    let mut node = btree_read_node(state, header_addr, node_id)?;
+
+    if node.is_leaf {
+        let pos = node.keys.partition_point(|k| *k < key);
+        if pos < node.keys.len() && node.keys[pos] == key {
+            // Update in place (handles lazy-delete re-insert and B256::ZERO $all key).
+            node.values[pos] = value;
+            btree_write_node(state, header_addr, node_id, &node)?;
+            return Ok(InsertResult::Done);
+        }
+        node.keys.insert(pos, key);
+        node.values.insert(pos, value);
+        if node.keys.len() <= BTREE_ORDER {
+            btree_write_node(state, header_addr, node_id, &node)?;
+            return Ok(InsertResult::Done);
+        }
+        let mid = node.keys.len() / 2;
+        let new_id = btree_alloc_node(state, header_addr)?;
+        let new_node = BTreeNode {
+            is_leaf: true,
+            right_sibling: node.right_sibling,
+            keys: node.keys.split_off(mid),
+            values: node.values.split_off(mid),
+        };
+        let push_up = new_node.keys[0];
+        node.right_sibling = new_id;
+        btree_write_node(state, header_addr, node_id, &node)?;
+        btree_write_node(state, header_addr, new_id, &new_node)?;
+        return Ok(InsertResult::Split { push_up, new_sibling_id: new_id });
+    }
+
+    // Internal node
+    let pos = node.keys.partition_point(|k| *k <= key);
+    let child_id = u64::from_be_bytes(node.values[pos].0[24..32].try_into().unwrap());
+    match insert_recursive(state, header_addr, child_id, key, value)? {
+        InsertResult::Done => Ok(InsertResult::Done),
+        InsertResult::Split { push_up, new_sibling_id } => {
+            node.keys.insert(pos, push_up);
+            let mut rhs_buf = [0u8; 32];
+            rhs_buf[24..32].copy_from_slice(&new_sibling_id.to_be_bytes());
+            node.values.insert(pos + 1, B256::from(rhs_buf));
+            if node.keys.len() <= BTREE_ORDER {
+                btree_write_node(state, header_addr, node_id, &node)?;
+                return Ok(InsertResult::Done);
+            }
+            let mid = node.keys.len() / 2;
+            let push_up_key = node.keys[mid];
+            let new_id = btree_alloc_node(state, header_addr)?;
+            let new_node = BTreeNode {
+                is_leaf: false,
+                right_sibling: node.right_sibling,
+                keys: node.keys.split_off(mid + 1),
+                values: node.values.split_off(mid + 1),
+            };
+            node.keys.truncate(mid);
+            node.right_sibling = new_id;
+            btree_write_node(state, header_addr, node_id, &node)?;
+            btree_write_node(state, header_addr, new_id, &new_node)?;
+            Ok(InsertResult::Split { push_up: push_up_key, new_sibling_id: new_id })
+        }
+    }
+}
+
+fn btree_insert<S: StateAdapter>(
+    state: &mut S,
+    header_addr: &Address,
+    key: B256,
+    value: B256,
+) -> Result<()> {
+    let (root_id, _) = btree_read_header(state, header_addr)?;
+    if root_id == 0 {
+        let leaf_id = btree_alloc_node(state, header_addr)?;
+        let leaf = BTreeNode {
+            is_leaf: true,
+            right_sibling: 0,
+            keys: vec![key],
+            values: vec![value],
+        };
+        btree_write_node(state, header_addr, leaf_id, &leaf)?;
+        let (_, next) = btree_read_header(state, header_addr)?;
+        return btree_write_header(state, header_addr, leaf_id, next);
+    }
+    match insert_recursive(state, header_addr, root_id, key, value)? {
+        InsertResult::Done => {}
+        InsertResult::Split { push_up, new_sibling_id } => {
+            let new_root_id = btree_alloc_node(state, header_addr)?;
+            let mut lhs_buf = [0u8; 32];
+            lhs_buf[24..32].copy_from_slice(&root_id.to_be_bytes());
+            let mut rhs_buf = [0u8; 32];
+            rhs_buf[24..32].copy_from_slice(&new_sibling_id.to_be_bytes());
+            let new_root = BTreeNode {
+                is_leaf: false,
+                right_sibling: 0,
+                keys: vec![push_up],
+                values: vec![B256::from(lhs_buf), B256::from(rhs_buf)],
+            };
+            btree_write_node(state, header_addr, new_root_id, &new_root)?;
+            let (_, next) = btree_read_header(state, header_addr)?;
+            btree_write_header(state, header_addr, new_root_id, next)?;
+        }
+    }
+    Ok(())
+}
+
+fn btree_lazy_delete<S: StateAdapter>(
+    state: &mut S,
+    header_addr: &Address,
+    key: B256,
+) -> Result<()> {
+    let (root_id, _) = btree_read_header(state, header_addr)?;
+    if root_id == 0 {
+        return Ok(());
+    }
+    let leaf_id = btree_descend_to_leaf(state, header_addr, root_id, key)?;
+    let node = btree_read_node(state, header_addr, leaf_id)?;
+    let pos = node.keys.partition_point(|k| *k < key);
+    if pos < node.keys.len() && node.keys[pos] == key {
+        let node_addr = btree_node_address(header_addr, leaf_id);
+        state.set_storage(&node_addr, btree_value_slot(pos), B256::ZERO)?;
+    }
+    Ok(())
+}
+
+/// Enumerate all B+ tree entries with key ≥ `from`, in ascending key order.
+/// Lazy-deleted entries (value = B256::ZERO) are skipped.
+pub fn btree_iter_from<S: StateAdapter>(
+    state: &mut S,
+    header_addr: &Address,
+    from: B256,
+) -> Result<Vec<(B256, B256)>> {
+    let (root_id, _) = btree_read_header(state, header_addr)?;
+    if root_id == 0 {
+        return Ok(vec![]);
+    }
+    let mut leaf_id = btree_descend_to_leaf(state, header_addr, root_id, from)?;
+    let mut result = Vec::new();
+    let mut first = true;
+    loop {
+        let leaf = btree_read_node(state, header_addr, leaf_id)?;
+        let start = if first {
+            first = false;
+            leaf.keys.partition_point(|k| *k < from)
         } else {
-            state.set_code(&index_address(annot_key), tree.to_bytes())?;
+            0
+        };
+        for i in start..leaf.keys.len() {
+            if leaf.values[i] != B256::ZERO {
+                result.push((leaf.keys[i], leaf.values[i]));
+            }
+        }
+        if leaf.right_sibling == 0 {
+            break;
+        }
+        leaf_id = leaf.right_sibling;
+    }
+    Ok(result)
+}
+
+/// Enumerate all list-based (Str-mode) Tier-2 index entries for
+/// `index_addr` with key ≥ `from`, in ascending key order.
+pub fn list_iter_from<S: StateAdapter>(
+    state: &mut S,
+    index_addr: &Address,
+    from: B256,
+) -> Result<Vec<(B256, B256)>> {
+    let list_addr = list_address_for(index_addr);
+    let count = storage_to_u64(state.storage(&list_addr, B256::ZERO)?);
+    let mut entries = Vec::with_capacity(count as usize);
+    for i in 1..=count {
+        let slot_key = state.storage(&list_addr, list_entry_slot(i))?;
+        let presence = state.storage(index_addr, slot_key)?;
+        if presence != B256::ZERO {
+            entries.push((slot_key, presence));
+        }
+    }
+    entries.sort_unstable_by_key(|(k, _)| *k);
+    let start = entries.partition_point(|(k, _)| *k < from);
+    Ok(entries.into_iter().skip(start).collect())
+}
+
+/// Shared `iter_storage_asc` dispatch: reads byte [16] of slot 0 to
+/// distinguish a B+ tree header (`BTREE_MAGIC`) from a list account.
+pub fn iter_storage_asc_impl<S: StateAdapter>(
+    state: &mut S,
+    addr: &Address,
+    from: B256,
+) -> Result<Vec<(B256, B256)>> {
+    let slot0 = state.storage(addr, B256::ZERO)?;
+    if slot0.0[16] == BTREE_MAGIC {
+        btree_iter_from(state, addr, from)
+    } else {
+        list_iter_from(state, addr, from)
+    }
+}
+
+fn tier2_insert<S: StateAdapter>(
+    state: &mut S,
+    annot_key: &[u8],
+    annot_val: &[u8],
+    mode: AnnotMode,
+) -> Result<()> {
+    match mode {
+        AnnotMode::Int => {
+            btree_insert(
+                state,
+                &btree_header_address(annot_key),
+                annot_val_to_slot(annot_val),
+                slot_presence(annot_val.len()),
+            )?;
+        }
+        AnnotMode::Str => {
+            let chunks = value_chunks(annot_val);
+            let mut prefix: Vec<u8> = Vec::with_capacity(96);
+            for chunk in &chunks {
+                let addr = str_level_address(annot_key, &prefix);
+                state.ensure_account_persists(&addr)?;
+                // At intermediate levels, the same chunk may appear for
+                // multiple values sharing that prefix; only register it
+                // in the list on its first appearance at this level.
+                let existing = state.storage(&addr, *chunk)?;
+                if existing == B256::ZERO {
+                    list_append(state, &addr, *chunk)?;
+                }
+                state.set_storage(&addr, *chunk, slot_presence(annot_val.len()))?;
+                prefix.extend_from_slice(chunk.as_slice());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn tier2_remove<S: StateAdapter>(
+    state: &mut S,
+    annot_key: &[u8],
+    annot_val: &[u8],
+    mode: AnnotMode,
+) -> Result<()> {
+    match mode {
+        AnnotMode::Int => {
+            btree_lazy_delete(
+                state,
+                &btree_header_address(annot_key),
+                annot_val_to_slot(annot_val),
+            )?;
+        }
+        AnnotMode::Str => {
+            let chunks = value_chunks(annot_val);
+            let mut prefix: Vec<u8> = Vec::with_capacity(96);
+            for chunk in &chunks {
+                let addr = str_level_address(annot_key, &prefix);
+                state.set_storage(&addr, *chunk, B256::ZERO)?;
+                prefix.extend_from_slice(chunk.as_slice());
+            }
         }
     }
     Ok(())
@@ -843,16 +1394,6 @@ pub fn all_entities<S: StateAdapter>(state: &mut S) -> Result<Bitmap> {
     read_pair_bitmap(state, ANNOT_ALL, b"")
 }
 
-/// Read the Tier-2 [`IndexTree`] for `attr_key`. An absent or
-/// tombstoned index account decodes to an empty tree — not an error.
-pub fn read_index_tree<S: StateAdapter>(state: &mut S, attr_key: &[u8]) -> Result<IndexTree> {
-    let code = state.code(&index_address(attr_key))?;
-    if code.is_empty() {
-        Ok(IndexTree::new())
-    } else {
-        IndexTree::from_bytes(&code)
-    }
-}
 
 /// Resolve a query-hit entity ID to its on-trie [`EntityRlp`].
 ///
@@ -971,6 +1512,10 @@ pub mod test_utils {
                 acc.nonce = 1;
             }
             Ok(())
+        }
+
+        fn iter_storage_asc(&mut self, addr: &Address, from: B256) -> Result<Vec<(B256, B256)>> {
+            iter_storage_asc_impl(self, addr, from)
         }
     }
 }
@@ -1289,119 +1834,115 @@ mod tests {
         assert_eq!(acc.nonce, 1);
     }
 
-    // ─── IndexTree ───────────────────────────────────────────────────
+    // ─── Tier-2 index (storage-slot based) ──────────────────────────
 
-    fn read_art_raw(db: &InMemoryStateDb, attr_key: &[u8]) -> IndexTree {
-        let addr = index_address(attr_key);
-        let code = db
-            .account(&addr)
-            .map(|a| a.code.clone())
-            .unwrap_or_default();
-        if code.is_empty() {
-            IndexTree::new()
-        } else {
-            IndexTree::from_bytes(&code).expect("decode IndexTree")
-        }
+    fn str_slot(db: &InMemoryStateDb, attr_key: &[u8], prefix: &[u8], chunk: B256) -> B256 {
+        let addr = str_level_address(attr_key, prefix);
+        db.account(&addr)
+            .and_then(|a| a.storage.get(&chunk).copied())
+            .unwrap_or(B256::ZERO)
     }
 
     #[test]
-    fn index_tree_round_trip() {
-        let mut tree = IndexTree::new();
-        tree.insert(b"apple".to_vec());
-        tree.insert(b"banana".to_vec());
-        tree.insert(b"cherry".to_vec());
-        let decoded = IndexTree::from_bytes(&tree.to_bytes()).expect("decode");
-        let vals: Vec<Vec<u8>> = decoded.iter_gte(b"").collect();
-        assert_eq!(
-            vals,
-            [b"apple".to_vec(), b"banana".to_vec(), b"cherry".to_vec()]
-        );
-    }
-
-    #[test]
-    fn index_tree_serialization_is_deterministic() {
-        let vals = [b"z".to_vec(), b"a".to_vec(), b"m".to_vec()];
-        let mut a = IndexTree::new();
-        let mut b = IndexTree::new();
-        for v in &vals {
-            a.insert(v.clone());
-        }
-        for v in vals.iter().rev() {
-            b.insert(v.clone());
-        }
-        assert_eq!(a.to_bytes(), b.to_bytes());
-    }
-
-    #[test]
-    fn index_tree_range_and_prefix_ops() {
-        let mut tree = IndexTree::new();
-        for v in [b"aaa", b"aab", b"abc", b"bbb", b"ccc"] {
-            tree.insert(v.to_vec());
-        }
-        let gt: Vec<Vec<u8>> = tree.iter_gt(b"aab").collect();
-        assert_eq!(gt, [b"abc".to_vec(), b"bbb".to_vec(), b"ccc".to_vec()]);
-
-        let lte: Vec<Vec<u8>> = tree.iter_lte(b"aab").collect();
-        assert_eq!(lte, [b"aaa".to_vec(), b"aab".to_vec()]);
-
-        let prefix: Vec<Vec<u8>> = tree.iter_prefix(b"aa").collect();
-        assert_eq!(prefix, [b"aaa".to_vec(), b"aab".to_vec()]);
-    }
-
-    #[test]
-    fn insert_pair_bitmap_writes_index_on_first_entity() {
+    fn tier2_int_insert_sets_storage_slot() {
         let mut db = fresh_db();
         let val = b"hello".to_vec();
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            insert_into_pair_bitmap(&mut state, b"tag", &val, 0).unwrap();
+            insert_into_pair_bitmap(&mut state, b"tag", &val, 0, AnnotMode::Int).unwrap();
         }
-        let tree = read_art_raw(&db, b"tag");
-        let vals: Vec<Vec<u8>> = tree.iter_gte(b"").collect();
-        assert_eq!(
-            vals,
-            [b"hello".to_vec()],
-            "index should contain value after first entity"
-        );
+        let header_addr = btree_header_address(b"tag");
+        // Header must have BTREE_MAGIC at byte 16.
+        let slot0 = db.account(&header_addr)
+            .and_then(|a| a.storage.get(&B256::ZERO).copied())
+            .unwrap_or(B256::ZERO);
+        assert_eq!(slot0.0[16], BTREE_MAGIC);
+        // iter_storage_asc must return the inserted value.
+        let mut state = InMemoryStateAdapter::new(&mut db);
+        let entries = state.iter_storage_asc(&header_addr, B256::ZERO).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, annot_val_to_slot(b"hello"));
+        assert_eq!(entries[0].1, slot_presence(5));
 
-        // Second insert of same value — bitmap was non-empty, ART unchanged.
+        // Second insert of same value — bitmap non-empty, tier2 not called again.
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            insert_into_pair_bitmap(&mut state, b"tag", &val, 1).unwrap();
+            insert_into_pair_bitmap(&mut state, b"tag", &val, 1, AnnotMode::Int).unwrap();
         }
-        let tree2 = read_art_raw(&db, b"tag");
-        assert_eq!(tree2.iter_gte(b"").count(), 1);
+        let mut state = InMemoryStateAdapter::new(&mut db);
+        let entries = state.iter_storage_asc(&header_addr, B256::ZERO).unwrap();
+        assert_eq!(entries.len(), 1, "still one distinct value");
     }
 
     #[test]
-    fn remove_pair_bitmap_removes_index_on_last_entity() {
+    fn tier2_int_remove_clears_storage_slot_on_last_entity() {
         let mut db = fresh_db();
         let val = b"hello".to_vec();
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            insert_into_pair_bitmap(&mut state, b"tag", &val, 0).unwrap();
-            insert_into_pair_bitmap(&mut state, b"tag", &val, 1).unwrap();
+            insert_into_pair_bitmap(&mut state, b"tag", &val, 0, AnnotMode::Int).unwrap();
+            insert_into_pair_bitmap(&mut state, b"tag", &val, 1, AnnotMode::Int).unwrap();
         }
+        let header_addr = btree_header_address(b"tag");
 
-        // Remove first entity — bitmap still has entity 1, ART unchanged.
+        // Remove first entity — bitmap still has entity 1, tier2 not triggered.
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            remove_from_pair_bitmap(&mut state, b"tag", &val, 0).unwrap();
+            remove_from_pair_bitmap(&mut state, b"tag", &val, 0, AnnotMode::Int).unwrap();
         }
-        assert!(
-            !read_art_raw(&db, b"tag").is_empty(),
-            "index should survive while entity 1 remains"
-        );
+        let mut state = InMemoryStateAdapter::new(&mut db);
+        let entries = state.iter_storage_asc(&header_addr, B256::ZERO).unwrap();
+        assert_eq!(entries.len(), 1, "value should survive while entity 1 remains");
 
-        // Remove last entity — bitmap is now empty, index account tombstoned.
+        // Remove last entity — lazy deleted, iter excludes it.
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            remove_from_pair_bitmap(&mut state, b"tag", &val, 1).unwrap();
+            remove_from_pair_bitmap(&mut state, b"tag", &val, 1, AnnotMode::Int).unwrap();
         }
-        assert!(
-            read_art_raw(&db, b"tag").is_empty(),
-            "index should be empty after last entity removed"
-        );
+        let mut state = InMemoryStateAdapter::new(&mut db);
+        let entries = state.iter_storage_asc(&header_addr, B256::ZERO).unwrap();
+        assert_eq!(entries.len(), 0, "value should be excluded after last entity removed");
+    }
+
+    #[test]
+    fn tier2_str_insert_sets_level0_slot() {
+        let mut db = fresh_db();
+        let val = b"image/png".to_vec(); // 9 bytes, single chunk
+        {
+            let mut state = InMemoryStateAdapter::new(&mut db);
+            insert_into_pair_bitmap(&mut state, b"ct", &val, 0, AnnotMode::Str).unwrap();
+        }
+        let chunk = value_chunks(b"image/png")[0];
+        let slot_val = str_slot(&db, b"ct", b"", chunk);
+        assert_eq!(slot_val, slot_presence(9));
+    }
+
+    #[test]
+    fn next_prefix_bound_slot_increments_correctly() {
+        let bound = next_prefix_bound_slot(b"ab");
+        // "ab" right-padded is [0x61, 0x62, 0, ...]. Increment at pos 1:
+        // → [0x61, 0x63, 0, ...].
+        let mut expected = [0u8; 32];
+        expected[0] = 0x61;
+        expected[1] = 0x63;
+        assert_eq!(bound, Some(B256::from(expected)));
+    }
+
+    #[test]
+    fn iter_storage_asc_in_memory_sorted() {
+        let mut db = fresh_db();
+        {
+            let mut state = InMemoryStateAdapter::new(&mut db);
+            insert_into_pair_bitmap(&mut state, b"k", b"c", 0, AnnotMode::Int).unwrap();
+            insert_into_pair_bitmap(&mut state, b"k", b"a", 1, AnnotMode::Int).unwrap();
+            insert_into_pair_bitmap(&mut state, b"k", b"b", 2, AnnotMode::Int).unwrap();
+        }
+        let mut state = InMemoryStateAdapter::new(&mut db);
+        let header_addr = btree_header_address(b"k");
+        let entries = state.iter_storage_asc(&header_addr, B256::ZERO).unwrap();
+        let keys: Vec<B256> = entries.iter().map(|(k, _)| *k).collect();
+        assert!(keys.windows(2).all(|w| w[0] <= w[1]), "must be sorted");
+        assert_eq!(keys.len(), 3);
     }
 
     #[test]

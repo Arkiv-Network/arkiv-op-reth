@@ -31,6 +31,7 @@
 use eyre::{Result, bail};
 
 use super::lexer::{Token, tokenize};
+use crate::AnnotMode;
 
 /// Parsed query AST. `Not` stays in the tree (no DeMorgan / DNF pass);
 /// the evaluator handles it as `$all \ eval(inner)`.
@@ -52,16 +53,16 @@ pub enum Query {
         key: AnnotKey,
         values: Vec<AnnotVal>,
     },
-    /// Leaf range: `key > value`.
-    Gt { key: AnnotKey, value: AnnotVal },
+    /// Leaf range: `key > value`. `mode` selects int vs string index.
+    Gt { key: AnnotKey, value: AnnotVal, mode: AnnotMode },
     /// Leaf range: `key >= value`.
-    Gte { key: AnnotKey, value: AnnotVal },
+    Gte { key: AnnotKey, value: AnnotVal, mode: AnnotMode },
     /// Leaf range: `key < value`.
-    Lt { key: AnnotKey, value: AnnotVal },
+    Lt { key: AnnotKey, value: AnnotVal, mode: AnnotMode },
     /// Leaf range: `key <= value`.
-    Lte { key: AnnotKey, value: AnnotVal },
+    Lte { key: AnnotKey, value: AnnotVal, mode: AnnotMode },
     /// Leaf glob: `key ~ "prefix*"`. `value` contains the prefix bytes
-    /// (the trailing `*` is stripped at parse time).
+    /// (the trailing `*` is stripped at parse time). Always `Str` mode.
     Glob { key: AnnotKey, value: AnnotVal },
     /// Leaf negated glob: `key !~ "prefix*"`. Evaluates as
     /// `$all \ eval(Glob { key, value })`.
@@ -256,23 +257,23 @@ impl Parser {
             }
             Some(Token::Gt) => {
                 self.advance();
-                let value = self.parse_value(&key)?;
-                Ok(Query::Gt { key, value })
+                let (value, mode) = self.parse_range_value(&key)?;
+                Ok(Query::Gt { key, value, mode })
             }
             Some(Token::Gte) => {
                 self.advance();
-                let value = self.parse_value(&key)?;
-                Ok(Query::Gte { key, value })
+                let (value, mode) = self.parse_range_value(&key)?;
+                Ok(Query::Gte { key, value, mode })
             }
             Some(Token::Lt) => {
                 self.advance();
-                let value = self.parse_value(&key)?;
-                Ok(Query::Lt { key, value })
+                let (value, mode) = self.parse_range_value(&key)?;
+                Ok(Query::Lt { key, value, mode })
             }
             Some(Token::Lte) => {
                 self.advance();
-                let value = self.parse_value(&key)?;
-                Ok(Query::Lte { key, value })
+                let (value, mode) = self.parse_range_value(&key)?;
+                Ok(Query::Lte { key, value, mode })
             }
             Some(Token::Tilde) => {
                 self.advance();
@@ -337,6 +338,12 @@ impl Parser {
         encode_for_key(key, lit)
     }
 
+    fn parse_range_value(&mut self, key: &AnnotKey) -> Result<(AnnotVal, AnnotMode)> {
+        let lit = self.parse_literal()?;
+        let mode = mode_for_key_lit(key, &lit);
+        Ok((encode_for_key(key, lit)?, mode))
+    }
+
     fn parse_value_list(&mut self, key: &AnnotKey) -> Result<Vec<AnnotVal>> {
         self.expect(&Token::LParen)?;
         let mut vals = Vec::new();
@@ -390,6 +397,16 @@ enum Literal {
 /// - number → 32-byte BE (matches `encode_u256_be`).
 /// - string → raw bytes.
 /// - address → 20 raw bytes.
+/// Determine the Tier-2 index mode for a (key, literal) pair at parse
+/// time, so the interpreter knows which index account to query.
+fn mode_for_key_lit(key: &AnnotKey, lit: &Literal) -> AnnotMode {
+    match (key, lit) {
+        (AnnotKey::BuiltIn(BuiltIn::ContentType), _) => AnnotMode::Str,
+        (AnnotKey::User(_), Literal::String(_)) => AnnotMode::Str,
+        _ => AnnotMode::Int,
+    }
+}
+
 /// - entity-key → 32 raw bytes (no zero-strip — matches the
 ///   precompile's `ATTR_ENTITY_KEY` handling).
 fn encode_for_key(key: &AnnotKey, lit: Literal) -> Result<AnnotVal> {

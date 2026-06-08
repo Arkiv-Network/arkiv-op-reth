@@ -1,26 +1,19 @@
 //! Tree-walking evaluator for the parsed query AST + the top-level
 //! [`execute`] entry point that callers (RPC, tests) should use.
 //!
-//! `Query::evaluate` recursively turns a [`Query`] into a [`Bitmap`] of
-//! matching entity IDs by issuing point reads against a
-//! [`StateAdapter`]. No normalization pass — `Not` is evaluated as
-//! `$all \ eval(inner)`, which means each `Not` (or `!=` / `NOT IN`)
-//! costs one extra `$all` read. Acceptable for the small queries we
-//! expect; can revisit if profiling says otherwise.
-//!
-//! [`execute`] is the convenience wrapper that combines parse →
-//! evaluate → paginate → resolve. The RPC layer calls only this; the
-//! lower-level `parse` / `Query::evaluate` / `resolve_id` remain
-//! public for tests and advanced consumers.
-//!
-//! Integration tests live in `crates/arkiv-entitydb/tests/query_eval.rs`.
+//! Range/glob predicates dispatch to either the single-level **int
+//! index** (values ≤ 32 bytes) or the four-level **string index**
+//! (values ≤ 128 bytes) via [`AnnotMode`] stored in the AST.
 
 use eyre::Result;
 
 use super::parser::{AnnotKey, AnnotVal, Query, parse};
 use crate::{
-    Bitmap, EntityRlp, StateAdapter, all_entities, read_index_tree, read_pair_bitmap, resolve_id,
+    AnnotMode, Bitmap, EntityRlp, StateAdapter, all_entities,
+    annot_val_to_slot, btree_header_address, read_pair_bitmap, resolve_id,
+    slot_to_val_len, str_level_address,
 };
+use alloy_primitives::B256;
 
 impl Query {
     /// Evaluate the AST against `state`, returning the bitmap of
@@ -52,8 +45,6 @@ fn eval<S: StateAdapter>(query: &Query, state: &mut S) -> Result<Bitmap> {
 
         Query::And(left, right) => {
             let mut l = eval(left, state)?;
-            // Short-circuit: AND with empty is empty, no need to load
-            // the right side.
             if l.is_empty() {
                 return Ok(l);
             }
@@ -74,72 +65,191 @@ fn eval<S: StateAdapter>(query: &Query, state: &mut S) -> Result<Bitmap> {
             Ok(all)
         }
 
-        Query::Gt { key, value } => {
-            let attr_key = key.pair_key_bytes();
-            let tree = read_index_tree(state, attr_key)?;
-            let mut result = Bitmap::new();
-            for val in tree.iter_gt(&value.0) {
-                result.union_with(&read_pair_bitmap(state, attr_key, &val)?);
-            }
-            Ok(result)
+        Query::Gt { key, value, mode } => {
+            collect_range_bitmaps(state, key.pair_key_bytes(), &value.0, *mode, Bound::Gt)
         }
-        Query::Gte { key, value } => {
-            let attr_key = key.pair_key_bytes();
-            let tree = read_index_tree(state, attr_key)?;
-            let mut result = Bitmap::new();
-            for val in tree.iter_gte(&value.0) {
-                result.union_with(&read_pair_bitmap(state, attr_key, &val)?);
-            }
-            Ok(result)
+        Query::Gte { key, value, mode } => {
+            collect_range_bitmaps(state, key.pair_key_bytes(), &value.0, *mode, Bound::Gte)
         }
-        Query::Lt { key, value } => {
-            let attr_key = key.pair_key_bytes();
-            let tree = read_index_tree(state, attr_key)?;
-            let mut result = Bitmap::new();
-            for val in tree.iter_lt(&value.0) {
-                result.union_with(&read_pair_bitmap(state, attr_key, &val)?);
-            }
-            Ok(result)
+        Query::Lt { key, value, mode } => {
+            collect_range_bitmaps(state, key.pair_key_bytes(), &value.0, *mode, Bound::Lt)
         }
-        Query::Lte { key, value } => {
-            let attr_key = key.pair_key_bytes();
-            let tree = read_index_tree(state, attr_key)?;
-            let mut result = Bitmap::new();
-            for val in tree.iter_lte(&value.0) {
-                result.union_with(&read_pair_bitmap(state, attr_key, &val)?);
-            }
-            Ok(result)
+        Query::Lte { key, value, mode } => {
+            collect_range_bitmaps(state, key.pair_key_bytes(), &value.0, *mode, Bound::Lte)
         }
         Query::Glob { key, value } => {
-            let attr_key = key.pair_key_bytes();
-            let tree = read_index_tree(state, attr_key)?;
-            let mut result = Bitmap::new();
-            for val in tree.iter_prefix(&value.0) {
-                result.union_with(&read_pair_bitmap(state, attr_key, &val)?);
-            }
-            Ok(result)
+            collect_glob_bitmaps(state, key.pair_key_bytes(), &value.0)
         }
         Query::NotGlob { key, value } => {
             let mut all = all_entities(state)?;
-            let hit = eval(
-                &Query::Glob {
-                    key: key.clone(),
-                    value: value.clone(),
-                },
-                state,
-            )?;
+            let hit = collect_glob_bitmaps(state, key.pair_key_bytes(), &value.0)?;
             all.subtract(&hit);
             Ok(all)
         }
     }
 }
 
+// ── Range bound kind ─────────────────────────────────────────────────
+
+#[derive(Clone, Copy)]
+enum Bound {
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+}
+
+// ── Main dispatch ─────────────────────────────────────────────────────
+
+fn collect_range_bitmaps<S: StateAdapter>(
+    state: &mut S,
+    attr_key: &[u8],
+    bound: &[u8],
+    mode: AnnotMode,
+    kind: Bound,
+) -> Result<Bitmap> {
+    let vals = match mode {
+        AnnotMode::Int => int_range_values(state, attr_key, bound, kind)?,
+        AnnotMode::Str => str_range_values(state, attr_key, bound, kind)?,
+    };
+    let mut result = Bitmap::new();
+    for v in &vals {
+        result.union_with(&read_pair_bitmap(state, attr_key, v)?);
+    }
+    Ok(result)
+}
+
+fn collect_glob_bitmaps<S: StateAdapter>(
+    state: &mut S,
+    attr_key: &[u8],
+    prefix: &[u8],
+) -> Result<Bitmap> {
+    // Glob is always Str mode (parser enforces this).
+    let vals = str_glob_values(state, attr_key, prefix)?;
+    let mut result = Bitmap::new();
+    for v in &vals {
+        result.union_with(&read_pair_bitmap(state, attr_key, v)?);
+    }
+    Ok(result)
+}
+
+// ── Int index (single-level storage slots, values ≤ 32 bytes) ────────
+
+fn int_range_values<S: StateAdapter>(
+    state: &mut S,
+    attr_key: &[u8],
+    bound: &[u8],
+    kind: Bound,
+) -> Result<Vec<Vec<u8>>> {
+    let addr = btree_header_address(attr_key);
+    let bound_slot = annot_val_to_slot(bound);
+    let mut result = Vec::new();
+
+    match kind {
+        Bound::Gt | Bound::Gte => {
+            let inclusive = matches!(kind, Bound::Gte);
+            for (slot_key, slot_val) in state.iter_storage_asc(&addr, bound_slot)? {
+                let Some(len) = slot_to_val_len(slot_val) else { continue };
+                if !inclusive && slot_key == bound_slot {
+                    continue;
+                }
+                result.push(slot_key.0[..len].to_vec());
+            }
+        }
+        Bound::Lt | Bound::Lte => {
+            let inclusive = matches!(kind, Bound::Lte);
+            for (slot_key, slot_val) in state.iter_storage_asc(&addr, B256::ZERO)? {
+                if slot_key > bound_slot {
+                    break;
+                }
+                if !inclusive && slot_key == bound_slot {
+                    break;
+                }
+                let Some(len) = slot_to_val_len(slot_val) else { continue };
+                result.push(slot_key.0[..len].to_vec());
+            }
+        }
+    }
+    Ok(result)
+}
+
+// ── String index (four-level DFS, values ≤ 128 bytes) ────────────────
+
+fn str_range_values<S: StateAdapter>(
+    state: &mut S,
+    attr_key: &[u8],
+    bound: &[u8],
+    kind: Bound,
+) -> Result<Vec<Vec<u8>>> {
+    let mut all = Vec::new();
+    str_collect_all(state, attr_key, &[], &mut all)?;
+
+    let result = all
+        .into_iter()
+        .filter(|v| match kind {
+            Bound::Gt => v.as_slice() > bound,
+            Bound::Gte => v.as_slice() >= bound,
+            Bound::Lt => v.as_slice() < bound,
+            Bound::Lte => v.as_slice() <= bound,
+        })
+        .collect();
+    Ok(result)
+}
+
+fn str_glob_values<S: StateAdapter>(
+    state: &mut S,
+    attr_key: &[u8],
+    prefix: &[u8],
+) -> Result<Vec<Vec<u8>>> {
+    let mut all = Vec::new();
+    str_collect_all(state, attr_key, &[], &mut all)?;
+
+    let result = all
+        .into_iter()
+        .filter(|v| v.starts_with(prefix))
+        .collect();
+    Ok(result)
+}
+
+/// DFS over the string index, collecting all stored values in ascending
+/// lex order (because `iter_storage_asc` yields slots in key order).
+fn str_collect_all<S: StateAdapter>(
+    state: &mut S,
+    attr_key: &[u8],
+    prefix: &[u8],
+    result: &mut Vec<Vec<u8>>,
+) -> Result<()> {
+    let level = prefix.len() / 32;
+    let addr = str_level_address(attr_key, prefix);
+    for (chunk, slot_val) in state.iter_storage_asc(&addr, B256::ZERO)? {
+        let Some(total_len) = slot_to_val_len(slot_val) else { continue };
+        if total_len <= (level + 1) * 32 {
+            // Leaf: reconstruct full value from prefix + tail bytes of chunk.
+            let tail_len = total_len.saturating_sub(level * 32);
+            let mut val = prefix.to_vec();
+            val.extend_from_slice(&chunk.0[..tail_len]);
+            result.push(val);
+        } else {
+            // Internal node: recurse into the next level.
+            let mut next_prefix = prefix.to_vec();
+            next_prefix.extend_from_slice(chunk.as_slice());
+            str_collect_all(state, attr_key, &next_prefix, result)?;
+        }
+    }
+    Ok(())
+}
+
+// ── Point-read helpers ────────────────────────────────────────────────
+
 fn read_eq<S: StateAdapter>(state: &mut S, key: &AnnotKey, value: &AnnotVal) -> Result<Bitmap> {
     read_pair_bitmap(state, key.pair_key_bytes(), &value.0)
 }
 
-/// OR-union of the bitmaps for each value in an `IN (...)` list.
-fn read_in<S: StateAdapter>(state: &mut S, key: &AnnotKey, values: &[AnnotVal]) -> Result<Bitmap> {
+fn read_in<S: StateAdapter>(
+    state: &mut S,
+    key: &AnnotKey,
+    values: &[AnnotVal],
+) -> Result<Bitmap> {
     let mut acc = Bitmap::new();
     for v in values {
         let bm = read_pair_bitmap(state, key.pair_key_bytes(), &v.0)?;
@@ -148,53 +258,31 @@ fn read_in<S: StateAdapter>(state: &mut S, key: &AnnotKey, values: &[AnnotVal]) 
     Ok(acc)
 }
 
-// ── Top-level entry point ────────────────────────────────────────────
+// ── Top-level entry point ─────────────────────────────────────────────
 
 /// Parameters for paginated query execution.
-///
-/// Cursors are raw entity IDs — the RPC layer is responsible for any
-/// hex (or other) encoding on the wire.
 #[derive(Debug, Clone, Copy)]
 pub struct PageParams {
     /// Maximum number of entities to return in this page. Must be > 0.
     pub page_size: u64,
-    /// If `Some(c)`, only return IDs strictly less than `c`. Use the
-    /// `next_cursor` from the previous page to walk through results.
+    /// If `Some(c)`, only return IDs strictly less than `c`.
     pub cursor: Option<u64>,
 }
 
-/// One page of query results, ordered descending by entity ID
-/// (newest first).
+/// One page of query results, ordered descending by entity ID.
 #[derive(Debug, Clone)]
 pub struct Page {
-    /// The matching entities — already resolved through the
-    /// `id_to_addr` system slot + `EntityRlp::decode_from_code`.
     pub entries: Vec<EntityRlp>,
-    /// Set when more pages remain. Pass it as the next call's
-    /// `cursor` to walk forward.
     pub next_cursor: Option<u64>,
 }
 
 /// Parse → evaluate → paginate → resolve, in one call.
-///
-/// This is the entry point the RPC layer (and any other caller that
-/// just wants matching entities) should use. The lower-level
-/// [`parse`], [`Query::evaluate`], and [`resolve_id`] remain public
-/// for tests and advanced consumers.
-///
-/// IDs that fail to resolve (e.g. entity tombstoned between the
-/// bitmap read and the resolve — possible under concurrent writes)
-/// are skipped silently and don't count toward `page_size`.
 pub fn execute<S: StateAdapter>(state: &mut S, query: &str, params: PageParams) -> Result<Page> {
     eyre::ensure!(params.page_size > 0, "page_size must be > 0");
 
     let parsed = parse(query)?;
     let bitmap = parsed.evaluate(state)?;
 
-    // Collect ascending so we can pop ids >= cursor off the tail
-    // cheaply, then iterate in reverse for newest-first output. Page
-    // sizes are small (typical RPC cap is 200) so materializing the
-    // full Vec doesn't matter even when the bitmap is large.
     let mut ids: Vec<u64> = bitmap.iter().collect();
     ids.sort_unstable();
     if let Some(c) = params.cursor {
