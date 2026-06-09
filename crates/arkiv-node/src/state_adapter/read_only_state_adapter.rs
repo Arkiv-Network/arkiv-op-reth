@@ -2,9 +2,7 @@
 //! committed-state snapshot.
 
 use alloy_primitives::{Address, B256, U256};
-use arkiv_entitydb::{
-    Bitmap, Entity, IndexTree, StateAdapter, index_address, pair_address,
-};
+use arkiv_entitydb::{Bitmap, Entity, StateAdapter, pair_address};
 use eyre::Result;
 use reth_storage_api::{StateProvider, StateProviderBox};
 
@@ -123,22 +121,17 @@ impl StateAdapter for ReadOnlyStateAdapter {
         eyre::bail!("ReadOnlyStateAdapter: set_pair_bitmap called from query path")
     }
 
-    // ── Tier-2 ART index accounts ───────────────────────────────────
+    // ── Raw storage (Tier-2 B+ tree index nodes) ───────────────────
 
-    fn get_index_tree(&mut self, attr_key: &[u8]) -> Result<IndexTree> {
-        let code = self.code(&index_address(attr_key))?;
-        if code.is_empty() {
-            Ok(IndexTree::new())
-        } else {
-            IndexTree::from_bytes(&code)
-        }
+    fn raw_storage(&mut self, addr: &Address, slot: B256) -> Result<B256> {
+        self.storage(addr, slot)
     }
 
-    fn set_index_tree(&mut self, _attr_key: &[u8], _tree: IndexTree) -> Result<()> {
-        eyre::bail!("ReadOnlyStateAdapter: set_index_tree called from query path")
+    fn set_raw_storage(&mut self, _addr: &Address, _slot: B256, _value: B256) -> Result<()> {
+        eyre::bail!("ReadOnlyStateAdapter: set_raw_storage called from query path")
     }
 
-    fn tombstone_index_tree(&mut self, _attr_key: &[u8]) -> Result<()> {
-        eyre::bail!("ReadOnlyStateAdapter: tombstone_index_tree called from query path")
+    fn ensure_raw_account(&mut self, _addr: &Address) -> Result<()> {
+        eyre::bail!("ReadOnlyStateAdapter: ensure_raw_account called from query path")
     }
 }

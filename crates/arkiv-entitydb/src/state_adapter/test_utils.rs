@@ -1,12 +1,11 @@
 //! In-memory test backend for the [`StateAdapter`] trait.
 //!
 //! [`MemStateAdapter`] is a pure typed cache: every category of state the
-//! trait exposes (system counter, ID maps, nonces, entities, pair
-//! bitmaps, ART indexes) is held directly as the typed value, in a
-//! plain [`HashMap`]. There is no slot derivation, no byte packing,
-//! no `SYSTEM_ACCOUNT_ADDRESS` — those are trie-encoding details and
-//! they belong to the trie-backed [`StateAdapter`] impls in `arkiv-node`,
-//! not to entitydb's tests.
+//! trait exposes (system counter, ID maps, nonces, entities, pair bitmaps)
+//! is held directly as the typed value, in a plain [`HashMap`]. The Tier-2
+//! B+ tree index goes through the `raw_storage` slot map, mirroring
+//! the on-trie byte-level encoding so that B+ tree operations work
+//! identically in tests and production.
 //!
 //! Op handlers go through the [`StateAdapter`] trait, so anything they do
 //! against [`MemStateAdapter`] is logically identical to what they do against
@@ -16,13 +15,14 @@
 
 use std::collections::HashMap;
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256};
 use eyre::Result;
 
-use super::{Bitmap, Entity, IndexTree, StateAdapter};
+use super::{Bitmap, Entity, StateAdapter};
 
 /// Test-only [`StateAdapter`] implementation. All state is held as typed
-/// values; no serialisation or trie-layout concerns.
+/// values or slot maps; no serialisation or trie-layout concerns beyond
+/// what the B+ tree index requires.
 ///
 /// Fields are `pub` so tests can read/assert on internal state
 /// directly without going through the trait. Tests that mutate state
@@ -37,8 +37,8 @@ pub struct MemStateAdapter {
     /// Tombstoned / never-existed → absent from the map.
     pub entities: HashMap<Address, Entity>,
     pub pair_bitmaps: HashMap<(Vec<u8>, Vec<u8>), Bitmap>,
-    /// Tombstoned / never-existed → absent from the map.
-    pub index_trees: HashMap<Vec<u8>, IndexTree>,
+    /// Per-account storage slot map, used by the Tier-2 B+ tree index.
+    pub raw_storage: HashMap<Address, HashMap<B256, B256>>,
 }
 
 impl MemStateAdapter {
@@ -137,23 +137,23 @@ impl StateAdapter for MemStateAdapter {
         Ok(())
     }
 
-    // ── Tier-2 ART index accounts ───────────────────────────────────
+    // ── Raw storage (Tier-2 B+ tree index nodes) ────────────────────
 
-    fn get_index_tree(&mut self, attr_key: &[u8]) -> Result<IndexTree> {
+    fn raw_storage(&mut self, addr: &Address, slot: B256) -> Result<B256> {
         Ok(self
-            .index_trees
-            .get(attr_key)
-            .cloned()
+            .raw_storage
+            .get(addr)
+            .and_then(|s| s.get(&slot).copied())
             .unwrap_or_default())
     }
 
-    fn set_index_tree(&mut self, attr_key: &[u8], tree: IndexTree) -> Result<()> {
-        self.index_trees.insert(attr_key.to_vec(), tree);
+    fn set_raw_storage(&mut self, addr: &Address, slot: B256, value: B256) -> Result<()> {
+        self.raw_storage.entry(*addr).or_default().insert(slot, value);
         Ok(())
     }
 
-    fn tombstone_index_tree(&mut self, attr_key: &[u8]) -> Result<()> {
-        self.index_trees.remove(attr_key);
+    fn ensure_raw_account(&mut self, addr: &Address) -> Result<()> {
+        self.raw_storage.entry(*addr).or_default();
         Ok(())
     }
 }

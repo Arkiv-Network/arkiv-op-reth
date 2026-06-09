@@ -5,9 +5,7 @@
 use std::collections::HashMap;
 
 use alloy_primitives::{Address, B256};
-use arkiv_entitydb::{
-    Bitmap, Entity, IndexTree, StateAdapter, index_address, pair_address,
-};
+use arkiv_entitydb::{Bitmap, Entity, StateAdapter, pair_address};
 use eyre::Result;
 
 use super::trie_layout::{
@@ -198,24 +196,22 @@ impl StateAdapter for InMemoryStateAdapter<'_> {
         Ok(())
     }
 
-    // ── Tier-2 ART index accounts ───────────────────────────────────
+    // ── Raw storage (Tier-2 B+ tree index nodes) ───────────────────
 
-    fn get_index_tree(&mut self, attr_key: &[u8]) -> Result<IndexTree> {
-        let code = self.read_code(&index_address(attr_key));
-        if code.is_empty() {
-            Ok(IndexTree::new())
-        } else {
-            IndexTree::from_bytes(&code)
-        }
+    fn raw_storage(&mut self, addr: &Address, slot: B256) -> Result<B256> {
+        Ok(self.read_slot(addr, slot))
     }
 
-    fn set_index_tree(&mut self, attr_key: &[u8], tree: IndexTree) -> Result<()> {
-        self.write_code(&index_address(attr_key), tree.to_bytes());
+    fn set_raw_storage(&mut self, addr: &Address, slot: B256, value: B256) -> Result<()> {
+        self.write_slot(addr, slot, value);
         Ok(())
     }
 
-    fn tombstone_index_tree(&mut self, attr_key: &[u8]) -> Result<()> {
-        self.write_code(&index_address(attr_key), Vec::new());
+    fn ensure_raw_account(&mut self, addr: &Address) -> Result<()> {
+        let acc = self.db.account_mut(addr);
+        if acc.nonce == 0 {
+            acc.nonce = 1;
+        }
         Ok(())
     }
 }

@@ -9,9 +9,10 @@ use alloy_primitives::{Address, B256};
 use eyre::Result;
 
 use super::addresses::{encode_address, encode_b256, encode_u64_be};
+use super::btree_index::{annot_val_to_slot, btree_header_address, btree_insert, btree_lazy_delete, slot_presence};
 use super::{
     ANNOT_ALL, ANNOT_CONTENT_TYPE, ANNOT_CREATED_AT_BLOCK, ANNOT_CREATOR, ANNOT_EXPIRATION,
-    ANNOT_KEY, ANNOT_OWNER, Attribute, Bitmap, Entity, IndexTree, StateAdapter, entity_address,
+    ANNOT_KEY, ANNOT_OWNER, Attribute, Bitmap, Entity, StateAdapter, entity_address,
 };
 
 // ─── Op handlers ──────────────────────────────────────────────────────
@@ -239,12 +240,6 @@ pub fn all_entities<S: StateAdapter>(state: &mut S) -> Result<Bitmap> {
     state.get_pair_bitmap(ANNOT_ALL, b"")
 }
 
-/// Read the Tier-2 [`IndexTree`] for `attr_key`. An absent or
-/// tombstoned index account decodes to an empty tree — not an error.
-pub fn read_index_tree<S: StateAdapter>(state: &mut S, attr_key: &[u8]) -> Result<IndexTree> {
-    state.get_index_tree(attr_key)
-}
-
 /// Resolve a query-hit entity ID to its on-trie [`Entity`].
 ///
 /// Returns `Ok(None)` if the ID's `id_to_addr` slot is zero (never
@@ -345,11 +340,16 @@ fn insert_into_pair_bitmap<S: StateAdapter>(
     let was_empty = bitmap.is_empty();
     bitmap.insert(entity_id);
     state.set_pair_bitmap(annot_key, annot_val, bitmap)?;
-    // Tier-2: insert the value into the index tree on first use of this pair.
-    if was_empty {
-        let mut tree = state.get_index_tree(annot_key)?;
-        tree.insert(annot_val.to_vec());
-        state.set_index_tree(annot_key, tree)?;
+    // Tier-2: record the value in the B+ tree on first use of this pair.
+    // Skip values > 32 bytes — the B+ tree only handles ≤ 32 byte keys.
+    if was_empty && annot_val.len() <= 32 {
+        let header_addr = btree_header_address(annot_key);
+        btree_insert(
+            state,
+            &header_addr,
+            annot_val_to_slot(annot_val),
+            slot_presence(annot_val.len()),
+        )?;
     }
     Ok(())
 }
@@ -369,26 +369,22 @@ fn remove_from_pair_bitmap<S: StateAdapter>(
     bitmap.remove(entity_id);
     let now_empty = bitmap.is_empty();
     state.set_pair_bitmap(annot_key, annot_val, bitmap)?;
-    // Tier-2: remove the value from the index tree when the last entity
-    // using this pair is gone.
-    if now_empty {
-        let mut tree = state.get_index_tree(annot_key)?;
-        tree.remove(annot_val);
-        if tree.is_empty() {
-            state.tombstone_index_tree(annot_key)?;
-        } else {
-            state.set_index_tree(annot_key, tree)?;
-        }
+    // Tier-2: lazy-delete the value from the B+ tree when the last entity
+    // using this pair is gone. Skip values > 32 bytes (not indexed).
+    if now_empty && annot_val.len() <= 32 {
+        let header_addr = btree_header_address(annot_key);
+        btree_lazy_delete(state, &header_addr, annot_val_to_slot(annot_val))?;
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::btree_index::{btree_header_address, btree_iter_from, slot_to_val_len};
     use super::super::test_utils::MemStateAdapter;
     use super::super::{ATTR_STRING, ATTR_UINT};
     use super::*;
-    use alloy_primitives::U256;
+    use alloy_primitives::{B256, U256};
 
     fn alice() -> Address {
         Address::repeat_byte(0xaa)
@@ -590,18 +586,18 @@ mod tests {
         let val = b"hello".to_vec();
         insert_into_pair_bitmap(&mut state, b"tag", &val, 0).unwrap();
 
-        let tree = state.get_index_tree(b"tag").unwrap();
-        let vals: Vec<Vec<u8>> = tree.iter_gte(b"").collect();
-        assert_eq!(
-            vals,
-            [b"hello".to_vec()],
-            "index should contain value after first entity"
-        );
+        let header_addr = btree_header_address(b"tag");
+        let entries = btree_iter_from(&mut state, &header_addr, B256::ZERO).unwrap();
+        let vals: Vec<Vec<u8>> = entries
+            .iter()
+            .filter_map(|(k, p)| slot_to_val_len(*p).map(|len| k.0[..len].to_vec()))
+            .collect();
+        assert_eq!(vals, [b"hello".to_vec()], "index should contain value after first entity");
 
-        // Second insert of same value — bitmap was non-empty, ART unchanged.
+        // Second insert of same value — bitmap was non-empty, btree unchanged.
         insert_into_pair_bitmap(&mut state, b"tag", &val, 1).unwrap();
-        let tree2 = state.get_index_tree(b"tag").unwrap();
-        assert_eq!(tree2.iter_gte(b"").count(), 1);
+        let entries2 = btree_iter_from(&mut state, &header_addr, B256::ZERO).unwrap();
+        assert_eq!(entries2.len(), 1);
     }
 
     #[test]
@@ -611,19 +607,17 @@ mod tests {
         insert_into_pair_bitmap(&mut state, b"tag", &val, 0).unwrap();
         insert_into_pair_bitmap(&mut state, b"tag", &val, 1).unwrap();
 
-        // Remove first entity — bitmap still has entity 1, ART unchanged.
-        remove_from_pair_bitmap(&mut state, b"tag", &val, 0).unwrap();
-        assert!(
-            !state.get_index_tree(b"tag").unwrap().is_empty(),
-            "index should survive while entity 1 remains"
-        );
+        let header_addr = btree_header_address(b"tag");
 
-        // Remove last entity — bitmap is now empty, index account tombstoned.
+        // Remove first entity — bitmap still has entity 1, btree unchanged.
+        remove_from_pair_bitmap(&mut state, b"tag", &val, 0).unwrap();
+        let entries = btree_iter_from(&mut state, &header_addr, B256::ZERO).unwrap();
+        assert!(!entries.is_empty(), "index should survive while entity 1 remains");
+
+        // Remove last entity — lazy-delete zeros the leaf value; iter skips it.
         remove_from_pair_bitmap(&mut state, b"tag", &val, 1).unwrap();
-        assert!(
-            state.get_index_tree(b"tag").unwrap().is_empty(),
-            "index should be empty after last entity removed"
-        );
+        let entries2 = btree_iter_from(&mut state, &header_addr, B256::ZERO).unwrap();
+        assert!(entries2.is_empty(), "index should be empty after last entity removed");
     }
 
     #[test]

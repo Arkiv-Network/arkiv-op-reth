@@ -2,9 +2,9 @@
 //!
 //! Op handlers (`create` / `update` / `extend` / `transfer` / `delete`
 //! / `expire`), the [`StateAdapter`] trait they run against, the typed
-//! primitives ([`Entity`], [`Bitmap`], [`IndexTree`]), the
+//! primitives ([`Entity`], [`Bitmap`]), the
 //! address-derivation functions used by the query interpreter and the
-//! SDK ([`entity_address`], [`pair_address`], [`index_address`]), and
+//! SDK ([`entity_address`], [`pair_address`]), and
 //! the query language itself.
 //!
 //! This crate is deliberately abstract: it knows nothing about the

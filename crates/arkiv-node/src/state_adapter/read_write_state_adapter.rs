@@ -2,9 +2,7 @@
 
 use alloy_evm::EvmInternals;
 use alloy_primitives::{Address, B256, Bytes, U256};
-use arkiv_entitydb::{
-    Bitmap, Entity, IndexTree, StateAdapter, index_address, pair_address,
-};
+use arkiv_entitydb::{Bitmap, Entity, StateAdapter, pair_address};
 use eyre::Result;
 use revm::state::Bytecode;
 
@@ -188,22 +186,17 @@ impl StateAdapter for ReadWriteStateAdapter<'_, '_> {
         self.set_code(&pair_address(annot_key, annot_val), bitmap.to_bytes())
     }
 
-    // ── Tier-2 ART index accounts ───────────────────────────────────
+    // ── Raw storage (Tier-2 B+ tree index nodes) ───────────────────
 
-    fn get_index_tree(&mut self, attr_key: &[u8]) -> Result<IndexTree> {
-        let code = self.code(&index_address(attr_key))?;
-        if code.is_empty() {
-            Ok(IndexTree::new())
-        } else {
-            IndexTree::from_bytes(&code)
-        }
+    fn raw_storage(&mut self, addr: &Address, slot: B256) -> Result<B256> {
+        self.storage(addr, slot)
     }
 
-    fn set_index_tree(&mut self, attr_key: &[u8], tree: IndexTree) -> Result<()> {
-        self.set_code(&index_address(attr_key), tree.to_bytes())
+    fn set_raw_storage(&mut self, addr: &Address, slot: B256, value: B256) -> Result<()> {
+        self.set_storage(addr, slot, value)
     }
 
-    fn tombstone_index_tree(&mut self, attr_key: &[u8]) -> Result<()> {
-        self.tombstone_code(&index_address(attr_key))
+    fn ensure_raw_account(&mut self, addr: &Address) -> Result<()> {
+        self.ensure_nonce_at_least_one(*addr)
     }
 }

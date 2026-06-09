@@ -11,10 +11,8 @@
 //! See `docs/5_cache.md` §5 for the layered semantics.
 
 use alloy_evm::EvmInternals;
-use alloy_primitives::Address;
-use arkiv_entitydb::{
-    Bitmap, Entity, IndexTree, StateAdapter, index_address, pair_address,
-};
+use alloy_primitives::{Address, B256};
+use arkiv_entitydb::{Bitmap, Entity, StateAdapter, pair_address};
 use eyre::Result;
 
 use super::cache_store::{CacheStore, Cached};
@@ -52,7 +50,6 @@ impl<'a, 'b, 'c> CachedReadWriteStateAdapter<'a, 'b, 'c> {
             match value {
                 Cached::Entity(e) => self.inner.set_code(&addr, entity_to_code(&e))?,
                 Cached::Bitmap(b) => self.inner.set_code(&addr, b.to_bytes())?,
-                Cached::Tree(t) => self.inner.set_code(&addr, t.to_bytes())?,
                 Cached::Tombstone => self.inner.tombstone_code(&addr)?,
             }
         }
@@ -173,45 +170,17 @@ impl StateAdapter for CachedReadWriteStateAdapter<'_, '_, '_> {
         }
     }
 
-    // ── Tier-2 ART index accounts ─────────────────────────────────────
+    // ── Raw storage (Tier-2 B+ tree index nodes) — passthrough ───────
 
-    fn get_index_tree(&mut self, attr_key: &[u8]) -> Result<IndexTree> {
-        let addr = index_address(attr_key);
-        if let Some(cache) = self.cache.as_deref_mut() {
-            if let Some(cached) = cache.get(&addr) {
-                return match cached {
-                    Cached::Tree(t) => Ok(t.clone()),
-                    Cached::Tombstone => Ok(IndexTree::new()),
-                    other => Err(eyre::eyre!(
-                        "cache type mismatch at {addr}: expected Tree, got {other:?}"
-                    )),
-                };
-            }
-            let tree = self.inner.get_index_tree(attr_key)?;
-            cache.insert_clean(addr, Cached::Tree(tree.clone()));
-            Ok(tree)
-        } else {
-            self.inner.get_index_tree(attr_key)
-        }
+    fn raw_storage(&mut self, addr: &Address, slot: B256) -> Result<B256> {
+        self.inner.raw_storage(addr, slot)
     }
 
-    fn set_index_tree(&mut self, attr_key: &[u8], tree: IndexTree) -> Result<()> {
-        if let Some(cache) = self.cache.as_deref_mut() {
-            let addr = index_address(attr_key);
-            cache.stage(addr, Cached::Tree(tree));
-            Ok(())
-        } else {
-            self.inner.set_index_tree(attr_key, tree)
-        }
+    fn set_raw_storage(&mut self, addr: &Address, slot: B256, value: B256) -> Result<()> {
+        self.inner.set_raw_storage(addr, slot, value)
     }
 
-    fn tombstone_index_tree(&mut self, attr_key: &[u8]) -> Result<()> {
-        if let Some(cache) = self.cache.as_deref_mut() {
-            let addr = index_address(attr_key);
-            cache.stage(addr, Cached::Tombstone);
-            Ok(())
-        } else {
-            self.inner.tombstone_index_tree(attr_key)
-        }
+    fn ensure_raw_account(&mut self, addr: &Address) -> Result<()> {
+        self.inner.ensure_raw_account(addr)
     }
 }

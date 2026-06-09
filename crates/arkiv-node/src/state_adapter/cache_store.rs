@@ -15,20 +15,20 @@
 use std::collections::{HashMap, HashSet};
 
 use alloy_primitives::Address;
-use arkiv_entitydb::{Bitmap, Entity, IndexTree};
+use arkiv_entitydb::{Bitmap, Entity};
 
 /// Typed value cached at an account address.
 ///
 /// `Tombstone` is the cached form of "this account holds empty code"
-/// — at flush time it maps to `tombstone_code(addr)`. It covers both
-/// deleted entities and emptied index trees (both encoded the same
-/// way on the trie). Pair-bitmap accounts never tombstone — an empty
-/// `Bitmap` serialises as normal bytes.
+/// — at flush time it maps to `tombstone_code(addr)`. Covers deleted
+/// entities. Pair-bitmap accounts never tombstone — an empty `Bitmap`
+/// serialises as normal bytes. B+ tree index nodes are not cached here;
+/// they are read/written through `raw_storage` point reads/writes
+/// directly on the underlying adapter.
 #[derive(Clone)]
 pub enum Cached {
     Entity(Entity),
     Bitmap(Bitmap),
-    Tree(IndexTree),
     Tombstone,
 }
 
@@ -37,7 +37,6 @@ impl std::fmt::Debug for Cached {
         match self {
             Cached::Entity(_) => f.write_str("Cached::Entity(..)"),
             Cached::Bitmap(_) => f.write_str("Cached::Bitmap(..)"),
-            Cached::Tree(_) => f.write_str("Cached::Tree(..)"),
             Cached::Tombstone => f.write_str("Cached::Tombstone"),
         }
     }

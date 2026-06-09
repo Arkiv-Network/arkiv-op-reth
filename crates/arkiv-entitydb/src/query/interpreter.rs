@@ -15,11 +15,13 @@
 //!
 //! Integration tests live in `crates/arkiv-entitydb/tests/query_eval.rs`.
 
+use alloy_primitives::B256;
 use eyre::Result;
 
 use super::parser::{AnnotKey, AnnotVal, Query, parse};
 use crate::{
-    Bitmap, Entity, StateAdapter, all_entities, read_index_tree, read_pair_bitmap, resolve_id,
+    Bitmap, Entity, StateAdapter, all_entities, annot_val_to_slot, btree_header_address,
+    btree_iter_from, read_pair_bitmap, resolve_id, slot_to_val_len,
 };
 
 impl Query {
@@ -76,46 +78,72 @@ fn eval<S: StateAdapter>(query: &Query, state: &mut S) -> Result<Bitmap> {
 
         Query::Gt { key, value } => {
             let attr_key = key.pair_key_bytes();
-            let tree = read_index_tree(state, attr_key)?;
+            let header_addr = btree_header_address(attr_key);
+            let from = annot_val_to_slot(&value.0);
             let mut result = Bitmap::new();
-            for val in tree.iter_gt(&value.0) {
-                result.union_with(&read_pair_bitmap(state, attr_key, &val)?);
+            for (slot_key, presence) in btree_iter_from(state, &header_addr, from)? {
+                if slot_key == from { continue; }
+                if let Some(len) = slot_to_val_len(presence) {
+                    result.union_with(&read_pair_bitmap(state, attr_key, &slot_key.0[..len])?);
+                }
             }
             Ok(result)
         }
         Query::Gte { key, value } => {
             let attr_key = key.pair_key_bytes();
-            let tree = read_index_tree(state, attr_key)?;
+            let header_addr = btree_header_address(attr_key);
+            let from = annot_val_to_slot(&value.0);
             let mut result = Bitmap::new();
-            for val in tree.iter_gte(&value.0) {
-                result.union_with(&read_pair_bitmap(state, attr_key, &val)?);
+            for (slot_key, presence) in btree_iter_from(state, &header_addr, from)? {
+                if let Some(len) = slot_to_val_len(presence) {
+                    result.union_with(&read_pair_bitmap(state, attr_key, &slot_key.0[..len])?);
+                }
             }
             Ok(result)
         }
         Query::Lt { key, value } => {
             let attr_key = key.pair_key_bytes();
-            let tree = read_index_tree(state, attr_key)?;
+            let header_addr = btree_header_address(attr_key);
+            let bound = annot_val_to_slot(&value.0);
             let mut result = Bitmap::new();
-            for val in tree.iter_lt(&value.0) {
-                result.union_with(&read_pair_bitmap(state, attr_key, &val)?);
+            for (slot_key, presence) in btree_iter_from(state, &header_addr, B256::ZERO)? {
+                if slot_key >= bound { break; }
+                if let Some(len) = slot_to_val_len(presence) {
+                    result.union_with(&read_pair_bitmap(state, attr_key, &slot_key.0[..len])?);
+                }
             }
             Ok(result)
         }
         Query::Lte { key, value } => {
             let attr_key = key.pair_key_bytes();
-            let tree = read_index_tree(state, attr_key)?;
+            let header_addr = btree_header_address(attr_key);
+            let bound = annot_val_to_slot(&value.0);
             let mut result = Bitmap::new();
-            for val in tree.iter_lte(&value.0) {
-                result.union_with(&read_pair_bitmap(state, attr_key, &val)?);
+            for (slot_key, presence) in btree_iter_from(state, &header_addr, B256::ZERO)? {
+                if slot_key > bound { break; }
+                if let Some(len) = slot_to_val_len(presence) {
+                    result.union_with(&read_pair_bitmap(state, attr_key, &slot_key.0[..len])?);
+                }
             }
             Ok(result)
         }
         Query::Glob { key, value } => {
             let attr_key = key.pair_key_bytes();
-            let tree = read_index_tree(state, attr_key)?;
+            // Values > 32 bytes can't be in the B+ tree (never indexed).
+            if value.0.len() > 32 {
+                return Ok(Bitmap::new());
+            }
+            let header_addr = btree_header_address(attr_key);
+            let prefix = &value.0;
+            let from = annot_val_to_slot(prefix);
             let mut result = Bitmap::new();
-            for val in tree.iter_prefix(&value.0) {
-                result.union_with(&read_pair_bitmap(state, attr_key, &val)?);
+            for (slot_key, presence) in btree_iter_from(state, &header_addr, from)? {
+                // B+ tree is sorted ascending; once the prefix bytes diverge
+                // (and they must be larger since we started at `from`), break.
+                if slot_key.0[..prefix.len()] != *prefix.as_slice() { break; }
+                if let Some(len) = slot_to_val_len(presence) {
+                    result.union_with(&read_pair_bitmap(state, attr_key, &slot_key.0[..len])?);
+                }
             }
             Ok(result)
         }
