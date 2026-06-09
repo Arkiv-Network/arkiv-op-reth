@@ -8,9 +8,9 @@
 //!   owner/expires_at) in `code`, prefixed with `0xFE` so a stray
 //!   `CALL` reverts immediately.
 //! - **Pair account** at `pair_address(annot_key, annot_val)` carries a
-//!   roaring64 bitmap of entity IDs as `code`. `codeHash` is
-//!   `keccak256(bitmap_bytes)` by construction — every bitmap is
-//!   content-addressed in the trie.
+//!   roaring64 bitmap of entity IDs as storage slots. Slot 0 holds the
+//!   serialized byte-length (u32 in bytes [28..32]); slots 1..N hold the
+//!   serialized roaring bitmap bytes in 32-byte chunks.
 //! - **System account** (internal — see `SYSTEM_ACCOUNT_ADDRESS`) —
 //!   empty-coded account that hosts the global entity counter, the
 //!   per-caller `nonces` map, and the trie-committed ID ↔ address maps
@@ -269,6 +269,56 @@ fn address_to_storage(addr: Address) -> B256 {
     let mut buf = [0u8; 32];
     buf[12..].copy_from_slice(addr.as_slice());
     B256::from(buf)
+}
+
+// ─── Pair-account bitmap slot helpers ────────────────────────────────
+
+#[inline]
+fn pair_bitmap_len_slot() -> B256 {
+    B256::ZERO
+}
+
+#[inline]
+fn pair_bitmap_data_slot(chunk_idx: usize) -> B256 {
+    u64_to_storage(1 + chunk_idx as u64)
+}
+
+fn write_pair_bitmap_slots<S: StateAdapter>(
+    state: &mut S,
+    pair_addr: &Address,
+    bitmap: &Bitmap,
+) -> Result<()> {
+    state.ensure_account_persists(pair_addr)?;
+    // Read old length to zero tail slots on shrink.
+    let old_len_raw = state.storage(pair_addr, pair_bitmap_len_slot())?;
+    let old_byte_len =
+        u32::from_be_bytes(old_len_raw.0[28..].try_into().unwrap()) as usize;
+    let old_chunk_count = old_byte_len.div_ceil(32);
+
+    let bytes = bitmap.to_bytes();
+    // Treat empty bitmap as length 0 — clean absence, not a tiny serialized blob.
+    let new_byte_len = if bitmap.is_empty() { 0 } else { bytes.len() };
+    let new_chunk_count = new_byte_len.div_ceil(32);
+
+    // Write length slot.
+    let mut len_buf = [0u8; 32];
+    len_buf[28..].copy_from_slice(&(new_byte_len as u32).to_be_bytes());
+    state.set_storage(pair_addr, pair_bitmap_len_slot(), B256::from(len_buf))?;
+
+    // Write data chunks.
+    for i in 0..new_chunk_count {
+        let start = i * 32;
+        let end = ((i + 1) * 32).min(new_byte_len);
+        let mut buf = [0u8; 32];
+        buf[..end - start].copy_from_slice(&bytes[start..end]);
+        state.set_storage(pair_addr, pair_bitmap_data_slot(i), B256::from(buf))?;
+    }
+
+    // Zero tail slots left over from a previous larger bitmap.
+    for i in new_chunk_count..old_chunk_count {
+        state.set_storage(pair_addr, pair_bitmap_data_slot(i), B256::ZERO)?;
+    }
+    Ok(())
 }
 
 // ─── Tier-2 index slot encodings ─────────────────────────────────────
@@ -937,7 +987,7 @@ fn insert_into_pair_bitmap<S: StateAdapter>(
     let mut bitmap = read_pair_bitmap(state, annot_key, annot_val)?;
     let was_empty = bitmap.is_empty();
     bitmap.insert(entity_id);
-    state.set_code(&pair_address(annot_key, annot_val), bitmap.to_bytes())?;
+    write_pair_bitmap_slots(state, &pair_address(annot_key, annot_val), &bitmap)?;
     if was_empty {
         tier2_insert(state, annot_key, annot_val, mode)?;
     }
@@ -956,7 +1006,7 @@ fn remove_from_pair_bitmap<S: StateAdapter>(
         return Ok(());
     }
     bitmap.remove(entity_id);
-    state.set_code(&pair_address(annot_key, annot_val), bitmap.to_bytes())?;
+    write_pair_bitmap_slots(state, &pair_address(annot_key, annot_val), &bitmap)?;
     if bitmap.is_empty() {
         tier2_remove(state, annot_key, annot_val, mode)?;
     }
@@ -1380,12 +1430,20 @@ pub fn read_pair_bitmap<S: StateAdapter>(
     annot_val: &[u8],
 ) -> Result<Bitmap> {
     let pair_addr = pair_address(annot_key, annot_val);
-    let code = state.code(&pair_addr)?;
-    if code.is_empty() {
-        Ok(Bitmap::new())
-    } else {
-        Bitmap::from_bytes(&code)
+    let len_raw = state.storage(&pair_addr, pair_bitmap_len_slot())?;
+    let byte_len = u32::from_be_bytes(len_raw.0[28..].try_into().unwrap()) as usize;
+    if byte_len == 0 {
+        return Ok(Bitmap::new());
     }
+    let chunk_count = byte_len.div_ceil(32);
+    let mut raw = Vec::with_capacity(byte_len);
+    for i in 0..chunk_count {
+        let chunk = state.storage(&pair_addr, pair_bitmap_data_slot(i))?;
+        let start = i * 32;
+        let end = ((i + 1) * 32).min(byte_len);
+        raw.extend_from_slice(&chunk.0[..end - start]);
+    }
+    Bitmap::from_bytes(&raw)
 }
 
 /// Bitmap of every live entity ID — the `$all` built-in bitmap.
@@ -1622,15 +1680,22 @@ mod tests {
     #[track_caller]
     fn read_bitmap(db: &InMemoryStateDb, annot_key: &[u8], annot_val: &[u8]) -> Bitmap {
         let addr = pair_address(annot_key, annot_val);
-        let code = db
-            .account(&addr)
-            .map(|a| a.code.clone())
-            .unwrap_or_default();
-        if code.is_empty() {
-            Bitmap::new()
-        } else {
-            Bitmap::from_bytes(&code).expect("decode bitmap")
+        let Some(acc) = db.account(&addr) else { return Bitmap::new() };
+        let len_raw = acc.storage.get(&B256::ZERO).copied().unwrap_or_default();
+        let byte_len = u32::from_be_bytes(len_raw.0[28..].try_into().unwrap()) as usize;
+        if byte_len == 0 {
+            return Bitmap::new();
         }
+        let chunk_count = byte_len.div_ceil(32);
+        let mut raw = Vec::with_capacity(byte_len);
+        for i in 0..chunk_count {
+            let slot = u64_to_storage(1 + i as u64);
+            let chunk = acc.storage.get(&slot).copied().unwrap_or_default();
+            let start = i * 32;
+            let end = ((i + 1) * 32).min(byte_len);
+            raw.extend_from_slice(&chunk.0[..end - start]);
+        }
+        Bitmap::from_bytes(&raw).expect("decode bitmap")
     }
 
     #[test]
