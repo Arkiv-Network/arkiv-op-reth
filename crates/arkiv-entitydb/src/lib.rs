@@ -655,7 +655,7 @@ pub fn create<S: StateAdapter>(
     .into_iter()
     .chain(user_annotations(&attributes))
     {
-        insert_into_indexes(state, &a.key, &a.value, entity_id, a.tier2, a.mode)?;
+        insert_into_indexes(state, &a.key, &a.value, entity_id, a.mode)?;
     }
 
     // 4) Write the entity RLP.
@@ -737,16 +737,14 @@ pub fn extend<S: StateAdapter>(
         ANNOT_EXPIRATION,
         &encode_u64_be(entity.expires_at),
         entity_id,
-        true,
-        AnnotMode::Int,
+        Some(AnnotMode::Int),
     )?;
     insert_into_indexes(
         state,
         ANNOT_EXPIRATION,
         &encode_u64_be(new_expires_at),
         entity_id,
-        true,
-        AnnotMode::Int,
+        Some(AnnotMode::Int),
     )?;
 
     entity.expires_at = new_expires_at;
@@ -769,8 +767,8 @@ pub fn transfer<S: StateAdapter>(
     let entity_id = read_entity_id(state, entity_addr)?;
     let mut entity = read_entity(state, entity_addr)?;
 
-    remove_from_indexes(state, ANNOT_OWNER, &encode_address(entity.owner), entity_id, false, AnnotMode::Int)?;
-    insert_into_indexes(state, ANNOT_OWNER, &encode_address(new_owner), entity_id, false, AnnotMode::Int)?;
+    remove_from_indexes(state, ANNOT_OWNER, &encode_address(entity.owner), entity_id, None)?;
+    insert_into_indexes(state, ANNOT_OWNER, &encode_address(new_owner), entity_id, None)?;
 
     entity.owner = new_owner;
     entity.last_modified_at_block = current_block;
@@ -799,7 +797,7 @@ pub fn delete<S: StateAdapter>(state: &mut S, entity_key: B256) -> Result<()> {
     .into_iter()
     .chain(user_annotations(&entity.attributes))
     {
-        remove_from_indexes(state, &a.key, &a.value, entity_id, a.tier2, a.mode)?;
+        remove_from_indexes(state, &a.key, &a.value, entity_id, a.mode)?;
     }
 
     // Clear ID-map slots.
@@ -846,13 +844,13 @@ fn read_entity_id<S: StateAdapter>(state: &mut S, entity_addr: Address) -> Resul
 struct Annotation {
     key: Vec<u8>,
     value: Vec<u8>,
-    tier2: bool,
-    mode: AnnotMode,
+    /// `Some(mode)` — maintain a tier-2 range/glob index using `mode`.
+    /// `None` — random-distribution value; tier-1 pair bitmap only.
+    mode: Option<AnnotMode>,
 }
 
-/// All built-in annotations for an entity, with each annotation's
-/// tier-2 status set per the skip-list decision in #96. Used by
-/// `create` (to insert) and `delete` / `expire` (to remove).
+/// All built-in annotations for an entity. Used by `create` (to insert)
+/// and `delete` / `expire` (to remove).
 fn built_in_annotations(
     creator: Address,
     owner: Address,
@@ -862,57 +860,47 @@ fn built_in_annotations(
     content_type: &[u8],
 ) -> Vec<Annotation> {
     vec![
-        // Singleton — only one value, no ordered iteration.
-        Annotation { key: ANNOT_ALL.to_vec(), value: Vec::new(), tier2: false, mode: AnnotMode::Int },
-        // 20-byte address, random distribution.
-        Annotation { key: ANNOT_CREATOR.to_vec(), value: encode_address(creator), tier2: false, mode: AnnotMode::Int },
-        // Numeric range scans are real use cases.
-        Annotation { key: ANNOT_CREATED_AT_BLOCK.to_vec(), value: encode_u64_be(created_at_block), tier2: true, mode: AnnotMode::Int },
-        // 20-byte address, random distribution.
-        Annotation { key: ANNOT_OWNER.to_vec(), value: encode_address(owner), tier2: false, mode: AnnotMode::Int },
-        // 32-byte entity hash, random distribution.
-        Annotation { key: ANNOT_KEY.to_vec(), value: encode_b256(entity_key), tier2: false, mode: AnnotMode::Int },
-        // Numeric range scans are real use cases.
-        Annotation { key: ANNOT_EXPIRATION.to_vec(), value: encode_u64_be(expires_at), tier2: true, mode: AnnotMode::Int },
-        // Glob / prefix scans (e.g. `~ "video/*"`) are real use cases.
-        Annotation { key: ANNOT_CONTENT_TYPE.to_vec(), value: content_type.to_vec(), tier2: true, mode: AnnotMode::Str },
+        Annotation { key: ANNOT_ALL.to_vec(),              value: Vec::new(),                        mode: None },
+        Annotation { key: ANNOT_CREATOR.to_vec(),          value: encode_address(creator),           mode: None },
+        Annotation { key: ANNOT_OWNER.to_vec(),            value: encode_address(owner),             mode: None },
+        Annotation { key: ANNOT_KEY.to_vec(),              value: encode_b256(entity_key),           mode: None },
+        Annotation { key: ANNOT_CREATED_AT_BLOCK.to_vec(), value: encode_u64_be(created_at_block),   mode: Some(AnnotMode::Int) },
+        Annotation { key: ANNOT_EXPIRATION.to_vec(),       value: encode_u64_be(expires_at),         mode: Some(AnnotMode::Int) },
+        Annotation { key: ANNOT_CONTENT_TYPE.to_vec(),     value: content_type.to_vec(),             mode: Some(AnnotMode::Str) },
     ]
 }
 
-/// User-supplied attributes flattened to annotations. Tier-2 is
-/// maintained for `ATTR_UINT` / `ATTR_STRING` (range and glob queries
-/// are meaningful) and skipped for `ATTR_ENTITY_KEY` (random 32-byte
-/// hashes — ordered iteration produces no meaningful query).
+/// User-supplied attributes flattened to annotations.
+/// `ATTR_UINT` and `ATTR_STRING` get a tier-2 index; `ATTR_ENTITY_KEY`
+/// (random 32-byte hash) does not.
 fn user_annotations<'a>(
     attributes: &'a [Attribute],
 ) -> impl Iterator<Item = Annotation> + 'a {
     attributes.iter().map(|a| Annotation {
         key: a.key.clone(),
         value: a.value.clone(),
-        tier2: a.value_type != ATTR_ENTITY_KEY,
-        mode: if a.value_type == ATTR_STRING { AnnotMode::Str } else { AnnotMode::Int },
+        mode: match a.value_type {
+            ATTR_UINT => Some(AnnotMode::Int),
+            ATTR_STRING => Some(AnnotMode::Str),
+            _ => None,
+        },
     })
 }
 
-/// Annotations that an UPDATE op diffs: the user attributes plus
-/// `$contentType`. Other built-ins (`$creator` / `$key` /
-/// `$createdAtBlock` / `$owner` / `$expiration` / `$all`) don't change
-/// on UPDATE and so aren't in the diff set.
+/// Annotations that an UPDATE op diffs: user attributes plus `$contentType`.
 fn updatable_annotations(content_type: &[u8], attributes: &[Attribute]) -> Vec<Annotation> {
     let mut out = Vec::with_capacity(1 + attributes.len());
     out.push(Annotation {
         key: ANNOT_CONTENT_TYPE.to_vec(),
         value: content_type.to_vec(),
-        tier2: true,
-        mode: AnnotMode::Str,
+        mode: Some(AnnotMode::Str),
     });
     out.extend(user_annotations(attributes));
     out
 }
 
-/// Diff two annotation sets and apply removals + insertions to the
-/// corresponding tier-1 pair bitmaps (and tier-2 index trees, for
-/// annotations whose `tier2` flag is set).
+/// Diff two annotation sets and apply removals + insertions to tier-1 pair
+/// bitmaps and (where `mode` is `Some`) the corresponding tier-2 index.
 fn apply_annotation_diff<S: StateAdapter>(
     state: &mut S,
     old: &[Annotation],
@@ -923,48 +911,39 @@ fn apply_annotation_diff<S: StateAdapter>(
     let old_set: BTreeSet<&Annotation> = old.iter().collect();
     let new_set: BTreeSet<&Annotation> = new.iter().collect();
     for a in old.iter().filter(|a| !new_set.contains(*a)) {
-        remove_from_indexes(state, &a.key, &a.value, entity_id, a.tier2, a.mode)?;
+        remove_from_indexes(state, &a.key, &a.value, entity_id, a.mode)?;
     }
     for a in new.iter().filter(|a| !old_set.contains(*a)) {
-        insert_into_indexes(state, &a.key, &a.value, entity_id, a.tier2, a.mode)?;
+        insert_into_indexes(state, &a.key, &a.value, entity_id, a.mode)?;
     }
     Ok(())
 }
 
-/// Insert `entity_id` into the tier-1 pair bitmap for
-/// `(annot_key, annot_val)`. If `tier2` is set and this is the first
-/// entity to use that pair, also insert `annot_val` into the
-/// per-attribute tier-2 [`IndexTree`].
 fn insert_into_indexes<S: StateAdapter>(
     state: &mut S,
     annot_key: &[u8],
     annot_val: &[u8],
     entity_id: u64,
-    tier2: bool,
-    mode: AnnotMode,
+    mode: Option<AnnotMode>,
 ) -> Result<()> {
     let mut bitmap = read_pair_bitmap(state, annot_key, annot_val)?;
     let was_empty = bitmap.is_empty();
     bitmap.insert(entity_id);
     state.set_code(&pair_address(annot_key, annot_val), bitmap.to_bytes())?;
-    if tier2 && was_empty {
-        tier2_insert(state, annot_key, annot_val, mode)?;
+    if let Some(mode) = mode {
+        if was_empty {
+            tier2_insert(state, annot_key, annot_val, mode)?;
+        }
     }
     Ok(())
 }
 
-/// Remove `entity_id` from the tier-1 pair bitmap for
-/// `(annot_key, annot_val)`. If `tier2` is set and this was the last
-/// entity using that pair, also remove `annot_val` from the
-/// per-attribute tier-2 [`IndexTree`] (tombstoning the index account
-/// if the tree becomes empty).
 fn remove_from_indexes<S: StateAdapter>(
     state: &mut S,
     annot_key: &[u8],
     annot_val: &[u8],
     entity_id: u64,
-    tier2: bool,
-    mode: AnnotMode,
+    mode: Option<AnnotMode>,
 ) -> Result<()> {
     let mut bitmap = read_pair_bitmap(state, annot_key, annot_val)?;
     if bitmap.is_empty() {
@@ -972,8 +951,10 @@ fn remove_from_indexes<S: StateAdapter>(
     }
     bitmap.remove(entity_id);
     state.set_code(&pair_address(annot_key, annot_val), bitmap.to_bytes())?;
-    if tier2 && bitmap.is_empty() {
-        tier2_remove(state, annot_key, annot_val, mode)?;
+    if let Some(mode) = mode {
+        if bitmap.is_empty() {
+            tier2_remove(state, annot_key, annot_val, mode)?;
+        }
     }
     Ok(())
 }
@@ -1874,7 +1855,7 @@ mod tests {
         let val = b"hello".to_vec();
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            insert_into_indexes(&mut state, b"tag", &val, 0, true, AnnotMode::Int).unwrap();
+            insert_into_indexes(&mut state, b"tag", &val, 0, Some(AnnotMode::Int)).unwrap();
         }
         let header_addr = btree_header_address(b"tag");
         // Header must have BTREE_MAGIC at byte 16.
@@ -1892,7 +1873,7 @@ mod tests {
         // Second insert of same value — bitmap non-empty, tier2 not called again.
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            insert_into_indexes(&mut state, b"tag", &val, 1, true, AnnotMode::Int).unwrap();
+            insert_into_indexes(&mut state, b"tag", &val, 1, Some(AnnotMode::Int)).unwrap();
         }
         let mut state = InMemoryStateAdapter::new(&mut db);
         let entries = state.iter_storage_asc(&header_addr, B256::ZERO).unwrap();
@@ -1905,15 +1886,15 @@ mod tests {
         let val = b"hello".to_vec();
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            insert_into_indexes(&mut state, b"tag", &val, 0, true, AnnotMode::Int).unwrap();
-            insert_into_indexes(&mut state, b"tag", &val, 1, true, AnnotMode::Int).unwrap();
+            insert_into_indexes(&mut state, b"tag", &val, 0, Some(AnnotMode::Int)).unwrap();
+            insert_into_indexes(&mut state, b"tag", &val, 1, Some(AnnotMode::Int)).unwrap();
         }
         let header_addr = btree_header_address(b"tag");
 
         // Remove first entity — bitmap still has entity 1, tier2 not triggered.
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            remove_from_indexes(&mut state, b"tag", &val, 0, true, AnnotMode::Int).unwrap();
+            remove_from_indexes(&mut state, b"tag", &val, 0, Some(AnnotMode::Int)).unwrap();
         }
         let mut state = InMemoryStateAdapter::new(&mut db);
         let entries = state.iter_storage_asc(&header_addr, B256::ZERO).unwrap();
@@ -1922,7 +1903,7 @@ mod tests {
         // Remove last entity — lazy deleted, iter excludes it.
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            remove_from_indexes(&mut state, b"tag", &val, 1, true, AnnotMode::Int).unwrap();
+            remove_from_indexes(&mut state, b"tag", &val, 1, Some(AnnotMode::Int)).unwrap();
         }
         let mut state = InMemoryStateAdapter::new(&mut db);
         let entries = state.iter_storage_asc(&header_addr, B256::ZERO).unwrap();
@@ -1935,7 +1916,7 @@ mod tests {
         let val = b"image/png".to_vec(); // 9 bytes, single chunk
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            insert_into_indexes(&mut state, b"ct", &val, 0, true, AnnotMode::Str).unwrap();
+            insert_into_indexes(&mut state, b"ct", &val, 0, Some(AnnotMode::Str)).unwrap();
         }
         let chunk = value_chunks(b"image/png")[0];
         let slot_val = str_slot(&db, b"ct", b"", chunk);
@@ -1958,9 +1939,9 @@ mod tests {
         let mut db = fresh_db();
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            insert_into_indexes(&mut state, b"k", b"c", 0, true, AnnotMode::Int).unwrap();
-            insert_into_indexes(&mut state, b"k", b"a", 1, true, AnnotMode::Int).unwrap();
-            insert_into_indexes(&mut state, b"k", b"b", 2, true, AnnotMode::Int).unwrap();
+            insert_into_indexes(&mut state, b"k", b"c", 0, Some(AnnotMode::Int)).unwrap();
+            insert_into_indexes(&mut state, b"k", b"a", 1, Some(AnnotMode::Int)).unwrap();
+            insert_into_indexes(&mut state, b"k", b"b", 2, Some(AnnotMode::Int)).unwrap();
         }
         let mut state = InMemoryStateAdapter::new(&mut db);
         let header_addr = btree_header_address(b"k");
