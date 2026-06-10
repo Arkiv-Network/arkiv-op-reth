@@ -35,7 +35,7 @@
 //!   encode/decode, tombstoning) lives here. The precompile is a thin
 //!   adapter: decode calldata, dispatch.
 
-use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_primitives::{Address, B256, keccak256};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use eyre::{Result, ensure};
 use roaring::RoaringTreemap;
@@ -396,11 +396,6 @@ fn encode_b256(b: B256) -> Vec<u8> {
     b.0.to_vec()
 }
 
-#[inline]
-fn encode_u256_be(n: U256) -> Vec<u8> {
-    n.to_be_bytes::<32>().to_vec()
-}
-
 // ─── Bitmap (roaring64) ───────────────────────────────────────────────
 
 /// Roaring64 bitmap of entity IDs.
@@ -484,7 +479,7 @@ impl FromIterator<u64> for Bitmap {
 /// Whether an annotation key uses the single-level **int** index
 /// (values ≤ 32 bytes, one slot per value) or the four-level **string**
 /// cascade index (values ≤ 128 bytes).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AnnotMode {
     /// Single-level index at `int_index_address(attr_key)`. Slot key =
     /// right-padded 32-byte value; slot value = `(len+1)` as u32 BE in
@@ -502,6 +497,13 @@ pub enum AnnotMode {
 /// address halts immediately.
 pub const ENTITY_CODE_PREFIX: u8 = 0xFE;
 
+/// Attribute `value_type` tags. Must match
+/// `Entity.ATTR_{UINT,STRING,ENTITY_KEY}` in EntityRegistry.sol and
+/// the ABI shape decoded by the precompile.
+pub const ATTR_UINT: u8 = 1;
+pub const ATTR_STRING: u8 = 2;
+pub const ATTR_ENTITY_KEY: u8 = 3;
+
 /// On-trie representation of an entity. Encoded as
 /// `0xFE || RLP(EntityRlp)` and stored as the entity-account `code`.
 #[derive(Debug, Clone, PartialEq, Eq, RlpEncodable, RlpDecodable)]
@@ -513,28 +515,23 @@ pub struct EntityRlp {
     pub expires_at: u64,
     pub content_type: Vec<u8>,
     pub key: B256,
-    pub string_annotations: Vec<StringAnnotation>,
-    pub numeric_annotations: Vec<NumericAnnotation>,
+    pub attributes: Vec<Attribute>,
     /// Block number of the most recent mutation (CREATE / UPDATE /
     /// EXTEND / TRANSFER) — equals `created_at_block` until the
     /// entity is first modified.
     pub last_modified_at_block: u64,
 }
 
-/// `(key, value)` pair where `value` is opaque bytes — used for the
-/// SDK `STRING` and `ENTITY_KEY` annotation types.
+/// Discriminated `(key, value)` attribute mirroring the precompile
+/// ABI. `value_type` selects how `value` should be interpreted:
+/// `ATTR_UINT` → 32-byte big-endian uint256; `ATTR_STRING` → opaque
+/// bytes (UTF-8 by SDK convention); `ATTR_ENTITY_KEY` → 32 raw
+/// bytes of an entity key.
 #[derive(Debug, Clone, PartialEq, Eq, RlpEncodable, RlpDecodable)]
-pub struct StringAnnotation {
+pub struct Attribute {
     pub key: Vec<u8>,
+    pub value_type: u8,
     pub value: Vec<u8>,
-}
-
-/// `(key, value)` pair where `value` is a `uint256` — used for the
-/// SDK `UINT` annotation type.
-#[derive(Debug, Clone, PartialEq, Eq, RlpEncodable, RlpDecodable)]
-pub struct NumericAnnotation {
-    pub key: Vec<u8>,
-    pub value: U256,
 }
 
 impl EntityRlp {
@@ -610,7 +607,7 @@ pub trait StateAdapter {
     skip_all,
     fields(
         payload_bytes = payload.len(),
-        n_attrs = string_annotations.len() + numeric_annotations.len(),
+        n_attrs = attributes.len(),
     ),
 )]
 pub fn create<S: StateAdapter>(
@@ -621,8 +618,7 @@ pub fn create<S: StateAdapter>(
     current_block: u64,
     payload: Vec<u8>,
     content_type: Vec<u8>,
-    string_annotations: Vec<StringAnnotation>,
-    numeric_annotations: Vec<NumericAnnotation>,
+    attributes: Vec<Attribute>,
 ) -> Result<()> {
     // 1) Allocate entity_id.
     let count_slot = slot_entity_count();
@@ -648,7 +644,7 @@ pub fn create<S: StateAdapter>(
     )?;
 
     // 3) Insert into every bitmap (built-in + user).
-    for (k, v, m) in built_in_pairs(
+    for a in built_in_annotations(
         sender,
         sender,
         entity_key,
@@ -657,9 +653,9 @@ pub fn create<S: StateAdapter>(
         &content_type,
     )
     .into_iter()
-    .chain(user_pairs(&string_annotations, &numeric_annotations))
+    .chain(user_annotations(&attributes))
     {
-        insert_into_pair_bitmap(state, &k, &v, entity_id, m)?;
+        insert_into_indexes(state, &a.key, &a.value, entity_id, a.tier2, a.mode)?;
     }
 
     // 4) Write the entity RLP.
@@ -671,8 +667,7 @@ pub fn create<S: StateAdapter>(
         expires_at,
         content_type,
         key: entity_key,
-        string_annotations,
-        numeric_annotations,
+        attributes,
         last_modified_at_block: current_block,
     };
     state.set_code(&entity_addr, entity.encode_as_code())?;
@@ -691,7 +686,7 @@ pub fn create<S: StateAdapter>(
     skip_all,
     fields(
         payload_bytes = payload.len(),
-        n_attrs = string_annotations.len() + numeric_annotations.len(),
+        n_attrs = attributes.len(),
     ),
 )]
 pub fn update<S: StateAdapter>(
@@ -700,8 +695,7 @@ pub fn update<S: StateAdapter>(
     current_block: u64,
     payload: Vec<u8>,
     content_type: Vec<u8>,
-    string_annotations: Vec<StringAnnotation>,
-    numeric_annotations: Vec<NumericAnnotation>,
+    attributes: Vec<Attribute>,
 ) -> Result<()> {
     let entity_addr = entity_address(entity_key);
     let entity_id = read_entity_id(state, entity_addr)?;
@@ -712,18 +706,13 @@ pub fn update<S: StateAdapter>(
     // `$all`) aren't included on either side, so the diff doesn't
     // touch them. `$contentType` IS in the diff so it moves if the
     // content type changed.
-    let old_pairs = updatable_pairs(
-        &entity.content_type,
-        &entity.string_annotations,
-        &entity.numeric_annotations,
-    );
-    let new_pairs = updatable_pairs(&content_type, &string_annotations, &numeric_annotations);
-    apply_pair_diff(state, &old_pairs, &new_pairs, entity_id)?;
+    let old_annotations = updatable_annotations(&entity.content_type, &entity.attributes);
+    let new_annotations = updatable_annotations(&content_type, &attributes);
+    apply_annotation_diff(state, &old_annotations, &new_annotations, entity_id)?;
 
     entity.payload = payload;
     entity.content_type = content_type;
-    entity.string_annotations = string_annotations;
-    entity.numeric_annotations = numeric_annotations;
+    entity.attributes = attributes;
     entity.last_modified_at_block = current_block;
     state.set_code(&entity_addr, entity.encode_as_code())?;
 
@@ -743,18 +732,20 @@ pub fn extend<S: StateAdapter>(
     let entity_id = read_entity_id(state, entity_addr)?;
     let mut entity = read_entity(state, entity_addr)?;
 
-    remove_from_pair_bitmap(
+    remove_from_indexes(
         state,
         ANNOT_EXPIRATION,
         &encode_u64_be(entity.expires_at),
         entity_id,
+        true,
         AnnotMode::Int,
     )?;
-    insert_into_pair_bitmap(
+    insert_into_indexes(
         state,
         ANNOT_EXPIRATION,
         &encode_u64_be(new_expires_at),
         entity_id,
+        true,
         AnnotMode::Int,
     )?;
 
@@ -778,8 +769,8 @@ pub fn transfer<S: StateAdapter>(
     let entity_id = read_entity_id(state, entity_addr)?;
     let mut entity = read_entity(state, entity_addr)?;
 
-    remove_from_pair_bitmap(state, ANNOT_OWNER, &encode_address(entity.owner), entity_id, AnnotMode::Int)?;
-    insert_into_pair_bitmap(state, ANNOT_OWNER, &encode_address(new_owner), entity_id, AnnotMode::Int)?;
+    remove_from_indexes(state, ANNOT_OWNER, &encode_address(entity.owner), entity_id, false, AnnotMode::Int)?;
+    insert_into_indexes(state, ANNOT_OWNER, &encode_address(new_owner), entity_id, false, AnnotMode::Int)?;
 
     entity.owner = new_owner;
     entity.last_modified_at_block = current_block;
@@ -797,7 +788,7 @@ pub fn delete<S: StateAdapter>(state: &mut S, entity_key: B256) -> Result<()> {
     let entity_id = read_entity_id(state, entity_addr)?;
     let entity = read_entity(state, entity_addr)?;
 
-    for (k, v, m) in built_in_pairs(
+    for a in built_in_annotations(
         entity.creator,
         entity.owner,
         entity_key,
@@ -806,11 +797,9 @@ pub fn delete<S: StateAdapter>(state: &mut S, entity_key: B256) -> Result<()> {
         &entity.content_type,
     )
     .into_iter()
-    .chain(user_pairs(
-        &entity.string_annotations,
-        &entity.numeric_annotations,
-    )) {
-        remove_from_pair_bitmap(state, &k, &v, entity_id, m)?;
+    .chain(user_annotations(&entity.attributes))
+    {
+        remove_from_indexes(state, &a.key, &a.value, entity_id, a.tier2, a.mode)?;
     }
 
     // Clear ID-map slots.
@@ -853,102 +842,128 @@ fn read_entity_id<S: StateAdapter>(state: &mut S, entity_addr: Address) -> Resul
     ))
 }
 
-/// All built-in `(key, value, mode)` triples for an entity. Used by
-/// `create` (to insert) and `delete`/`expire` (to remove).
-fn built_in_pairs(
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Annotation {
+    key: Vec<u8>,
+    value: Vec<u8>,
+    tier2: bool,
+    mode: AnnotMode,
+}
+
+/// All built-in annotations for an entity, with each annotation's
+/// tier-2 status set per the skip-list decision in #96. Used by
+/// `create` (to insert) and `delete` / `expire` (to remove).
+fn built_in_annotations(
     creator: Address,
     owner: Address,
     entity_key: B256,
     created_at_block: u64,
     expires_at: u64,
     content_type: &[u8],
-) -> Vec<(Vec<u8>, Vec<u8>, AnnotMode)> {
+) -> Vec<Annotation> {
     vec![
-        (ANNOT_ALL.to_vec(), Vec::new(), AnnotMode::Int),
-        (ANNOT_CREATOR.to_vec(), encode_address(creator), AnnotMode::Int),
-        (ANNOT_CREATED_AT_BLOCK.to_vec(), encode_u64_be(created_at_block), AnnotMode::Int),
-        (ANNOT_OWNER.to_vec(), encode_address(owner), AnnotMode::Int),
-        (ANNOT_KEY.to_vec(), encode_b256(entity_key), AnnotMode::Int),
-        (ANNOT_EXPIRATION.to_vec(), encode_u64_be(expires_at), AnnotMode::Int),
-        (ANNOT_CONTENT_TYPE.to_vec(), content_type.to_vec(), AnnotMode::Str),
+        // Singleton — only one value, no ordered iteration.
+        Annotation { key: ANNOT_ALL.to_vec(), value: Vec::new(), tier2: false, mode: AnnotMode::Int },
+        // 20-byte address, random distribution.
+        Annotation { key: ANNOT_CREATOR.to_vec(), value: encode_address(creator), tier2: false, mode: AnnotMode::Int },
+        // Numeric range scans are real use cases.
+        Annotation { key: ANNOT_CREATED_AT_BLOCK.to_vec(), value: encode_u64_be(created_at_block), tier2: true, mode: AnnotMode::Int },
+        // 20-byte address, random distribution.
+        Annotation { key: ANNOT_OWNER.to_vec(), value: encode_address(owner), tier2: false, mode: AnnotMode::Int },
+        // 32-byte entity hash, random distribution.
+        Annotation { key: ANNOT_KEY.to_vec(), value: encode_b256(entity_key), tier2: false, mode: AnnotMode::Int },
+        // Numeric range scans are real use cases.
+        Annotation { key: ANNOT_EXPIRATION.to_vec(), value: encode_u64_be(expires_at), tier2: true, mode: AnnotMode::Int },
+        // Glob / prefix scans (e.g. `~ "video/*"`) are real use cases.
+        Annotation { key: ANNOT_CONTENT_TYPE.to_vec(), value: content_type.to_vec(), tier2: true, mode: AnnotMode::Str },
     ]
 }
 
-/// User-supplied annotations as `(key, value, mode)` triples.
-fn user_pairs<'a>(
-    string_annotations: &'a [StringAnnotation],
-    numeric_annotations: &'a [NumericAnnotation],
-) -> impl Iterator<Item = (Vec<u8>, Vec<u8>, AnnotMode)> + 'a {
-    string_annotations
-        .iter()
-        .map(|sa| (sa.key.clone(), sa.value.clone(), AnnotMode::Str))
-        .chain(
-            numeric_annotations
-                .iter()
-                .map(|na| (na.key.clone(), encode_u256_be(na.value), AnnotMode::Int)),
-        )
+/// User-supplied attributes flattened to annotations. Tier-2 is
+/// maintained for `ATTR_UINT` / `ATTR_STRING` (range and glob queries
+/// are meaningful) and skipped for `ATTR_ENTITY_KEY` (random 32-byte
+/// hashes — ordered iteration produces no meaningful query).
+fn user_annotations<'a>(
+    attributes: &'a [Attribute],
+) -> impl Iterator<Item = Annotation> + 'a {
+    attributes.iter().map(|a| Annotation {
+        key: a.key.clone(),
+        value: a.value.clone(),
+        tier2: a.value_type != ATTR_ENTITY_KEY,
+        mode: if a.value_type == ATTR_STRING { AnnotMode::Str } else { AnnotMode::Int },
+    })
 }
 
-/// Pairs that an UPDATE op diffs: user annotations plus `$contentType`.
-fn updatable_pairs(
-    content_type: &[u8],
-    string_annotations: &[StringAnnotation],
-    numeric_annotations: &[NumericAnnotation],
-) -> Vec<(Vec<u8>, Vec<u8>, AnnotMode)> {
-    let mut out = Vec::with_capacity(1 + string_annotations.len() + numeric_annotations.len());
-    out.push((ANNOT_CONTENT_TYPE.to_vec(), content_type.to_vec(), AnnotMode::Str));
-    out.extend(user_pairs(string_annotations, numeric_annotations));
+/// Annotations that an UPDATE op diffs: the user attributes plus
+/// `$contentType`. Other built-ins (`$creator` / `$key` /
+/// `$createdAtBlock` / `$owner` / `$expiration` / `$all`) don't change
+/// on UPDATE and so aren't in the diff set.
+fn updatable_annotations(content_type: &[u8], attributes: &[Attribute]) -> Vec<Annotation> {
+    let mut out = Vec::with_capacity(1 + attributes.len());
+    out.push(Annotation {
+        key: ANNOT_CONTENT_TYPE.to_vec(),
+        value: content_type.to_vec(),
+        tier2: true,
+        mode: AnnotMode::Str,
+    });
+    out.extend(user_annotations(attributes));
     out
 }
 
-/// Diff two `(key, value, mode)` triple sets and apply removals +
-/// insertions to the corresponding pair bitmaps.
-fn apply_pair_diff<S: StateAdapter>(
+/// Diff two annotation sets and apply removals + insertions to the
+/// corresponding tier-1 pair bitmaps (and tier-2 index trees, for
+/// annotations whose `tier2` flag is set).
+fn apply_annotation_diff<S: StateAdapter>(
     state: &mut S,
-    old: &[(Vec<u8>, Vec<u8>, AnnotMode)],
-    new: &[(Vec<u8>, Vec<u8>, AnnotMode)],
+    old: &[Annotation],
+    new: &[Annotation],
     entity_id: u64,
 ) -> Result<()> {
     use std::collections::BTreeSet;
-    let old_set: BTreeSet<(&[u8], &[u8])> =
-        old.iter().map(|(k, v, _)| (k.as_slice(), v.as_slice())).collect();
-    let new_set: BTreeSet<(&[u8], &[u8])> =
-        new.iter().map(|(k, v, _)| (k.as_slice(), v.as_slice())).collect();
-    for (k, v, m) in old.iter() {
-        if !new_set.contains(&(k.as_slice(), v.as_slice())) {
-            remove_from_pair_bitmap(state, k, v, entity_id, *m)?;
-        }
+    let old_set: BTreeSet<&Annotation> = old.iter().collect();
+    let new_set: BTreeSet<&Annotation> = new.iter().collect();
+    for a in old.iter().filter(|a| !new_set.contains(*a)) {
+        remove_from_indexes(state, &a.key, &a.value, entity_id, a.tier2, a.mode)?;
     }
-    for (k, v, m) in new.iter() {
-        if !old_set.contains(&(k.as_slice(), v.as_slice())) {
-            insert_into_pair_bitmap(state, k, v, entity_id, *m)?;
-        }
+    for a in new.iter().filter(|a| !old_set.contains(*a)) {
+        insert_into_indexes(state, &a.key, &a.value, entity_id, a.tier2, a.mode)?;
     }
     Ok(())
 }
 
-fn insert_into_pair_bitmap<S: StateAdapter>(
+/// Insert `entity_id` into the tier-1 pair bitmap for
+/// `(annot_key, annot_val)`. If `tier2` is set and this is the first
+/// entity to use that pair, also insert `annot_val` into the
+/// per-attribute tier-2 [`IndexTree`].
+fn insert_into_indexes<S: StateAdapter>(
     state: &mut S,
     annot_key: &[u8],
     annot_val: &[u8],
     entity_id: u64,
+    tier2: bool,
     mode: AnnotMode,
 ) -> Result<()> {
     let mut bitmap = read_pair_bitmap(state, annot_key, annot_val)?;
     let was_empty = bitmap.is_empty();
     bitmap.insert(entity_id);
     state.set_code(&pair_address(annot_key, annot_val), bitmap.to_bytes())?;
-    if was_empty {
+    if tier2 && was_empty {
         tier2_insert(state, annot_key, annot_val, mode)?;
     }
     Ok(())
 }
 
-fn remove_from_pair_bitmap<S: StateAdapter>(
+/// Remove `entity_id` from the tier-1 pair bitmap for
+/// `(annot_key, annot_val)`. If `tier2` is set and this was the last
+/// entity using that pair, also remove `annot_val` from the
+/// per-attribute tier-2 [`IndexTree`] (tombstoning the index account
+/// if the tree becomes empty).
+fn remove_from_indexes<S: StateAdapter>(
     state: &mut S,
     annot_key: &[u8],
     annot_val: &[u8],
     entity_id: u64,
+    tier2: bool,
     mode: AnnotMode,
 ) -> Result<()> {
     let mut bitmap = read_pair_bitmap(state, annot_key, annot_val)?;
@@ -957,7 +972,7 @@ fn remove_from_pair_bitmap<S: StateAdapter>(
     }
     bitmap.remove(entity_id);
     state.set_code(&pair_address(annot_key, annot_val), bitmap.to_bytes())?;
-    if bitmap.is_empty() {
+    if tier2 && bitmap.is_empty() {
         tier2_remove(state, annot_key, annot_val, mode)?;
     }
     Ok(())
@@ -1526,6 +1541,7 @@ pub mod test_utils {
 mod tests {
     use super::*;
     use crate::test_utils::{InMemoryStateAdapter, InMemoryStateDb};
+    use alloy_primitives::U256;
     use alloy_primitives::b256;
 
     // ─── Primitives ──────────────────────────────────────────────────
@@ -1566,14 +1582,23 @@ mod tests {
             expires_at: 99_999,
             content_type: b"application/json".to_vec(),
             key: b256!("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
-            string_annotations: vec![StringAnnotation {
-                key: b"title".to_vec(),
-                value: b"the answer".to_vec(),
-            }],
-            numeric_annotations: vec![NumericAnnotation {
-                key: b"priority".to_vec(),
-                value: U256::from(42),
-            }],
+            attributes: vec![
+                Attribute {
+                    key: b"title".to_vec(),
+                    value_type: ATTR_STRING,
+                    value: b"the answer".to_vec(),
+                },
+                Attribute {
+                    key: b"priority".to_vec(),
+                    value_type: ATTR_UINT,
+                    value: U256::from(42).to_be_bytes::<32>().to_vec(),
+                },
+                Attribute {
+                    key: b"replyTo".to_vec(),
+                    value_type: ATTR_ENTITY_KEY,
+                    value: vec![0xab; 32],
+                },
+            ],
             last_modified_at_block: 1234,
         };
         let code = original.encode_as_code();
@@ -1594,8 +1619,7 @@ mod tests {
             expires_at: 0,
             content_type: vec![],
             key: B256::ZERO,
-            string_annotations: vec![],
-            numeric_annotations: vec![],
+            attributes: vec![],
             last_modified_at_block: 0,
         };
         let mut bad = entity.encode_as_code();
@@ -1647,14 +1671,18 @@ mod tests {
                 10,
                 b"hello".to_vec(),
                 b"text/plain".to_vec(),
-                vec![StringAnnotation {
-                    key: b"tag".to_vec(),
-                    value: b"music".to_vec(),
-                }],
-                vec![NumericAnnotation {
-                    key: b"score".to_vec(),
-                    value: U256::from(7),
-                }],
+                vec![
+                    Attribute {
+                        key: b"tag".to_vec(),
+                        value_type: ATTR_STRING,
+                        value: b"music".to_vec(),
+                    },
+                    Attribute {
+                        key: b"score".to_vec(),
+                        value_type: ATTR_UINT,
+                        value: U256::from(7).to_be_bytes::<32>().to_vec(),
+                    },
+                ],
             )
             .expect("create");
         }
@@ -1702,7 +1730,6 @@ mod tests {
                 vec![],
                 vec![],
                 vec![],
-                vec![],
             )
             .unwrap();
             transfer(&mut state, key, 20, bob()).unwrap();
@@ -1728,7 +1755,6 @@ mod tests {
                 key,
                 100,
                 10,
-                vec![],
                 vec![],
                 vec![],
                 vec![],
@@ -1758,11 +1784,11 @@ mod tests {
                 10,
                 vec![],
                 b"text/plain".to_vec(),
-                vec![StringAnnotation {
+                vec![Attribute {
                     key: b"tag".to_vec(),
+                    value_type: ATTR_STRING,
                     value: b"a".to_vec(),
                 }],
-                vec![],
             )
             .unwrap();
             // Change the tag value; keep content type the same.
@@ -1772,11 +1798,11 @@ mod tests {
                 20,
                 vec![0xff],
                 b"text/plain".to_vec(),
-                vec![StringAnnotation {
+                vec![Attribute {
                     key: b"tag".to_vec(),
+                    value_type: ATTR_STRING,
                     value: b"b".to_vec(),
                 }],
-                vec![],
             )
             .unwrap();
         }
@@ -1804,7 +1830,6 @@ mod tests {
                 10,
                 vec![],
                 b"text/plain".to_vec(),
-                vec![],
                 vec![],
             )
             .unwrap();
@@ -1844,12 +1869,12 @@ mod tests {
     }
 
     #[test]
-    fn tier2_int_insert_sets_storage_slot() {
+    fn insert_into_indexes_writes_tier2_on_first_entity() {
         let mut db = fresh_db();
         let val = b"hello".to_vec();
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            insert_into_pair_bitmap(&mut state, b"tag", &val, 0, AnnotMode::Int).unwrap();
+            insert_into_indexes(&mut state, b"tag", &val, 0, true, AnnotMode::Int).unwrap();
         }
         let header_addr = btree_header_address(b"tag");
         // Header must have BTREE_MAGIC at byte 16.
@@ -1867,7 +1892,7 @@ mod tests {
         // Second insert of same value — bitmap non-empty, tier2 not called again.
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            insert_into_pair_bitmap(&mut state, b"tag", &val, 1, AnnotMode::Int).unwrap();
+            insert_into_indexes(&mut state, b"tag", &val, 1, true, AnnotMode::Int).unwrap();
         }
         let mut state = InMemoryStateAdapter::new(&mut db);
         let entries = state.iter_storage_asc(&header_addr, B256::ZERO).unwrap();
@@ -1875,20 +1900,20 @@ mod tests {
     }
 
     #[test]
-    fn tier2_int_remove_clears_storage_slot_on_last_entity() {
+    fn remove_from_indexes_removes_tier2_on_last_entity() {
         let mut db = fresh_db();
         let val = b"hello".to_vec();
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            insert_into_pair_bitmap(&mut state, b"tag", &val, 0, AnnotMode::Int).unwrap();
-            insert_into_pair_bitmap(&mut state, b"tag", &val, 1, AnnotMode::Int).unwrap();
+            insert_into_indexes(&mut state, b"tag", &val, 0, true, AnnotMode::Int).unwrap();
+            insert_into_indexes(&mut state, b"tag", &val, 1, true, AnnotMode::Int).unwrap();
         }
         let header_addr = btree_header_address(b"tag");
 
         // Remove first entity — bitmap still has entity 1, tier2 not triggered.
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            remove_from_pair_bitmap(&mut state, b"tag", &val, 0, AnnotMode::Int).unwrap();
+            remove_from_indexes(&mut state, b"tag", &val, 0, true, AnnotMode::Int).unwrap();
         }
         let mut state = InMemoryStateAdapter::new(&mut db);
         let entries = state.iter_storage_asc(&header_addr, B256::ZERO).unwrap();
@@ -1897,7 +1922,7 @@ mod tests {
         // Remove last entity — lazy deleted, iter excludes it.
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            remove_from_pair_bitmap(&mut state, b"tag", &val, 1, AnnotMode::Int).unwrap();
+            remove_from_indexes(&mut state, b"tag", &val, 1, true, AnnotMode::Int).unwrap();
         }
         let mut state = InMemoryStateAdapter::new(&mut db);
         let entries = state.iter_storage_asc(&header_addr, B256::ZERO).unwrap();
@@ -1910,7 +1935,7 @@ mod tests {
         let val = b"image/png".to_vec(); // 9 bytes, single chunk
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            insert_into_pair_bitmap(&mut state, b"ct", &val, 0, AnnotMode::Str).unwrap();
+            insert_into_indexes(&mut state, b"ct", &val, 0, true, AnnotMode::Str).unwrap();
         }
         let chunk = value_chunks(b"image/png")[0];
         let slot_val = str_slot(&db, b"ct", b"", chunk);
@@ -1933,9 +1958,9 @@ mod tests {
         let mut db = fresh_db();
         {
             let mut state = InMemoryStateAdapter::new(&mut db);
-            insert_into_pair_bitmap(&mut state, b"k", b"c", 0, AnnotMode::Int).unwrap();
-            insert_into_pair_bitmap(&mut state, b"k", b"a", 1, AnnotMode::Int).unwrap();
-            insert_into_pair_bitmap(&mut state, b"k", b"b", 2, AnnotMode::Int).unwrap();
+            insert_into_indexes(&mut state, b"k", b"c", 0, true, AnnotMode::Int).unwrap();
+            insert_into_indexes(&mut state, b"k", b"a", 1, true, AnnotMode::Int).unwrap();
+            insert_into_indexes(&mut state, b"k", b"b", 2, true, AnnotMode::Int).unwrap();
         }
         let mut state = InMemoryStateAdapter::new(&mut db);
         let header_addr = btree_header_address(b"k");
@@ -1961,7 +1986,6 @@ mod tests {
                 vec![],
                 b"text/plain".to_vec(),
                 vec![],
-                vec![],
             )
             .unwrap();
         }
@@ -1986,5 +2010,225 @@ mod tests {
                 "mismatch at {addr}"
             );
         }
+    }
+
+    // ─── Tier-2 skip-list (issue #96) ────────────────────────────────
+
+    #[track_caller]
+    fn index_account_present(db: &InMemoryStateDb, attr_key: &[u8]) -> bool {
+        db.account(&btree_header_address(attr_key)).is_some()
+            || db.account(&str_level_address(attr_key, b"")).is_some()
+    }
+
+    #[test]
+    fn create_skips_tier2_index_for_skip_listed_built_ins() {
+        let mut db = fresh_db();
+        let key = entity_key_n(1);
+        {
+            let mut state = InMemoryStateAdapter::new(&mut db);
+            create(
+                &mut state,
+                alice(),
+                key,
+                100,
+                10,
+                vec![],
+                b"text/plain".to_vec(),
+                vec![],
+            )
+            .unwrap();
+        }
+        for k in [ANNOT_ALL, ANNOT_CREATOR, ANNOT_OWNER, ANNOT_KEY] {
+            assert!(
+                !index_account_present(&db, k),
+                "index_address({:?}) should not exist for skip-listed built-in",
+                std::str::from_utf8(k).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn create_keeps_tier2_index_for_tier2_built_ins() {
+        let mut db = fresh_db();
+        let key = entity_key_n(2);
+        {
+            let mut state = InMemoryStateAdapter::new(&mut db);
+            create(
+                &mut state,
+                alice(),
+                key,
+                100,
+                10,
+                vec![],
+                b"text/plain".to_vec(),
+                vec![],
+            )
+            .unwrap();
+        }
+        for k in [ANNOT_CREATED_AT_BLOCK, ANNOT_EXPIRATION, ANNOT_CONTENT_TYPE] {
+            assert!(
+                index_account_present(&db, k),
+                "index_address({:?}) should exist for tier-2 built-in",
+                std::str::from_utf8(k).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn create_skips_tier2_index_for_user_entity_key_attribute() {
+        let mut db = fresh_db();
+        let key = entity_key_n(3);
+        {
+            let mut state = InMemoryStateAdapter::new(&mut db);
+            create(
+                &mut state,
+                alice(),
+                key,
+                100,
+                10,
+                vec![],
+                b"text/plain".to_vec(),
+                vec![Attribute {
+                    key: b"ref".to_vec(),
+                    value_type: ATTR_ENTITY_KEY,
+                    value: entity_key_n(99).as_slice().to_vec(),
+                }],
+            )
+            .unwrap();
+        }
+        assert!(!index_account_present(&db, b"ref"));
+    }
+
+    #[test]
+    fn create_keeps_tier2_index_for_user_uint_and_string_attributes() {
+        let mut db = fresh_db();
+        let key = entity_key_n(4);
+        {
+            let mut state = InMemoryStateAdapter::new(&mut db);
+            create(
+                &mut state,
+                alice(),
+                key,
+                100,
+                10,
+                vec![],
+                b"text/plain".to_vec(),
+                vec![
+                    Attribute {
+                        key: b"tag".to_vec(),
+                        value_type: ATTR_STRING,
+                        value: b"music".to_vec(),
+                    },
+                    Attribute {
+                        key: b"score".to_vec(),
+                        value_type: ATTR_UINT,
+                        value: U256::from(7).to_be_bytes::<32>().to_vec(),
+                    },
+                ],
+            )
+            .unwrap();
+        }
+        assert!(index_account_present(&db, b"tag"));
+        assert!(index_account_present(&db, b"score"));
+    }
+
+    #[test]
+    fn eq_lookup_via_tier1_still_works_for_skip_listed_attrs() {
+        // Tier-1 pair bitmaps are unaffected by the skip list.
+        let mut db = fresh_db();
+        let key = entity_key_n(5);
+        {
+            let mut state = InMemoryStateAdapter::new(&mut db);
+            create(
+                &mut state,
+                alice(),
+                key,
+                100,
+                10,
+                vec![],
+                b"text/plain".to_vec(),
+                vec![Attribute {
+                    key: b"ref".to_vec(),
+                    value_type: ATTR_ENTITY_KEY,
+                    value: entity_key_n(99).as_slice().to_vec(),
+                }],
+            )
+            .unwrap();
+        }
+        assert!(read_bitmap(&db, ANNOT_OWNER, alice().as_slice()).contains(0));
+        assert!(read_bitmap(&db, ANNOT_KEY, key.as_slice()).contains(0));
+        assert!(read_bitmap(&db, b"ref", entity_key_n(99).as_slice()).contains(0));
+    }
+
+    #[test]
+    fn delete_does_not_touch_absent_tier2_indexes() {
+        // delete must not error or allocate index accounts for
+        // skip-listed annotations, even though the same code path
+        // tombstones the kept ones.
+        let mut db = fresh_db();
+        let key = entity_key_n(6);
+        {
+            let mut state = InMemoryStateAdapter::new(&mut db);
+            create(
+                &mut state,
+                alice(),
+                key,
+                100,
+                10,
+                vec![],
+                b"text/plain".to_vec(),
+                vec![Attribute {
+                    key: b"ref".to_vec(),
+                    value_type: ATTR_ENTITY_KEY,
+                    value: entity_key_n(99).as_slice().to_vec(),
+                }],
+            )
+            .unwrap();
+            delete(&mut state, key).unwrap();
+        }
+        for k in [
+            ANNOT_ALL,
+            ANNOT_CREATOR,
+            ANNOT_OWNER,
+            ANNOT_KEY,
+            b"ref" as &[u8],
+        ] {
+            assert!(
+                !index_account_present(&db, k),
+                "skip-listed index_address({:?}) should still not exist after delete",
+                std::str::from_utf8(k).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn transfer_does_not_touch_owner_tier2_index() {
+        // $owner is skip-listed; transfer moves the tier-1 bitmap but
+        // never allocates an $owner index account.
+        let mut db = fresh_db();
+        let key = entity_key_n(7);
+        {
+            let mut state = InMemoryStateAdapter::new(&mut db);
+            create(
+                &mut state,
+                alice(),
+                key,
+                100,
+                10,
+                vec![],
+                b"text/plain".to_vec(),
+                vec![],
+            )
+            .unwrap();
+        }
+        assert!(!index_account_present(&db, ANNOT_OWNER));
+        {
+            let mut state = InMemoryStateAdapter::new(&mut db);
+            transfer(&mut state, key, 11, bob()).unwrap();
+        }
+        assert!(!index_account_present(&db, ANNOT_OWNER));
+        // Tier-1 bitmap moved.
+        assert!(!read_bitmap(&db, ANNOT_OWNER, alice().as_slice()).contains(0));
+        assert!(read_bitmap(&db, ANNOT_OWNER, bob().as_slice()).contains(0));
     }
 }
