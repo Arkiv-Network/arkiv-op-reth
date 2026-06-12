@@ -26,17 +26,22 @@
 //!    so the SDK's `eth_getLogs` filter on that address resolves
 //!    every event.
 
+use std::sync::{Arc, Mutex};
+
 use alloy_evm::precompiles::{DynPrecompile, PrecompileInput};
 use alloy_primitives::{Address, B256, Bytes, FixedBytes, Log, U256, keccak256};
 use alloy_sol_types::{SolCall, SolError, SolEvent, sol};
 use arkiv_entitydb::{
     ARKIV_ADDRESS, ATTR_ENTITY_KEY, ATTR_STRING, ATTR_UINT, Attribute as EntityAttribute,
-    StateAdapter,
+    Bitmap, StateAdapter, pair_address,
 };
+use eyre::Result;
 use revm::precompile::{
     PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult,
 };
+use revm::primitives::KECCAK_EMPTY;
 
+use crate::bitmap_cache::{BlockBitmapCache, TxBitmapOverlay};
 use crate::state_adapter::ReadWriteStateAdapter;
 
 // ─── ABI mirror of `EntityRegistry.sol` ──────────────────────────────
@@ -139,7 +144,106 @@ const G_ART_INDEXED_ANNOTATION: u64 = 6_000;
 
 const PRECOMPILE_NAME: &str = "ARKIV";
 
-pub fn arkiv_precompile() -> DynPrecompile {
+// ─── CachingStateAdapter ──────────────────────────────────────────────
+
+/// `StateAdapter` wrapper that intercepts pair-bitmap reads/writes.
+/// Reads serve from the block cache (or fall through to the DB on first
+/// miss); writes go to the tx overlay only — `set_code` is never called
+/// during the tx. `flush_dirty_into_state` in `transact_raw` handles the
+/// eventual code write once per tx per dirty pair address.
+struct CachingStateAdapter<'a, 'b, 'o> {
+    inner: ReadWriteStateAdapter<'a, 'b>,
+    cache: Arc<Mutex<BlockBitmapCache>>,
+    overlay: &'o mut TxBitmapOverlay,
+}
+
+impl<'a, 'b, 'o> CachingStateAdapter<'a, 'b, 'o> {
+    fn new(
+        inner: ReadWriteStateAdapter<'a, 'b>,
+        cache: Arc<Mutex<BlockBitmapCache>>,
+        overlay: &'o mut TxBitmapOverlay,
+    ) -> Self {
+        Self { inner, cache, overlay }
+    }
+}
+
+impl StateAdapter for CachingStateAdapter<'_, '_, '_> {
+    fn code(&mut self, addr: &Address) -> Result<Vec<u8>> {
+        self.inner.code(addr)
+    }
+    fn set_code(&mut self, addr: &Address, code: Vec<u8>) -> Result<()> {
+        self.inner.set_code(addr, code)
+    }
+    fn tombstone_code(&mut self, addr: &Address) -> Result<()> {
+        self.inner.tombstone_code(addr)
+    }
+    fn storage(&mut self, addr: &Address, slot: B256) -> Result<B256> {
+        self.inner.storage(addr, slot)
+    }
+    fn set_storage(&mut self, addr: &Address, slot: B256, value: B256) -> Result<()> {
+        self.inner.set_storage(addr, slot, value)
+    }
+    fn ensure_account_persists(&mut self, addr: &Address) -> Result<()> {
+        self.inner.ensure_account_persists(addr)
+    }
+    fn iter_storage_asc(&mut self, addr: &Address, from: B256) -> Result<Vec<(B256, B256)>> {
+        self.inner.iter_storage_asc(addr, from)
+    }
+
+    fn get_pair_bitmap(&mut self, annot_key: &[u8], annot_val: &[u8]) -> Result<Bitmap>
+    where
+        Self: Sized,
+    {
+        let addr = pair_address(annot_key, annot_val);
+        // 1. in-flight writes for this tx
+        if let Some(b) = self.overlay.writes.get(&addr) {
+            return Ok(b.clone());
+        }
+        // 2. committed block cache
+        {
+            let locked = self.cache.lock().unwrap();
+            if let Some(b) = locked.committed.get(&addr) {
+                return Ok(b.clone());
+            }
+        }
+        // 3. DB load (cold miss); cache the result for this block
+        let code = self.inner.code(&addr)?;
+        let bitmap = if code.is_empty() {
+            Bitmap::new()
+        } else {
+            Bitmap::from_bytes(&code)?
+        };
+        let mut locked = self.cache.lock().unwrap();
+        locked.committed.insert(addr, bitmap.clone());
+        // Record the pre-block code hash once, for use as original_info in flush.
+        locked.initial_code_hashes.entry(addr).or_insert_with(|| {
+            if code.is_empty() { KECCAK_EMPTY } else { keccak256(&code) }
+        });
+        Ok(bitmap)
+    }
+
+    fn set_pair_bitmap(&mut self, addr: Address, bitmap: Bitmap) -> Result<()>
+    where
+        Self: Sized,
+    {
+        // Snapshot the old committed value before the first write in this tx.
+        if !self.overlay.snapshot.contains_key(&addr) {
+            let old = {
+                let locked = self.cache.lock().unwrap();
+                locked.committed.get(&addr).cloned()
+            };
+            self.overlay.snapshot.insert(addr, old);
+        }
+        self.overlay.writes.insert(addr, bitmap);
+        Ok(())
+    }
+}
+
+// ─── Precompile factory ───────────────────────────────────────────────
+
+pub fn arkiv_precompile() -> (DynPrecompile, Arc<Mutex<BlockBitmapCache>>) {
+    let cache = BlockBitmapCache::new();
+    let cache_ref = Arc::clone(&cache);
     let id = PrecompileId::custom(PRECOMPILE_NAME);
     let call = move |mut input: PrecompileInput<'_>| -> PrecompileResult {
         let _call_span = tracing::debug_span!("precompile_call").entered();
@@ -167,11 +271,20 @@ pub fn arkiv_precompile() -> DynPrecompile {
 
         match selector {
             noncesCall::SELECTOR => dispatch_nonces(body, &mut input),
-            executeCall::SELECTOR => dispatch_execute(body, &mut input),
+            executeCall::SELECTOR => {
+                let mut overlay = TxBitmapOverlay::default();
+                let result = dispatch_execute(body, &mut input, &cache, &mut overlay);
+                if result.is_ok() {
+                    cache.lock().unwrap().apply_tx(overlay.writes);
+                } else {
+                    cache.lock().unwrap().restore(overlay.snapshot);
+                }
+                result
+            }
             _ => Ok(revert(unknown_selector_revert(selector), input.reservoir)),
         }
     };
-    DynPrecompile::new_stateful(id, call)
+    (DynPrecompile::new_stateful(id, call), cache_ref)
 }
 
 // ─── Dispatch: nonces(address) ───────────────────────────────────────
@@ -205,7 +318,12 @@ fn dispatch_nonces(body: &[u8], input: &mut PrecompileInput<'_>) -> PrecompileRe
 
 // ─── Dispatch: execute(Operation[]) ──────────────────────────────────
 
-fn dispatch_execute(body: &[u8], input: &mut PrecompileInput<'_>) -> PrecompileResult {
+fn dispatch_execute(
+    body: &[u8],
+    input: &mut PrecompileInput<'_>,
+    cache: &Arc<Mutex<BlockBitmapCache>>,
+    overlay: &mut TxBitmapOverlay,
+) -> PrecompileResult {
     if input.is_static {
         return Err(PrecompileError::Fatal(
             "arkiv precompile: execute() not allowed in STATICCALL".into(),
@@ -244,7 +362,7 @@ fn dispatch_execute(body: &[u8], input: &mut PrecompileInput<'_>) -> PrecompileR
     // boundary).
     let dispatch_span = tracing::debug_span!("precompile_dispatch", n_ops = ops.len()).entered();
     for (i, op) in ops.iter().enumerate() {
-        match apply_op(input, caller, chain_id, current_block, op) {
+        match apply_op(input, caller, chain_id, current_block, op, cache, overlay) {
             Ok(()) => {}
             Err(ApplyError::Revert(payload)) => {
                 drop(dispatch_span);
@@ -292,14 +410,16 @@ fn apply_op(
     chain_id: u64,
     current_block: u64,
     op: &Operation,
+    cache: &Arc<Mutex<BlockBitmapCache>>,
+    overlay: &mut TxBitmapOverlay,
 ) -> Result<(), ApplyError> {
     match op.operationType {
-        OP_CREATE => apply_create(input, caller, chain_id, current_block, op),
-        OP_UPDATE => apply_update(input, caller, current_block, op),
-        OP_EXTEND => apply_extend(input, caller, current_block, op),
-        OP_TRANSFER => apply_transfer(input, caller, current_block, op),
-        OP_DELETE => apply_delete(input, caller, current_block, op),
-        OP_EXPIRE => apply_expire(input, current_block, op),
+        OP_CREATE => apply_create(input, caller, chain_id, current_block, op, cache, overlay),
+        OP_UPDATE => apply_update(input, caller, current_block, op, cache, overlay),
+        OP_EXTEND => apply_extend(input, caller, current_block, op, cache, overlay),
+        OP_TRANSFER => apply_transfer(input, caller, current_block, op, cache, overlay),
+        OP_DELETE => apply_delete(input, caller, current_block, op, cache, overlay),
+        OP_EXPIRE => apply_expire(input, current_block, op, cache, overlay),
         t => Err(ApplyError::Revert(
             InvalidOpType { operationType: t }.abi_encode().into(),
         )),
@@ -312,6 +432,8 @@ fn apply_create(
     chain_id: u64,
     current_block: u64,
     op: &Operation,
+    cache: &Arc<Mutex<BlockBitmapCache>>,
+    overlay: &mut TxBitmapOverlay,
 ) -> Result<(), ApplyError> {
     if op.btl == 0 {
         return Err(ApplyError::Revert(ZeroBtl {}.abi_encode().into()));
@@ -321,7 +443,8 @@ fn apply_create(
     let expires_at = current_block.saturating_add(op.btl as u64);
     let attributes = convert_attributes(&op.attributes)?;
     let entity_key = {
-        let mut adapter = ReadWriteStateAdapter::new(&mut input.internals);
+        let inner = ReadWriteStateAdapter::new(&mut input.internals);
+        let mut adapter = CachingStateAdapter::new(inner, Arc::clone(cache), overlay);
         let current_nonce = arkiv_entitydb::bump_nonce(&mut adapter, caller)
             .map_err(|e| ApplyError::Fatal(format!("bump nonce: {e}")))?;
         let entity_key = derive_entity_key(chain_id, caller, current_nonce);
@@ -346,12 +469,15 @@ fn apply_update(
     caller: Address,
     current_block: u64,
     op: &Operation,
+    cache: &Arc<Mutex<BlockBitmapCache>>,
+    overlay: &mut TxBitmapOverlay,
 ) -> Result<(), ApplyError> {
     validate_attribute_names(&op.attributes)?;
     let entity = load_entity_for_owner(input, caller, current_block, op.entityKey, false)?;
     let attributes = convert_attributes(&op.attributes)?;
     {
-        let mut adapter = ReadWriteStateAdapter::new(&mut input.internals);
+        let inner = ReadWriteStateAdapter::new(&mut input.internals);
+        let mut adapter = CachingStateAdapter::new(inner, Arc::clone(cache), overlay);
         arkiv_entitydb::update(
             &mut adapter,
             op.entityKey,
@@ -376,6 +502,8 @@ fn apply_extend(
     caller: Address,
     current_block: u64,
     op: &Operation,
+    cache: &Arc<Mutex<BlockBitmapCache>>,
+    overlay: &mut TxBitmapOverlay,
 ) -> Result<(), ApplyError> {
     if op.btl == 0 {
         return Err(ApplyError::Revert(ZeroBtl {}.abi_encode().into()));
@@ -394,7 +522,8 @@ fn apply_extend(
         ));
     }
     {
-        let mut adapter = ReadWriteStateAdapter::new(&mut input.internals);
+        let inner = ReadWriteStateAdapter::new(&mut input.internals);
+        let mut adapter = CachingStateAdapter::new(inner, Arc::clone(cache), overlay);
         arkiv_entitydb::extend(&mut adapter, op.entityKey, current_block, new_expires_at)?;
     }
     emit_entity_op(input, op.entityKey, OP_EXTEND, entity.owner, new_expires_at);
@@ -406,6 +535,8 @@ fn apply_transfer(
     caller: Address,
     current_block: u64,
     op: &Operation,
+    cache: &Arc<Mutex<BlockBitmapCache>>,
+    overlay: &mut TxBitmapOverlay,
 ) -> Result<(), ApplyError> {
     let entity = load_entity_for_owner(input, caller, current_block, op.entityKey, false)?;
     if op.newOwner == Address::ZERO {
@@ -427,7 +558,8 @@ fn apply_transfer(
         ));
     }
     {
-        let mut adapter = ReadWriteStateAdapter::new(&mut input.internals);
+        let inner = ReadWriteStateAdapter::new(&mut input.internals);
+        let mut adapter = CachingStateAdapter::new(inner, Arc::clone(cache), overlay);
         arkiv_entitydb::transfer(&mut adapter, op.entityKey, current_block, op.newOwner)?;
     }
     emit_entity_op(
@@ -445,10 +577,13 @@ fn apply_delete(
     caller: Address,
     current_block: u64,
     op: &Operation,
+    cache: &Arc<Mutex<BlockBitmapCache>>,
+    overlay: &mut TxBitmapOverlay,
 ) -> Result<(), ApplyError> {
     let entity = load_entity_for_owner(input, caller, current_block, op.entityKey, false)?;
     {
-        let mut adapter = ReadWriteStateAdapter::new(&mut input.internals);
+        let inner = ReadWriteStateAdapter::new(&mut input.internals);
+        let mut adapter = CachingStateAdapter::new(inner, Arc::clone(cache), overlay);
         arkiv_entitydb::delete(&mut adapter, op.entityKey)?;
     }
     emit_entity_op(
@@ -465,6 +600,8 @@ fn apply_expire(
     input: &mut PrecompileInput<'_>,
     current_block: u64,
     op: &Operation,
+    cache: &Arc<Mutex<BlockBitmapCache>>,
+    overlay: &mut TxBitmapOverlay,
 ) -> Result<(), ApplyError> {
     // EXPIRE doesn't require ownership; only that the entity exists
     // and is past its expiry. `load_entity_for_owner(..., allow_expired=true)`
@@ -481,7 +618,8 @@ fn apply_expire(
         ));
     }
     {
-        let mut adapter = ReadWriteStateAdapter::new(&mut input.internals);
+        let inner = ReadWriteStateAdapter::new(&mut input.internals);
+        let mut adapter = CachingStateAdapter::new(inner, Arc::clone(cache), overlay);
         arkiv_entitydb::expire(&mut adapter, op.entityKey)?;
     }
     emit_entity_op(

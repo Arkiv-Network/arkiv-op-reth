@@ -588,6 +588,24 @@ pub trait StateAdapter {
     /// ordered ascending by slot key. Used by range queries to iterate
     /// the Tier-2 index accounts. Write-time implementations may bail.
     fn iter_storage_asc(&mut self, addr: &Address, from: B256) -> Result<Vec<(B256, B256)>>;
+
+    /// Read the pair-account bitmap for `(annot_key, annot_val)`.
+    /// Default reads via `self.code()`; override to cache in memory.
+    fn get_pair_bitmap(&mut self, annot_key: &[u8], annot_val: &[u8]) -> Result<Bitmap>
+    where
+        Self: Sized,
+    {
+        read_pair_bitmap(self, annot_key, annot_val)
+    }
+
+    /// Write the pair-account bitmap at `addr`.
+    /// Default writes via `self.set_code()`; override to defer writes.
+    fn set_pair_bitmap(&mut self, addr: Address, bitmap: Bitmap) -> Result<()>
+    where
+        Self: Sized,
+    {
+        self.set_code(&addr, bitmap.to_bytes())
+    }
 }
 
 // ─── Op handlers ──────────────────────────────────────────────────────
@@ -926,10 +944,10 @@ fn insert_into_indexes<S: StateAdapter>(
     entity_id: u64,
     mode: Option<AnnotMode>,
 ) -> Result<()> {
-    let mut bitmap = read_pair_bitmap(state, annot_key, annot_val)?;
+    let mut bitmap = state.get_pair_bitmap(annot_key, annot_val)?;
     let was_empty = bitmap.is_empty();
     bitmap.insert(entity_id);
-    state.set_code(&pair_address(annot_key, annot_val), bitmap.to_bytes())?;
+    state.set_pair_bitmap(pair_address(annot_key, annot_val), bitmap)?;
     if let Some(mode) = mode {
         if was_empty {
             tier2_insert(state, annot_key, annot_val, mode)?;
@@ -945,14 +963,15 @@ fn remove_from_indexes<S: StateAdapter>(
     entity_id: u64,
     mode: Option<AnnotMode>,
 ) -> Result<()> {
-    let mut bitmap = read_pair_bitmap(state, annot_key, annot_val)?;
+    let mut bitmap = state.get_pair_bitmap(annot_key, annot_val)?;
     if bitmap.is_empty() {
         return Ok(());
     }
     bitmap.remove(entity_id);
-    state.set_code(&pair_address(annot_key, annot_val), bitmap.to_bytes())?;
+    let is_now_empty = bitmap.is_empty();
+    state.set_pair_bitmap(pair_address(annot_key, annot_val), bitmap)?;
     if let Some(mode) = mode {
-        if bitmap.is_empty() {
+        if is_now_empty {
             tier2_remove(state, annot_key, annot_val, mode)?;
         }
     }

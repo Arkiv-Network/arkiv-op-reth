@@ -24,7 +24,7 @@
 //!   op-reth's private `OpLocalPayloadAttributesBuilder`, required by
 //!   `DebugNode::local_payload_attributes_builder`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 // `revm` types come via `alloy_evm::revm` — that re-exports the matching
 // revm 38 line. The workspace also declares `revm 38.0.0` directly (used
@@ -82,6 +82,7 @@ use reth_primitives_traits::{NodePrimitives, SealedBlock, SealedHeader};
 
 use arkiv_genesis::ARKIV_ADDRESS;
 
+use crate::bitmap_cache::{BlockBitmapCache, flush_dirty_into_state};
 use crate::precompile::arkiv_precompile;
 
 // ─────────────────────────────────────────────────────────────────────
@@ -101,14 +102,6 @@ impl ArkivOpEvmFactory {
         Self::default()
     }
 
-    fn install<E>(&self, evm: &mut E)
-    where
-        E: Evm<Precompiles = PrecompilesMap>,
-    {
-        let precompile = arkiv_precompile();
-        evm.precompiles_mut()
-            .apply_precompile(&ARKIV_ADDRESS, |_existing| Some(precompile));
-    }
 }
 
 impl EvmFactory for ArkivOpEvmFactory {
@@ -132,8 +125,10 @@ impl EvmFactory for ArkivOpEvmFactory {
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
     ) -> Self::Evm<DB, NoOpInspector> {
         let mut evm = self.inner.create_evm(db, input);
-        self.install(&mut evm);
-        ArkivOpEvm { inner: evm }
+        let (precompile, cache) = arkiv_precompile();
+        evm.precompiles_mut()
+            .apply_precompile(&ARKIV_ADDRESS, |_existing| Some(precompile));
+        ArkivOpEvm { inner: evm, bitmap_cache: cache }
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -143,8 +138,10 @@ impl EvmFactory for ArkivOpEvmFactory {
         inspector: I,
     ) -> Self::Evm<DB, I> {
         let mut evm = self.inner.create_evm_with_inspector(db, input, inspector);
-        self.install(&mut evm);
-        ArkivOpEvm { inner: evm }
+        let (precompile, cache) = arkiv_precompile();
+        evm.precompiles_mut()
+            .apply_precompile(&ARKIV_ADDRESS, |_existing| Some(precompile));
+        ArkivOpEvm { inner: evm, bitmap_cache: cache }
     }
 }
 
@@ -188,6 +185,7 @@ impl PostExecEvmFactoryHooks for ArkivOpEvmFactory {
 
 pub struct ArkivOpEvm<DB: Database, I> {
     inner: OpEvm<DB, I, PrecompilesMap, OpTx>,
+    bitmap_cache: Arc<Mutex<BlockBitmapCache>>,
 }
 
 impl<DB, I> Evm for ArkivOpEvm<DB, I>
@@ -221,7 +219,9 @@ where
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
         let _span = tracing::debug_span!("evm_tx").entered();
-        self.inner.transact_raw(tx)
+        let mut result = self.inner.transact_raw(tx)?;
+        flush_dirty_into_state(&self.bitmap_cache, &mut result.state);
+        Ok(result)
     }
 
     fn transact_system_call(
