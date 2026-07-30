@@ -22,12 +22,35 @@ use crate::state_adapter::ReadOnlyStateAdapter;
 const DEFAULT_PAGE_SIZE: u64 = 100;
 const MAX_PAGE_SIZE: u64 = 200;
 
+/// Cap on the total stored entity bytes one `arkiv_query` page may
+/// resolve.
+///
+/// `MAX_PAGE_SIZE` bounds a page by entity *count*, which does not
+/// bound the response: payload size is limited only by the gas paid at
+/// write time, so 200 entities can be a few kilobytes or many
+/// megabytes. Unbounded pages produced two user-visible failures —
+/// oversized responses rejected before reaching the client, and `$all`
+/// queries timing out because the node resolved and RLP-decoded every
+/// entity in the page.
+///
+/// 4 MiB of stored bytes is roughly 8-9 MiB of JSON once payloads are
+/// hex-encoded, which stays inside typical proxy and client body
+/// limits. Callers page through the remainder with the returned
+/// `cursor`.
+const MAX_PAGE_BYTES: u64 = 4 * 1024 * 1024;
+
 #[rpc(server, namespace = "arkiv")]
 pub trait ArkivApi {
     /// Evaluate a query and return matching entities. Pagination is
     /// descending by entity ID (newest first). When more results
     /// remain, `cursor` in the response is the ID of the last entry —
     /// pass it back as `options.cursor` to fetch the next page.
+    ///
+    /// A page may contain fewer entities than `resultsPerPage`: pages
+    /// are also capped by a total-bytes budget (`MAX_PAGE_BYTES`), and
+    /// entities deleted between index read and resolve are skipped.
+    /// Treat a present `cursor` — not a full page — as the signal that
+    /// more results remain.
     #[method(name = "query")]
     async fn query(&self, q: String, options: Option<QueryOptions>) -> RpcResult<QueryResponse>;
 
@@ -240,6 +263,7 @@ fn run_query<P: StateProviderFactory>(
             .unwrap_or(DEFAULT_PAGE_SIZE)
             .clamp(1, MAX_PAGE_SIZE),
         cursor: parse_cursor(options.cursor.as_deref())?,
+        max_page_bytes: Some(MAX_PAGE_BYTES),
     };
     let Page {
         entries,

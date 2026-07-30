@@ -27,7 +27,7 @@ Local-only. Registered via the standard `extend_rpc_modules` hook.
 
 | Method | Returns |
 |---|---|
-| `arkiv_query(query, [options])` | Page of matching entities. Pagination is descending by entity ID. Options carry `atBlock`, `resultsPerPage`, `cursor`, and per-field `includeData` projection. |
+| `arkiv_query(query, [options])` | Page of matching entities. Pagination is descending by entity ID. Options carry `atBlock`, `resultsPerPage`, `cursor`, and per-field `includeData` projection. A page is capped by both entity count (`resultsPerPage`, max 200) and total entity bytes (`MAX_PAGE_BYTES`, 4 MiB), so it may be shorter than requested — a present `cursor`, not a full page, means more results remain. |
 | `arkiv_getEntityCount()` | Cardinality of the `$all` bitmap at head. |
 | `arkiv_getBlockTiming()` | Head block number, head block timestamp, and seconds since the parent block. |
 
@@ -85,7 +85,8 @@ Query: $contentType = "image/png" && tag = "approved"
 2. Derive pair_addr_2 = keccak256("arkiv.pair" || "tag"          || 0x00 || "approved")[:20].
 3. Read pair_addr_1.code → bitmap_1; pair_addr_2.code → bitmap_2.
 4. Deserialize both bitmaps; compute intersection in memory.
-5. Apply cursor / page-size limit.
+5. Apply cursor / page-size limit; stop early if the resolved entities
+   would exceed the page byte budget, returning a cursor instead.
 6. For each uint64_id in the result: read system.slot[keccak256("id_to_addr", id)] → entity_address.
 7. eth_getCode(entity_address) → decode RLP, project per includeData.
 ```
@@ -124,8 +125,8 @@ Query: price > 100 AND price < 500
      bitmap_i    = deserialise(eth_getCode(pair_addr_i))
 6. Union all bitmap_i → result bitmap.
 7. Compose with other sub-expression bitmaps via the standard
-   &&/||/NOT pipeline; apply cursor / page-size; resolve IDs to
-   entity addresses via the system account.
+   &&/||/NOT pipeline; apply cursor / page-size / page byte budget;
+   resolve IDs to entity addresses via the system account.
 ```
 
 Prefix-glob (`tag ~ "image/*"`) uses `ART.iter_prefix(prefix_bytes)`

@@ -161,6 +161,21 @@ pub struct PageParams {
     /// If `Some(c)`, only return IDs strictly less than `c`. Use the
     /// `next_cursor` from the previous page to walk through results.
     pub cursor: Option<u64>,
+    /// Optional cap on the total [`entity_size`] of one page. `None`
+    /// means `page_size` is the only bound.
+    ///
+    /// A page stops as soon as adding the next entity would exceed the
+    /// budget, and reports `next_cursor` so the caller can continue.
+    /// Entity count alone can't bound a page: payload size is limited
+    /// only by the gas paid at write time, so N entities may be
+    /// kilobytes or gigabytes. Without this, a `$all` page both
+    /// serializes an unbounded response and performs an unbounded
+    /// amount of state-read + RLP-decode work.
+    ///
+    /// A page always contains at least one entity, so an entity larger
+    /// than the whole budget is still returned rather than stalling
+    /// pagination forever.
+    pub max_page_bytes: Option<u64>,
 }
 
 /// One page of query results, ordered descending by entity ID
@@ -175,6 +190,34 @@ pub struct Page {
     pub next_cursor: Option<u64>,
 }
 
+/// Flat per-entity allowance for the fixed-width metadata every
+/// entity carries (key, owner, creator, expiry, two block numbers)
+/// plus JSON field names and punctuation. Keeps a page of many tiny
+/// entities bounded rather than only a page of large payloads.
+const ENTITY_FIXED_OVERHEAD: u64 = 512;
+
+/// Approximate size of one entity for [`PageParams::max_page_bytes`]
+/// accounting: variable-length content plus a flat overhead.
+///
+/// Deliberately measures *stored* bytes rather than serialized JSON
+/// bytes, so the bound is independent of the RPC layer's per-field
+/// projection. That is the conservative choice in both directions:
+/// hex-encoding a payload roughly doubles it on the wire, and
+/// `resolve_id` reads and RLP-decodes the whole entity regardless of
+/// which fields the caller asked for — so stored bytes is what
+/// actually predicts the node's workload.
+pub fn entity_size(entity: &EntityRlp) -> u64 {
+    let attributes: u64 = entity
+        .attributes
+        .iter()
+        .map(|a| (a.key.len() + a.value.len()) as u64)
+        .sum();
+    ENTITY_FIXED_OVERHEAD
+        .saturating_add(entity.payload.len() as u64)
+        .saturating_add(entity.content_type.len() as u64)
+        .saturating_add(attributes)
+}
+
 /// Parse → evaluate → paginate → resolve, in one call.
 ///
 /// This is the entry point the RPC layer (and any other caller that
@@ -185,6 +228,9 @@ pub struct Page {
 /// IDs that fail to resolve (e.g. entity tombstoned between the
 /// bitmap read and the resolve — possible under concurrent writes)
 /// are skipped silently and don't count toward `page_size`.
+///
+/// Pages are additionally bounded by [`PageParams::max_page_bytes`]
+/// when set.
 pub fn execute<S: StateAdapter>(state: &mut S, query: &str, params: PageParams) -> Result<Page> {
     eyre::ensure!(params.page_size > 0, "page_size must be > 0");
 
@@ -207,6 +253,7 @@ pub fn execute<S: StateAdapter>(state: &mut S, query: &str, params: PageParams) 
     let mut entries = Vec::with_capacity(page_size.min(ids.len()));
     let mut last_returned_id: Option<u64> = None;
     let mut has_more = false;
+    let mut used_bytes: u64 = 0;
 
     for &id in ids.iter().rev() {
         if entries.len() >= page_size {
@@ -214,6 +261,17 @@ pub fn execute<S: StateAdapter>(state: &mut S, query: &str, params: PageParams) 
             break;
         }
         if let Some(entity) = resolve_id(state, id)? {
+            // Stop before exceeding the byte budget, but never emit an
+            // empty page — an entity bigger than the whole budget must
+            // still be returned or the caller can never get past it.
+            if let Some(budget) = params.max_page_bytes {
+                let size = entity_size(&entity);
+                if !entries.is_empty() && used_bytes.saturating_add(size) > budget {
+                    has_more = true;
+                    break;
+                }
+                used_bytes = used_bytes.saturating_add(size);
+            }
             entries.push(entity);
             last_returned_id = Some(id);
         }
